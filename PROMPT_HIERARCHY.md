@@ -189,15 +189,7 @@ and asks the LLM a structured question.
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-**Code reference**: [`DMAOrchestrator.run_initial_dmas`](https://github.com/CIRISAI/CIRISAgent/blob/main/ciris_engine/logic/processors/support/dma_orchestrator.py) at the time of writing schedules **3 parallel** DMA tasks (`ethical_pdma`, `csdma`, `dsdma`) via `_create_dma_task` + `await`. `run_idma` is called sequentially after, with the initial 3 results as input. `run_action_selection` (ASPDMA) is called after IDMA. The conscience loop in [`recursive_processing.py`](https://github.com/CIRISAI/CIRISAgent/blob/main/ciris_engine/logic/processors/core/thought_processor/recursive_processing.py) re-runs ASPDMA (not the initial 3) when conscience fires.
-
-> **Open question for the website team**: a comment from the agent team
-> referred to "4 parallel DMA calls". The current code I'm reading shows
-> 3 parallel + IDMA-sequential. If a planned change extends the parallel
-> set to 4 (e.g. running IDMA in parallel with the initial three, or a
-> new DMA being added), the page architecture should reflect that
-> directly — file a note so we can update this section as soon as the
-> shape is final.
+**Code reference**: [`DMAOrchestrator.run_initial_dmas`](https://github.com/CIRISAI/CIRISAgent/blob/main/ciris_engine/logic/processors/support/dma_orchestrator.py) schedules **3 parallel** DMA tasks (`ethical_pdma`, `csdma`, `dsdma`) via `_create_dma_task` + `await`. The optional bounce gate is in `_maybe_bounce_dmas` (with `BOUNCE_PARALLELISM=3` per failing DMA). `run_idma` is called sequentially after the bounce with the initial 3 results as input — informational, never gates (per [commit `7534156dc`](https://github.com/CIRISAI/CIRISAgent/commit/7534156dc)). `run_action_selection` (ASPDMA) runs after IDMA. The conscience loop in [`recursive_processing.py`](https://github.com/CIRISAI/CIRISAgent/blob/main/ciris_engine/logic/processors/core/thought_processor/recursive_processing.py) re-runs ASPDMA only when conscience fires — the initial 3 + IDMA are NOT re-run on conscience retry.
 
 ⚠ **DMA prompts are a polyglot/localized hybrid.** Each DMA YAML has a localized
 scaffold (29 per-locale variants carrying the "operational tail" — output
