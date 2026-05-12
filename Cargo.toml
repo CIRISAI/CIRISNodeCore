@@ -24,11 +24,15 @@ crate-type = ["cdylib", "rlib"]
 # for the parts that already exist.
 ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v0.6.0", version = "0" }
 
-# Edge needs CIRISEdge#6 (MessageType enum expansion for the 8 new
-# federation-consensus wire types) before node-core can register typed
-# handlers. v0.1.1 is the current edge tag; node-core bumps when the
-# expansion lands.
-ciris-edge = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v0.1.1", version = "0" }
+# Edge v0.1.2 (2026-05-12) ships the 8 federation-consensus
+# MessageType variants from CIRISEdge#6 — ContributionSubmit, VoteCast,
+# ExpertiseAttestationPublish, ModerationEventPublish,
+# SlashingAttestationPublish, ReconsiderationRequest, DeferralRequest,
+# DeferralResponse — alongside persist v0.6.0 + verify v2.0.2.
+# Node-core registers handlers via
+# `edge.register_handler::<ContributionSubmit, _>(...)` etc. per
+# `FSD/SUBSTRATE_INTEGRATION.md` §3.
+ciris-edge = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v0.1.2", version = "0" }
 
 # Serde + canonicalization. Canonicalization itself routes through
 # persist's `Engine.canonicalize_envelope_for_signing` — see

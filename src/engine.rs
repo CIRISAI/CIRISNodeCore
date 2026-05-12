@@ -109,8 +109,13 @@ pub trait NodeCoreEngine: Send + Sync {
     /// existing `StewardSigner` interface.
     async fn steward_sign(&self, canonical_bytes: &[u8]) -> Result<crate::signature::HybridSignature>;
 
-    /// Canonicalize an envelope for signing. Routes through persist's
+    /// Canonicalize a JSON value for signing. Routes through persist's
     /// `Engine.canonicalize_envelope_for_signing` — node-core never
     /// re-implements canonicalization (CIRISPersist#7 closure / AV-5).
-    fn canonicalize<T: serde::Serialize + Send>(&self, value: &T) -> Result<Vec<u8>>;
+    ///
+    /// Concrete `&serde_json::Value` (not generic `T: Serialize`) so the
+    /// trait stays dyn-compatible. Callers `serde_json::to_value(&self)?`
+    /// at the boundary; the cost is one extra walk for the conversion,
+    /// negligible vs the canonicalization pass itself.
+    fn canonicalize(&self, value: &serde_json::Value) -> Result<Vec<u8>>;
 }

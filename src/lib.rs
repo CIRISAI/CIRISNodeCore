@@ -94,8 +94,10 @@ pub mod error;
 pub mod identity;
 pub mod ledger;
 pub mod payloads;
+pub mod service;
 pub mod signature;
 pub mod vote;
+pub mod wire;
 pub mod witness;
 
 pub use cell::Cell;
@@ -103,6 +105,7 @@ pub use contribution::{ContributionEnvelope, ContributionType, SubjectKind};
 pub use engine::NodeCoreEngine;
 pub use error::{Error, Result};
 pub use identity::ContributorId;
+pub use service::NodeCore;
 pub use signature::HybridSignature;
 pub use vote::{Score, Vote};
 pub use witness::WitnessSet;
