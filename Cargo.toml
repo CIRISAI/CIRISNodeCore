@@ -1,0 +1,69 @@
+[package]
+name = "ciris-node-core"
+version = "0.1.0-dev"
+edition = "2021"
+description = "Second-tier consensus runtime for the CIRIS federation: contributions, votes, expertise/credits ledgers, moderation, slashing, reconsideration"
+license = "AGPL-3.0-or-later"
+authors = ["CIRIS Team"]
+repository = "https://github.com/CIRISAI/CIRISNodeCore"
+
+[lib]
+name = "ciris_node_core"
+# `rlib` for the post-fold-into-agent trajectory (MISSION.md §1.4 lifecycle:
+# Spec → Impl → Deployed pilot → Deployed folded). `cdylib` so safety.ciris.ai
+# can consume via PyO3 during the pilot window.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Substrate. Persist exposes the federation-consensus typed-write + read
+# surfaces in Appendix A of FSD/CIRIS_PERSIST.md (closes CIRISPersist#30).
+# v0.6.0 publishes the contract; the typed methods (put_contribution,
+# cast_vote, ...) materialize at v0.6.x or v0.7.0 per Appendix A.5.
+# Until then this skeleton defines the trait surface locally in
+# `crate::engine` and consumes `StewardSigner` + `Journal` from v0.6.0
+# for the parts that already exist.
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v0.6.0", version = "0" }
+
+# Edge needs CIRISEdge#6 (MessageType enum expansion for the 8 new
+# federation-consensus wire types) before node-core can register typed
+# handlers. v0.1.1 is the current edge tag; node-core bumps when the
+# expansion lands.
+ciris-edge = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v0.1.1", version = "0" }
+
+# Serde + canonicalization. Canonicalization itself routes through
+# persist's `Engine.canonicalize_envelope_for_signing` — see
+# FSD/SUBSTRATE_INTEGRATION.md §3. Node-core never re-canonicalizes.
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Crypto. Ed25519 verification lives in edge/persist; node-core only
+# uses it for type signatures on its wire envelopes. ML-DSA-65 PQC
+# half of the hybrid signature is opaque to node-core (persist owns it).
+ed25519-dalek = { version = "2.1", features = ["std"] }
+base64 = "0.21"
+sha2 = "0.10"
+
+# Identifiers + time. ULID for `contribution_id`, `vote_id`, etc.
+# per SCHEMA.md §2.2.
+ulid = { version = "1.1", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Async + observability
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tracing = "0.1"
+
+# Error handling
+thiserror = "1.0"
+async-trait = "0.1"
+
+[dev-dependencies]
+proptest = "1.4"
+
+[features]
+default = []
+
+# PyO3 cdylib for safety.ciris.ai pilot integration during the
+# Spec → Impl → Deployed-pilot window of MISSION.md §1.4.
+# Pulled in by deployments that consume via Python; defaults off for
+# the post-fold-into-agent trajectory.
+# python = ["dep:pyo3"]  # uncomment when pyo3 dep + bindings land
