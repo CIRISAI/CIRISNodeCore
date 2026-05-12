@@ -7,8 +7,14 @@ truth-grounding via signed evidence, slashing, and reconsideration.
 The contract that `safety.ciris.ai` (the first pilot) builds against
 and that the eventual `ciris-node-core` Rust crate implements.
 
-**Status:** Spec. v1.0 mission + schema + four FSDs are in this repo;
-implementation work to come. Currently consumed in-tree by
+**Status:** Spec + v0.1.0-dev Rust crate skeleton. v1.0 mission +
+schema + four FSDs are in this repo, plus the substrate-integration
+FSD and a compiling crate skeleton at `src/` that publishes the wire
+types and the `NodeCoreEngine` trait mirroring
+[`CIRISPersist/FSD/CIRIS_PERSIST.md`](https://github.com/CIRISAI/CIRISPersist/blob/main/FSD/CIRIS_PERSIST.md)
+Appendix A. Behavior lands as substrate dependencies materialize
+(persist v0.6.x for typed-writes, edge with CIRISEdge#6 for
+`MessageType` dispatch). Currently consumed in-tree by
 [`CIRISAI/CIRISAgent`](https://github.com/CIRISAI/CIRISAgent)'s
 safety-battery CI loop (capture + interpret + signed artifacts).
 
@@ -47,6 +53,11 @@ safety-battery CI loop (capture + interpret + signed artifacts).
    results, and judgements programmatically. Stable GH Actions Artifacts
    API by tuple name. Sigstore verification recipe. 14-cell map.
    Adding-a-language recipe.
+7. **[`FSD/SUBSTRATE_INTEGRATION.md`](FSD/SUBSTRATE_INTEGRATION.md)** —
+   the substrate seam. Pairs with `CIRISPersist/FSD/CIRIS_PERSIST.md`
+   Appendix A: which `Engine` typed-writes node-core consumes, which
+   `MessageType` variants it registers (CIRISEdge#6), the verify /
+   canonicalize / sign discipline inherited from `ciris-lens-core`.
 
 ## TL;DR
 
