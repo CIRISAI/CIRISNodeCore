@@ -34,7 +34,7 @@
             │     DMA(s) with BOUNCE_PARALLELISM=3, take best.       │
             │                ▼                                       │
             │   Phase 3: IDMA sequentially (informational only)      │
-            │     Identity check — receives Phase 1+2 results.       │
+            │     Intuition check — receives Phase 1+2 results.      │
             │     Failures do NOT gate; consciences read fragility.  │
             │                ▼                                       │
             │   Phase 4: ASPDMA sequentially (action selection)      │
@@ -175,7 +175,8 @@ and asks the LLM a structured question.
 │    take highest-scoring alternative.                             │
 │                   │                                              │
 │  Phase 3: IDMA sequentially (informational — never gates)        │
-│    Identity check against the agent's accord, with the           │
+│    Intuition check, with the initial Phase 1 + bounce results    │
+│    as input. Lifts fragility / k_eff / phase signals that the    │
 │    initial-3 results as input.                                   │
 │                   │                                              │
 │  Phase 4: ASPDMA sequentially (action selection)                 │
@@ -221,7 +222,7 @@ Hindi, use Devanagari, use आप register".
 | 1 (parallel) | **PDMA** (Principal/Ethics) | [`pdma_ethical.yml`](https://github.com/CIRISAI/CIRISAgent/blob/main/ciris_engine/logic/dma/prompts/pdma_ethical.yml) | What does the ACCORD say about this situation? **PDMA framing is polyglot** (`polyglot/pdma_framing.txt`); the per-locale YAML wraps it. |
 | 1 (parallel) | **CSDMA** (Common Sense) | [`csdma_common_sense.yml`](https://github.com/CIRISAI/CIRISAgent/blob/main/ciris_engine/logic/dma/prompts/csdma_common_sense.yml) | Does this make sense given reasonable real-world expectations? |
 | 1 (parallel) | **DSDMA** (Domain-Specific) | [`dsdma_base.yml`](https://github.com/CIRISAI/CIRISAgent/blob/main/ciris_engine/logic/dma/prompts/dsdma_base.yml) | What does the agent's domain (per template's `boundary_domains`) say? |
-| 3 (sequential) | **IDMA** (Identity) | [`idma.yml`](https://github.com/CIRISAI/CIRISAgent/blob/main/ciris_engine/logic/dma/prompts/idma.yml) | Is this consistent with who the agent IS? **Informational** — failures don't block (see [commit `7534156dc`](https://github.com/CIRISAI/CIRISAgent/commit/7534156dc)). |
+| 3 (sequential) | **IDMA** (Intuition) | [`idma.yml`](https://github.com/CIRISAI/CIRISAgent/blob/main/ciris_engine/logic/dma/prompts/idma.yml) | What does the agent's read-of-the-situation intuit (fragility / k_eff / phase signals)? **Informational** — failures don't block (see [commit `7534156dc`](https://github.com/CIRISAI/CIRISAgent/commit/7534156dc)). |
 | 4 (sequential) | **ASPDMA** (Action Selection) | [`action_selection_pdma.yml`](https://github.com/CIRISAI/CIRISAgent/blob/main/ciris_engine/logic/dma/prompts/action_selection_pdma.yml) | Given everything upstream, which handler action (SPEAK / DEFER / PONDER / etc.) is right? Re-runs on conscience retry. |
 
 **Two context-specific ASPDMA variants** (only one of these fires per cycle):
