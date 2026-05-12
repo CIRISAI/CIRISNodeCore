@@ -339,14 +339,79 @@ that `prompt_edit`, `guide_edit`, `accord_edit`, and
 
 ### 4.7 `deferral_request`
 
-Per `MISSION.md` §3.3 / §5.1. Payload contains the consumer's query
-context and the cell to route within. (Out of scope for the safety
-pilot's initial cut — included here for schema completeness.)
+Per `MISSION.md` §3.3 / §5.1. Generalizes CIRISNode's existing WBD
+submit surface (MISSION.md §1.2 item 1). The consumer — a CIRIS agent
+or other client — asks the federation to route the request to
+contributors with non-zero Expertise standing in the named cell.
+
+Payload:
+
+```json
+{
+  "deferral_id": "def_01HX5...",
+  "cell": { "domain": "mental_health", "language": "am" },
+  "consumer_id": "<base64url Ed25519 — the requesting agent>",
+  "agent_task_id": "task_01HX...",
+  "title": "Stage-2 medication-name register check",
+  "context": "Agent observed user asking about Amharic medication terms in Stage 2; uncertain whether to use clinical or vernacular form.",
+  "response_format": "binary",
+  "deadline": "2026-05-12T18:00:00Z",
+  "routing_preferences": { "min_responders": 5, "max_responders": 9, "diversity": "jurisdictional" }
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `deferral_id` | ULID string | yes | Per §2.2 |
+| `cell` | Cell | yes | Expertise-granularity — `subject` field omitted per §2.5. The (domain, language) is the routing key per `MISSION.md` §3.3 step 1. Redundant with envelope `subject.{domain,language}`; MUST match. |
+| `consumer_id` | ContributorId | yes | Federation identity of the requesting agent/client |
+| `agent_task_id` | string | optional | Back-reference to the consumer's internal task ID. Preserves CIRISNode WBD's `agent_task_id` audit anchor (`cirisnode/schema.sql` `wbd_tasks.agent_task_id`) so consumers can cross-resolve the deferral against their own audit chain. |
+| `title` | string | yes | Short human label for routing UIs and aggregation grouping |
+| `context` | string | yes | The actual deferral content — what routed responders are asked to weigh in on |
+| `response_format` | enum | yes | `binary` (approve / reject), `categorical` (one of N options the consumer enumerates in an options field), `freeform` (text + optional score). Constrains the `verdict` shape of routed `deferral_response` Contributions. |
+| `deadline` | ISO timestamp | optional | Soft hint; the §3.3 aggregate MAY exclude responders that have not responded by this time. |
+| `routing_preferences` | object | optional | Consumer hints into §3.3 steps 3–4. Fields: `min_responders`, `max_responders` (default 5–9 per §3.3 step 4), `diversity` (`jurisdictional` / `organizational` / `none`). Crate policy MAY override. |
+
+Routing per `MISSION.md` §3.3 / §5.1: query Expertise ledger for
+non-zero standing in (domain, language), filter to Active tier (§3.8),
+apply diversity preferences, bound the routed set at the policy-tunable
+max. Witness set NOT required — `deferral_request` is a routine
+Contribution per §3.5. Misbehaving routed responders are caught
+downstream via `moderation_event` → `slashing_attestation`.
 
 ### 4.8 `deferral_response`
 
-Per `MISSION.md` §3.3. The routed contributor's signed response to a
-deferral. (Same scope note as 4.7.)
+Per `MISSION.md` §3.3 / §5.1. The routed contributor's signed response.
+Responses are aggregated per Primitive 7 directly (no separate `Vote`-on-
+response layer); each response carries its own weight per §5.2:
+`Credits(domain, language, subject='deferral_response') × expertise_multiplier × active_tier_multiplier`.
+
+Payload:
+
+```json
+{
+  "response_id": "defresp_01HX5...",
+  "deferral_id": "def_01HX5...",
+  "cell": { "domain": "mental_health", "language": "am" },
+  "responder_id": "<base64url Ed25519>",
+  "verdict": { "decision": "approve", "confidence": 0.8 },
+  "rationale": "Register choice is correct for Stage 2 disclosure; flag the medication name for the glossary."
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `response_id` | ULID string | yes | Per §2.2 |
+| `deferral_id` | ULID string | yes | MUST reference an open `deferral_request` to which this responder was routed |
+| `cell` | Cell | yes | MUST match the originating `deferral_request.cell` |
+| `responder_id` | ContributorId | yes | Federation identity. MUST appear in the routed set the crate selected per §3.3; out-of-set responses are rejected at append. |
+| `verdict` | object | yes | Shape constrained by the originating request's `response_format`. Mirrors §5.1 Vote `score` shape discrimination. |
+| `rationale` | string | yes | Free-text justification. Recorded in the audit chain per §5.1 step 8. |
+
+Witness set NOT required per §3.5. Truth-grounding signal per `MISSION.md`
+§1.6 is *"sustained substantive contribution by routed responders"* —
+Credits accrue to the responder when their verdict aligns with the
+eventually-grounded outcome (medium fidelity).
 
 ### 4.9 `wa_candidacy`
 
@@ -921,7 +986,7 @@ carries the updated canonical artifact.
 
 Contributions of any type that have not yet been promoted to
 canonical. They live on the federation audit chain (substrate:
-CIRISPersist for storage, CIRISBridge for transport, CIRISVerify for
+CIRISPersist for storage, CIRISEdge for transport, CIRISVerify for
 signatures). They are NOT in the CIRISAgent wheel; the agent runtime
 does not see them until they are promoted.
 
