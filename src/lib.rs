@@ -56,6 +56,7 @@
 
 pub mod payloads;
 pub mod service;
+pub mod sign;
 pub mod substrate;
 pub mod wire;
 
