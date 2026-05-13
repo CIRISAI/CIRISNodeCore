@@ -15,14 +15,17 @@ name = "ciris_node_core"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Substrate. Persist exposes the federation-consensus typed-write + read
-# surfaces in Appendix A of FSD/CIRIS_PERSIST.md (closes CIRISPersist#30).
-# v0.6.0 publishes the contract; the typed methods (put_contribution,
-# cast_vote, ...) materialize at v0.6.x or v0.7.0 per Appendix A.5.
-# Until then this skeleton defines the trait surface locally in
-# `crate::engine` and consumes `StewardSigner` + `Journal` from v0.6.0
-# for the parts that already exist.
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v0.6.0", version = "0" }
+# Substrate. Persist v0.7.0-α3 (commit 5f884a4) ships the
+# federation-consensus surface from Appendix A of FSD/CIRIS_PERSIST.md:
+# wire types (ContributionEnvelope, VoteEnvelope, ledger types, ...) +
+# `NodeCoreService` trait (8 typed-writes + 5 read clusters). Pinned by
+# rev rather than tag because v0.7.0 release is mid-flight (α4-α6 to
+# follow: PostgresBackend impl, Engine PyO3 wraps, release tag).
+#
+# Gated behind persist's `cirisnode` feature which transitively
+# requires `postgres` (the backend impl lands in α4 and reads from
+# the cirisnode.* PG schema established by V011).
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", rev = "5f884a4", version = "0", features = ["cirisnode"] }
 
 # Edge v0.1.2 (2026-05-12) ships the 8 federation-consensus
 # MessageType variants from CIRISEdge#6 — ContributionSubmit, VoteCast,

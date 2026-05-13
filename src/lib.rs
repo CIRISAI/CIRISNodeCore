@@ -96,6 +96,7 @@ pub mod ledger;
 pub mod payloads;
 pub mod service;
 pub mod signature;
+pub mod substrate;
 pub mod vote;
 pub mod wire;
 pub mod witness;
