@@ -1,112 +1,105 @@
 //! [`NodeCore`] service struct + typed-handler scaffolding.
 //!
-//! Two-layer shape:
-//!
-//! - **Public methods on [`NodeCore`]** (`submit_contribution`,
-//!   `record_vote`, `submit_deferral`, `record_deferral_response`,
-//!   `publish_expertise_attestation`, `publish_moderation_event`,
-//!   `publish_slashing_attestation`, `submit_reconsideration_request`)
-//!   are the testable surface. They take a verified body, talk to the
-//!   [`NodeCoreEngine`] substrate, return the typed Ack.
-//! - **`Handler<M>` impls** for each wire message type are thin
-//!   shells that call the corresponding public method and map errors.
-//!   Used by [`NodeCore::install_handlers`] to register against an
-//!   [`Edge`] instance.
+//! Generic over `E: NodeCoreService` because persist's trait uses
+//! RPITIT (`impl Future + Send`) which is not dyn-compatible — no
+//! `Arc<dyn NodeCoreService>`. Each `NodeCore<E>` instance is bound
+//! to a concrete substrate (persist's `Engine` in production; an
+//! in-memory mock in tests).
 //!
 //! # Wiring shape
 //!
 //! ```ignore
 //! use std::sync::Arc;
 //! use ciris_edge::Edge;
-//! use ciris_node_core::{NodeCore, NodeCoreEngine};
+//! use ciris_node_core::NodeCore;
 //!
-//! let engine: Arc<dyn NodeCoreEngine> = /* persist v0.6.x impl */;
+//! let engine: Arc<MyEngine> = /* impl NodeCoreService */;
 //! let node = Arc::new(NodeCore::new(engine));
 //! node.install_handlers(&edge).await?;
 //! edge.run().await?;
 //! ```
+//!
+//! # Two-layer surface
+//!
+//! - **Public methods on [`NodeCore`]** — testable surface. Take a
+//!   verified body (persist envelope), call the matching
+//!   `NodeCoreService` method, return the typed [`crate::wire`] Ack.
+//! - **`Handler<M>` impls** for each wire message type — thin shells
+//!   that unwrap the newtype, delegate to the matching public method,
+//!   map errors.
 
 use std::sync::Arc;
 
 use chrono::Utc;
 use ciris_edge::{Edge, EdgeError, Handler, HandlerContext, HandlerError};
 
-use crate::contribution::ContributionEnvelope;
-use crate::engine::NodeCoreEngine;
-use crate::error::{Error, Result};
-use crate::payloads::deferral::{DeferralRequest, DeferralResponse};
-use crate::payloads::expertise_attestation::ExpertiseAttestation;
-use crate::payloads::moderation_event::ModerationEvent;
-use crate::payloads::reconsideration::ReconsiderationRequest;
-use crate::payloads::slashing_attestation::SlashingAttestation;
-use crate::vote::Vote;
+use crate::substrate::{
+    ContributionEnvelope, ModerationEvent, NodeCoreService, ReconsiderationRequest,
+    SlashingAttestation, SubstrateError, VoteEnvelope,
+};
 use crate::wire::{
-    ContributionAck, DeferralResponseAck, DeferralRouting, ExpertiseAttestationAck,
+    self, ContributionAck, DeferralResponseAck, DeferralRouting, ExpertiseAttestationAck,
     ModerationEventAck, ReconsiderationRequestAck, SlashingAttestationAck, VoteAck,
 };
 
-/// Top-level service holding the substrate engine handle. One per
-/// host process. Public methods are the testable surface; the
-/// `Handler<M>` impls delegate to them.
-pub struct NodeCore {
-    engine: Arc<dyn NodeCoreEngine>,
+/// Top-level service. Holds the substrate engine handle; exposes the
+/// 8 wire-typed public methods (testable) + `install_handlers` for
+/// edge dispatch.
+pub struct NodeCore<E: NodeCoreService> {
+    engine: Arc<E>,
 }
 
-impl NodeCore {
-    /// Construct from a `NodeCoreEngine` implementation. In production
-    /// this is `ciris-persist v0.6.x`'s concrete `Engine` (once
-    /// Appendix A.2 typed methods materialize); in tests it's an
-    /// in-memory mock (`tests/support/MockEngine`).
-    pub fn new(engine: Arc<dyn NodeCoreEngine>) -> Self {
+impl<E: NodeCoreService> NodeCore<E> {
+    /// Construct from any `NodeCoreService` impl.
+    pub fn new(engine: Arc<E>) -> Self {
         Self { engine }
     }
 
-    /// Register all 8 v0.1.0-dev consensus handlers against an [`Edge`].
-    pub async fn install_handlers(self: Arc<Self>, edge: &Edge) -> std::result::Result<(), EdgeError> {
-        edge.register_handler::<ContributionEnvelope, _>(ContributionHandler(self.clone()))
-            .await?;
-        edge.register_handler::<Vote, _>(VoteHandler(self.clone()))
-            .await?;
-        edge.register_handler::<DeferralRequest, _>(DeferralRequestHandler(self.clone()))
-            .await?;
-        edge.register_handler::<DeferralResponse, _>(DeferralResponseHandler(self.clone()))
-            .await?;
-        edge.register_handler::<ExpertiseAttestation, _>(ExpertiseAttestationHandler(self.clone()))
-            .await?;
-        edge.register_handler::<ModerationEvent, _>(ModerationEventHandler(self.clone()))
-            .await?;
-        edge.register_handler::<SlashingAttestation, _>(SlashingAttestationHandler(self.clone()))
-            .await?;
-        edge.register_handler::<ReconsiderationRequest, _>(ReconsiderationRequestHandler(
-            self.clone(),
-        ))
-        .await?;
-        Ok(())
+    /// Borrow the substrate engine handle. Useful for direct
+    /// `list_contributions` / ledger reads outside the wire path.
+    pub fn engine(&self) -> &Arc<E> {
+        &self.engine
     }
 
     // ── Public service methods (testable) ────────────────────────────────
 
     /// Submit a verified [`ContributionEnvelope`] to the federation
-    /// audit chain. Discriminated by `envelope.contribution_type`;
-    /// witness-set + signature checks happen at the engine boundary.
+    /// audit chain. Discriminated downstream by `contribution_type`.
     pub async fn submit_contribution(
         &self,
         envelope: ContributionEnvelope,
-    ) -> Result<ContributionAck> {
-        let contribution_id = self.engine.put_contribution(envelope).await?;
+    ) -> Result<ContributionAck, SubstrateError> {
+        let id = envelope.contribution_id.clone();
+        self.engine.put_contribution(envelope).await?;
         Ok(ContributionAck {
-            contribution_id,
+            contribution_id: id,
             accepted_at: Utc::now(),
         })
     }
 
-    /// Record a verified [`Vote`] on a Contribution. Returns the
-    /// cast-time vote weight for sender display.
-    pub async fn record_vote(&self, vote: Vote) -> Result<VoteAck> {
-        let voter_id = vote.voter_id.clone();
-        let cell = vote.cell.clone();
-        let vote_id = self.engine.cast_vote(vote).await?;
-        let weight = self.engine.read_vote_weight(&voter_id, &cell).await?;
+    /// Record a verified [`VoteEnvelope`]. Returns the cast-time
+    /// weight so the sender can display it without a second read.
+    pub async fn record_vote(&self, envelope: VoteEnvelope) -> Result<VoteAck, SubstrateError> {
+        let vote_id = envelope.vote_id.clone();
+        let voter_id = envelope.voter_id.clone();
+        let domain = envelope.cell.domain.clone();
+        let language = envelope.cell.language.clone();
+        let subject = envelope.cell.subject.clone().unwrap_or_default();
+        self.engine.cast_vote(envelope).await?;
+        let weight = self
+            .engine
+            .read_vote_weight(&voter_id, &domain, &language, &subject)
+            .await?
+            .unwrap_or_else(|| crate::substrate::VoteWeight {
+                contributor_id: voter_id.clone(),
+                domain,
+                language,
+                subject,
+                credits: 0.0,
+                expertise_multiplier: 0.0,
+                active_tier_multiplier: 0.0,
+                weight: 0.0,
+            });
         Ok(VoteAck {
             vote_id,
             weight,
@@ -114,163 +107,190 @@ impl NodeCore {
         })
     }
 
-    /// Submit a [`DeferralRequest`]. Returns the routed-set per
-    /// `MISSION.md` §3.3 (Expertise-non-zero × Active tier ×
-    /// diversity preferences × bounded count).
-    pub async fn submit_deferral(&self, req: DeferralRequest) -> Result<DeferralRouting> {
-        let candidates = self
-            .engine
-            .routable_contributors(&req.cell.domain, &req.cell.language)
-            .await?;
+    /// Submit a Deferral request (a `ContributionEnvelope` with
+    /// `contribution_type = DeferralRequest`). Returns the routed-set
+    /// per `MISSION.md` §3.3. Persists the request as a Contribution
+    /// row alongside.
+    pub async fn submit_deferral(
+        &self,
+        envelope: ContributionEnvelope,
+    ) -> Result<DeferralRouting, SubstrateError> {
+        let deferral_id = envelope.contribution_id.clone();
+        let domain = envelope.subject.domain.clone();
+        let language = envelope.subject.language.clone();
 
-        let max = req
-            .routing_preferences
+        // Decode the policy payload to honor routing_preferences.
+        let payload: Option<crate::payloads::deferral::DeferralRequestPayload> =
+            serde_json::from_value(envelope.payload.clone()).ok();
+        let max = payload
             .as_ref()
+            .and_then(|p| p.routing_preferences.as_ref())
             .and_then(|r| r.max_responders)
             .unwrap_or(9) as usize;
-        let routed_responders = candidates.into_iter().take(max).collect();
+
+        self.engine.put_contribution(envelope).await?;
+        let candidates = self.engine.routable_contributors(&domain, &language).await?;
+        let routed_responders = candidates
+            .into_iter()
+            .take(max)
+            .map(|c| c.contributor_id)
+            .collect();
 
         Ok(DeferralRouting {
-            deferral_id: req.deferral_id,
+            deferral_id,
             routed_responders,
             accepted_at: Utc::now(),
         })
     }
 
-    /// Record a [`DeferralResponse`] for an open deferral. Engine
-    /// enforces `responder_id` is in the routed set per §3.3.
+    /// Record a Deferral response (a `ContributionEnvelope` with
+    /// `contribution_type = DeferralResponse`).
     pub async fn record_deferral_response(
         &self,
-        resp: DeferralResponse,
-    ) -> Result<DeferralResponseAck> {
-        let response_id = resp.response_id.clone();
-        // TODO(v0.1.0-cut): wrap `resp` in a `ContributionEnvelope`
-        // (signature via `engine.steward_sign`, witness_set=None per
-        // §3.5, submitted_at=Utc::now()) before calling
-        // `put_contribution`. The skeleton omits envelope construction
-        // pending the steward-signing scaffolding.
-        let _ = &self.engine;
+        envelope: ContributionEnvelope,
+    ) -> Result<DeferralResponseAck, SubstrateError> {
+        let response_id = envelope.contribution_id.clone();
+        self.engine.put_contribution(envelope).await?;
         Ok(DeferralResponseAck {
             response_id,
             accepted_at: Utc::now(),
         })
     }
 
-    /// Publish an [`ExpertiseAttestation`]. The engine enforces the
-    /// jump-threshold witness-set gate per `MISSION.md` §3.5; the Ack
-    /// surfaces whether the gate fired so the caller can show the
-    /// attester whether their attestation was high-stakes.
+    /// Publish an Expertise attestation (a `ContributionEnvelope`
+    /// with `contribution_type = ExpertiseAttestation`). The engine
+    /// enforces the jump-threshold witness-set gate per §3.5 / §3.7;
+    /// we surface `jump_threshold_triggered = true` when the envelope
+    /// carries a witness_set.
     pub async fn publish_expertise_attestation(
         &self,
-        att: ExpertiseAttestation,
-    ) -> Result<ExpertiseAttestationAck> {
-        // For v0.1.0-dev the handler routes through the generic
-        // `put_contribution` (after envelope construction lands).
-        // The jump-threshold determination is the engine's
-        // responsibility; we surface a stub `false` here pending that
-        // engine surface.
-        let _ = att;
-        let _ = &self.engine;
+        envelope: ContributionEnvelope,
+    ) -> Result<ExpertiseAttestationAck, SubstrateError> {
+        let contribution_id = envelope.contribution_id.clone();
+        let jump_threshold_triggered = envelope.witness_set.is_some();
+        self.engine.put_contribution(envelope).await?;
         Ok(ExpertiseAttestationAck {
-            contribution_id: "expatt_PENDING_v010_cut".into(),
+            contribution_id,
             accepted_at: Utc::now(),
-            jump_threshold_triggered: false,
+            jump_threshold_triggered,
         })
     }
 
-    /// Publish a [`ModerationEvent`]. Witness-set always required at
-    /// the envelope level per §3.5; engine enforces.
+    /// Publish a `ModerationEvent` (standalone row class, not a
+    /// Contribution). Witness-set always required at the envelope
+    /// level per §3.5; engine enforces.
     pub async fn publish_moderation_event(
         &self,
-        ev: ModerationEvent,
-    ) -> Result<ModerationEventAck> {
-        // TODO(v0.1.0-cut): wrap in envelope (witness_set required;
-        // engine enforces). For now, route through the dedicated
-        // put_moderation_event surface (Appendix A.2 row 5).
-        let cell = crate::cell::Cell::expertise("", ""); // pending: derive from target row's cell
-        self.engine
-            .update_credits_ledger(&ev.accuser_id, &cell, 0.0)
-            .await
-            .ok(); // no-op write probe; replaced by put_moderation_event when wired
+        envelope: ModerationEvent,
+    ) -> Result<ModerationEventAck, SubstrateError> {
+        let moderation_id = envelope.moderation_id.clone();
+        self.engine.put_moderation_event(envelope).await?;
         Ok(ModerationEventAck {
-            contribution_id: "modev_PENDING_v010_cut".into(),
+            moderation_id,
             accepted_at: Utc::now(),
         })
     }
 
-    /// Publish a [`SlashingAttestation`] (standalone row class — not a
-    /// Contribution). Engine validates multi-sig quorum + applies the
-    /// non-negative ledger floor per §10.
+    /// Publish a `SlashingAttestation`. Engine validates the multi-sig
+    /// quorum (recorded in payload) and applies the non-negative
+    /// ledger floor per §10.
     pub async fn publish_slashing_attestation(
         &self,
-        att: SlashingAttestation,
-    ) -> Result<SlashingAttestationAck> {
-        // TODO(v0.1.0-cut): route through `engine.put_slashing_attestation`
-        // (Appendix A.2 row 6). Stub return until that engine surface
-        // materializes.
-        let attestation_id = att.attestation_id.clone();
-        let _ = &self.engine;
+        envelope: SlashingAttestation,
+    ) -> Result<SlashingAttestationAck, SubstrateError> {
+        let slashing_id = envelope.slashing_id.clone();
+        self.engine.put_slashing_attestation(envelope).await?;
         Ok(SlashingAttestationAck {
-            attestation_id,
+            slashing_id,
             accepted_at: Utc::now(),
         })
     }
 
-    /// Submit a [`ReconsiderationRequest`]. Engine enforces the
-    /// recursion + time bounds per `MISSION.md` §3.9; violations
-    /// surface as [`Error::ReconsiderationBounds`].
+    /// Submit a `ReconsiderationRequest`. Engine enforces the
+    /// recursion + time bounds per `MISSION.md` §3.9; bound
+    /// violations surface as `SubstrateError::Conflict` or
+    /// `NotAuthorized`.
     pub async fn submit_reconsideration_request(
         &self,
-        req: ReconsiderationRequest,
-    ) -> Result<ReconsiderationRequestAck> {
-        // TODO(v0.1.0-cut): route through `engine.put_reconsideration_request`
-        // (Appendix A.2 row 7). Stub return until that engine surface
-        // materializes.
-        let _ = req;
-        let _ = &self.engine;
+        envelope: ReconsiderationRequest,
+    ) -> Result<ReconsiderationRequestAck, SubstrateError> {
+        let request_id = envelope.request_id.clone();
+        self.engine.put_reconsideration_request(envelope).await?;
         Ok(ReconsiderationRequestAck {
-            contribution_id: "recon_PENDING_v010_cut".into(),
+            request_id,
             accepted_at: Utc::now(),
         })
     }
 }
 
-// ── Handler impls (thin shells over the pub methods above) ───────────────
+impl<E: NodeCoreService + 'static> NodeCore<E> {
+    /// Register all 8 v0.1.0-dev consensus handlers against an [`Edge`].
+    pub async fn install_handlers(self: Arc<Self>, edge: &Edge) -> Result<(), EdgeError> {
+        edge.register_handler::<wire::ContributionSubmit, _>(ContributionHandler(self.clone()))
+            .await?;
+        edge.register_handler::<wire::VoteCast, _>(VoteHandler(self.clone()))
+            .await?;
+        edge.register_handler::<wire::DeferralRequest, _>(DeferralRequestHandler(self.clone()))
+            .await?;
+        edge.register_handler::<wire::DeferralResponse, _>(DeferralResponseHandler(self.clone()))
+            .await?;
+        edge.register_handler::<wire::ExpertiseAttestationPublish, _>(
+            ExpertiseAttestationHandler(self.clone()),
+        )
+        .await?;
+        edge.register_handler::<wire::ModerationEventPublish, _>(ModerationEventHandler(
+            self.clone(),
+        ))
+        .await?;
+        edge.register_handler::<wire::SlashingAttestationPublish, _>(SlashingAttestationHandler(
+            self.clone(),
+        ))
+        .await?;
+        edge.register_handler::<wire::ReconsiderationRequest, _>(ReconsiderationRequestHandler(
+            self.clone(),
+        ))
+        .await?;
+        Ok(())
+    }
+}
 
-fn map_engine_err(e: Error) -> HandlerError {
+// ── Handler shells ───────────────────────────────────────────────────────
+
+fn map_substrate_err(e: SubstrateError) -> HandlerError {
     match e {
-        Error::Schema(s) => HandlerError::SchemaInvalid(s),
-        Error::Signature(s) => HandlerError::SchemaInvalid(s),
-        Error::WitnessSet(s) => HandlerError::ApplicationRejected(s),
-        Error::LedgerInvariant(s) => HandlerError::ApplicationRejected(s),
-        Error::ReconsiderationBounds(s) => HandlerError::ApplicationRejected(s),
-        Error::Substrate(s) => HandlerError::Persist(s),
-        Error::Canonicalization(e) => HandlerError::SchemaInvalid(format!("canonicalize: {e}")),
+        SubstrateError::InvalidArgument(s) => HandlerError::SchemaInvalid(s),
+        SubstrateError::NotAuthorized(s) => HandlerError::ApplicationRejected(s),
+        SubstrateError::Signature(s) => HandlerError::SchemaInvalid(s),
+        SubstrateError::Conflict(s) => HandlerError::ApplicationRejected(s),
+        SubstrateError::NotFound(s) => HandlerError::ApplicationRejected(s),
+        SubstrateError::Backend(s) => HandlerError::Persist(s),
+        SubstrateError::NotImplemented(s) => HandlerError::Persist(format!("not implemented: {s}")),
+        SubstrateError::Internal(s) => HandlerError::Persist(s),
     }
 }
 
 macro_rules! impl_handler {
     ($Wrapper:ident, $Msg:ty, $Ack:ty, $method:ident) => {
-        struct $Wrapper(Arc<NodeCore>);
+        struct $Wrapper<E: NodeCoreService + 'static>(Arc<NodeCore<E>>);
 
         #[async_trait::async_trait]
-        impl Handler<$Msg> for $Wrapper {
+        impl<E: NodeCoreService + 'static> Handler<$Msg> for $Wrapper<E> {
             async fn handle(
                 &self,
                 msg: $Msg,
                 _ctx: HandlerContext,
-            ) -> std::result::Result<$Ack, HandlerError> {
-                self.0.$method(msg).await.map_err(map_engine_err)
+            ) -> Result<$Ack, HandlerError> {
+                self.0.$method(msg.0).await.map_err(map_substrate_err)
             }
         }
     };
 }
 
-impl_handler!(ContributionHandler, ContributionEnvelope, ContributionAck, submit_contribution);
-impl_handler!(VoteHandler, Vote, VoteAck, record_vote);
-impl_handler!(DeferralRequestHandler, DeferralRequest, DeferralRouting, submit_deferral);
-impl_handler!(DeferralResponseHandler, DeferralResponse, DeferralResponseAck, record_deferral_response);
-impl_handler!(ExpertiseAttestationHandler, ExpertiseAttestation, ExpertiseAttestationAck, publish_expertise_attestation);
-impl_handler!(ModerationEventHandler, ModerationEvent, ModerationEventAck, publish_moderation_event);
-impl_handler!(SlashingAttestationHandler, SlashingAttestation, SlashingAttestationAck, publish_slashing_attestation);
-impl_handler!(ReconsiderationRequestHandler, ReconsiderationRequest, ReconsiderationRequestAck, submit_reconsideration_request);
+impl_handler!(ContributionHandler, wire::ContributionSubmit, ContributionAck, submit_contribution);
+impl_handler!(VoteHandler, wire::VoteCast, VoteAck, record_vote);
+impl_handler!(DeferralRequestHandler, wire::DeferralRequest, DeferralRouting, submit_deferral);
+impl_handler!(DeferralResponseHandler, wire::DeferralResponse, DeferralResponseAck, record_deferral_response);
+impl_handler!(ExpertiseAttestationHandler, wire::ExpertiseAttestationPublish, ExpertiseAttestationAck, publish_expertise_attestation);
+impl_handler!(ModerationEventHandler, wire::ModerationEventPublish, ModerationEventAck, publish_moderation_event);
+impl_handler!(SlashingAttestationHandler, wire::SlashingAttestationPublish, SlashingAttestationAck, publish_slashing_attestation);
+impl_handler!(ReconsiderationRequestHandler, wire::ReconsiderationRequest, ReconsiderationRequestAck, submit_reconsideration_request);

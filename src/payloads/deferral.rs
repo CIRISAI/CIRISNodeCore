@@ -1,48 +1,47 @@
-//! Deferral payloads — SCHEMA.md §4.7 / §4.8.
+//! Deferral payloads — the policy-typed shapes that fill the
+//! `payload: serde_json::Value` field of persist's [`ContributionEnvelope`]
+//! when `contribution_type = DeferralRequest` or `DeferralResponse`.
 //!
-//! Generalizes CIRISNode's existing WBD submit/response surface per
-//! `MISSION.md` §1.2 item 1 / §1.6 / §3.3 / §5.1. Routing target
-//! selection happens via the Expertise ledger (non-zero standing in
-//! `(domain, language)`); aggregation is per Primitive 7. The truth-
-//! grounding signal is "sustained substantive contribution by routed
-//! responders" (`MISSION.md` §1.6, medium fidelity).
+//! Envelope-level fields (id, author, cell, signature, timestamps)
+//! live on persist's `ContributionEnvelope`; everything in this module
+//! is the payload-only "policy" data.
+//!
+//! Per `MISSION.md` §1.6 / §3.3 / §5.1 — generalizes CIRISNode's WBD
+//! submit + response surface. Truth-grounding signal: sustained
+//! substantive contribution by routed responders.
+//!
+//! [`ContributionEnvelope`]: ciris_persist::cirisnode::types::ContributionEnvelope
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::cell::Cell;
-use crate::identity::ContributorId;
-
-/// Expected response shape for a deferral — pins the `verdict` discriminator
-/// on `DeferralResponse` per SCHEMA.md §4.7's `response_format` field.
+/// Expected response shape for a deferral. Constrains the `verdict`
+/// discriminator on [`DeferralResponsePayload`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseFormat {
-    /// Approve / reject. Verdict carries `{"decision": "approve"|"reject", ...}`.
+    /// Approve / reject. Verdict: `{"decision": "approve"|"reject", ...}`.
     Binary,
-    /// One of N categorical options enumerated by the consumer. Consumer-
-    /// provided options vector lives in `routing_preferences` for now;
-    /// promoted to a top-level field if the pattern is used widely.
+    /// One of N categorical options enumerated by the consumer.
     Categorical,
     /// Free-form text + optional numeric score.
     Freeform,
 }
 
-/// Diversity preference for routing per SCHEMA.md §4.7 `routing_preferences`.
+/// Diversity preference for routing per `MISSION.md` §3.3 step 3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiversityPolicy {
-    /// Bias routing across distinct jurisdictions (per contributor
-    /// metadata in the federation directory).
+    /// Bias routing across distinct jurisdictions.
     Jurisdictional,
-    /// Bias routing across distinct organizations.
+    /// Bias routing across distinct operators.
     Organizational,
-    /// No diversity preference; route purely by Expertise + Active tier.
+    /// No diversity preference; route by Expertise + Active tier only.
     None,
 }
 
-/// Routing preferences — consumer hints into `MISSION.md` §3.3 steps 3–4.
-/// Crate policy MAY override.
+/// Consumer hints into `MISSION.md` §3.3 steps 3-4. Crate policy MAY
+/// override.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutingPreferences {
     /// Minimum routed responders. Default 5 per §3.3 step 4.
@@ -56,56 +55,54 @@ pub struct RoutingPreferences {
     pub diversity: Option<DiversityPolicy>,
 }
 
-/// `deferral_request` payload per SCHEMA.md §4.7.
+/// Payload for a `deferral_request` Contribution.
+///
+/// Envelope-level fields:
+/// - `contribution_id` (= deferral_id)
+/// - `author_id` (= consumer_id — the requesting agent)
+/// - `subject.{domain, language}` (Expertise-granularity routing key,
+///   `subject` field is `None`)
+/// - `signature`, `submitted_at`
+///
+/// Everything below lives in the envelope's `payload` Value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeferralRequest {
-    /// ULID identifier per §2.2.
-    pub deferral_id: String,
-    /// Expertise-granularity cell — `subject` field MUST be `None`.
-    /// Redundant with envelope `subject.{domain,language}`; MUST match.
-    pub cell: Cell,
-    /// Requesting agent's federation identity.
-    pub consumer_id: ContributorId,
-    /// Optional back-reference to the consumer's internal task ID.
-    /// Preserves CIRISNode WBD's `agent_task_id` audit anchor.
+pub struct DeferralRequestPayload {
+    /// Back-reference to the consumer's internal task id. Preserves
+    /// CIRISNode WBD's `agent_task_id` audit anchor across the
+    /// federation cycle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_task_id: Option<String>,
-    /// Short human label for routing UIs and aggregation grouping.
+    /// Short human label for routing UIs.
     pub title: String,
-    /// The actual deferral content — what routed responders are asked to
-    /// weigh in on.
+    /// The deferral content — what routed responders weigh in on.
     pub context: String,
     /// Constrains the `verdict` shape of routed responses.
     pub response_format: ResponseFormat,
-    /// Soft hint; the §3.3 aggregate MAY exclude responders that have
-    /// not responded by this time.
+    /// Soft hint; routing engine MAY exclude responders that haven't
+    /// responded by this time when computing the §3.3 aggregate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline: Option<DateTime<Utc>>,
-    /// Consumer hints into §3.3 steps 3–4.
+    /// Routing hints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_preferences: Option<RoutingPreferences>,
 }
 
-/// `deferral_response` payload per SCHEMA.md §4.8.
+/// Payload for a `deferral_response` Contribution.
 ///
-/// Routed responses are aggregated per Primitive 7 directly (no separate
-/// `Vote`-on-response layer); each response carries its own weight per
-/// §5.2: `Credits(domain, language, subject='deferral_response') ×
-/// expertise_multiplier × active_tier_multiplier`.
+/// Envelope-level fields:
+/// - `contribution_id` (= response_id)
+/// - `author_id` (= responder_id — MUST appear in the routed set the
+///   crate selected for the originating deferral; engine enforces)
+/// - `subject` (matches the originating deferral's cell)
+/// - `signature`, `submitted_at`
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeferralResponse {
-    /// ULID identifier per §2.2.
-    pub response_id: String,
-    /// The originating `deferral_request` being answered.
+pub struct DeferralResponsePayload {
+    /// Refers to the originating `deferral_request` envelope's
+    /// `contribution_id`.
     pub deferral_id: String,
-    /// MUST match the originating `deferral_request.cell`.
-    pub cell: Cell,
-    /// Responder's federation identity. MUST appear in the routed set the
-    /// crate selected per §3.3; out-of-set responses are rejected at append.
-    pub responder_id: ContributorId,
     /// Shape constrained by the originating request's `response_format`.
     pub verdict: serde_json::Value,
-    /// Free-text justification. Recorded in the audit chain per §5.1 step 8.
+    /// Free-text justification. Recorded on the audit chain per §5.1 step 8.
     pub rationale: String,
 }
 
@@ -114,11 +111,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn deferral_request_round_trip() {
-        let req = DeferralRequest {
-            deferral_id: "def_01HX5".into(),
-            cell: Cell::expertise("mental_health", "am"),
-            consumer_id: ContributorId::new("authorpubkey"),
+    fn response_format_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&ResponseFormat::Binary).unwrap(),
+            r#""binary""#
+        );
+    }
+
+    #[test]
+    fn request_payload_round_trip() {
+        let p = DeferralRequestPayload {
             agent_task_id: Some("task_01HX".into()),
             title: "Stage-2 register check".into(),
             context: "Agent observed user asking about Amharic medication terms".into(),
@@ -130,10 +132,8 @@ mod tests {
                 diversity: Some(DiversityPolicy::Jurisdictional),
             }),
         };
-        let json = serde_json::to_string(&req).unwrap();
-        assert!(json.contains(r#""response_format":"binary""#));
-        assert!(json.contains(r#""diversity":"jurisdictional""#));
-        let back: DeferralRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.deferral_id, req.deferral_id);
+        let json = serde_json::to_string(&p).unwrap();
+        let back: DeferralRequestPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.title, p.title);
     }
 }

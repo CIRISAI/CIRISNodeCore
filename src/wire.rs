@@ -1,43 +1,58 @@
-//! Edge wire contract — `impl Message` for node-core's body types.
+//! Edge wire-dispatch newtypes for the 8 federation-consensus
+//! `MessageType` variants (CIRISEdge v0.1.2+).
 //!
-//! Closes CIRISEdge#6 from the consumer side. Edge v0.1.2 introduced
-//! 8 federation-consensus `MessageType` variants; node-core owns the
-//! body structs and points each back to its variant via the
-//! `ciris_edge::Message` trait.
+//! Each newtype is `#[serde(transparent)]` so JSON wire-encoding is
+//! identical to persist's underlying envelope type — the wrapper
+//! exists solely to satisfy Rust's orphan rule for `impl Message`
+//! (both `ciris_edge::Message` and persist's envelope types live in
+//! foreign crates).
 //!
-//! All federation-consensus messages ship durable+requires_ack with
-//! the [`DURABLE_CONSENSUS`] policy below. The values are policy-tunable
-//! per deployment; the constants here are the v0.1.0-dev defaults.
+//! All 8 messages ship under [`DURABLE_CONSENSUS`] delivery policy
+//! (`requires_ack=true`, `max_attempts=6`, `ttl=7d`, `ack_timeout=2d`).
+//! Policy-tunable per deployment; constants here are v0.1.0-dev defaults.
+//!
+//! Per-variant body type:
+//!
+//! | MessageType variant | Body type (persist envelope) |
+//! |---|---|
+//! | `ContributionSubmit` | `ContributionEnvelope` (generic — any `contribution_type`) |
+//! | `VoteCast` | `VoteEnvelope` |
+//! | `DeferralRequest` | `ContributionEnvelope` (type=DeferralRequest) |
+//! | `DeferralResponse` | `ContributionEnvelope` (type=DeferralResponse) |
+//! | `ExpertiseAttestationPublish` | `ContributionEnvelope` (type=ExpertiseAttestation) |
+//! | `ModerationEventPublish` | `ModerationEvent` (standalone row class) |
+//! | `SlashingAttestationPublish` | `SlashingAttestation` (standalone) |
+//! | `ReconsiderationRequest` | `ReconsiderationRequest` (standalone) |
+//!
+//! Per-variant Ack response shape:
+//!
+//! | Variant | Ack type | What it carries |
+//! |---|---|---|
+//! | `ContributionSubmit` | [`ContributionAck`] | `contribution_id`, `accepted_at` |
+//! | `VoteCast` | [`VoteAck`] | cast-time [`VoteWeight`] for sender display |
+//! | `DeferralRequest` | [`DeferralRouting`] | routed-set per §3.3 |
+//! | `DeferralResponse` | [`DeferralResponseAck`] | `response_id`, `accepted_at` |
+//! | `ExpertiseAttestationPublish` | [`ExpertiseAttestationAck`] | + `jump_threshold_triggered` |
+//! | `ModerationEventPublish` | [`ModerationEventAck`] | `moderation_id`, `accepted_at` |
+//! | `SlashingAttestationPublish` | [`SlashingAttestationAck`] | `slashing_id`, `accepted_at` |
+//! | `ReconsiderationRequest` | [`ReconsiderationRequestAck`] | `request_id`, `accepted_at` |
 
 use chrono::{DateTime, Utc};
 use ciris_edge::{Delivery, Message, MessageType};
 use serde::{Deserialize, Serialize};
 
-use crate::contribution::ContributionEnvelope;
-use crate::identity::ContributorId;
-use crate::ledger::VoteWeight;
-use crate::payloads::deferral::{DeferralRequest, DeferralResponse};
-use crate::payloads::expertise_attestation::ExpertiseAttestation;
-use crate::payloads::moderation_event::ModerationEvent;
-use crate::payloads::reconsideration::ReconsiderationRequest;
-use crate::payloads::slashing_attestation::SlashingAttestation;
-use crate::vote::Vote;
+use crate::substrate::{
+    ContributionEnvelope as PContributionEnvelope, ModerationEvent as PModerationEvent,
+    ReconsiderationRequest as PReconsiderationRequest, SlashingAttestation as PSlashingAttestation,
+    VoteEnvelope as PVoteEnvelope, VoteWeight,
+};
 
 // ── Delivery policy ──────────────────────────────────────────────────────
 
 const DAY_SECONDS: u64 = 86_400;
 
-/// Default durable-delivery policy for federation-consensus messages.
-/// All 8 CIRISEdge#6 variants ship under this profile.
-///
-/// - `requires_ack: true` — receiver signs + returns an Ack envelope
-///   before the row transitions to delivered. Aligns with the
-///   audit-chain story: consensus messages always have an ACK trail.
-/// - `max_attempts: 6` — bounded retry; abandons with
-///   `abandoned_reason='max_attempts'` after the sixth try.
-/// - `ttl_seconds: 7 days` — federation timescale, not hot-path.
-/// - `ack_timeout_seconds: 2 days` — generous so deferral responders
-///   on slow links (Reticulum / LoRa Phase 3) have time to respond.
+/// Default durable-delivery policy for the 8 federation-consensus
+/// wire types. Policy-tunable per deployment.
 pub const DURABLE_CONSENSUS: Delivery = Delivery::Durable {
     requires_ack: true,
     max_attempts: 6,
@@ -45,48 +60,92 @@ pub const DURABLE_CONSENSUS: Delivery = Delivery::Durable {
     ack_timeout_seconds: Some(2 * DAY_SECONDS),
 };
 
-// ── Response (ACK) types ─────────────────────────────────────────────────
+// ── Wire newtype wrappers ────────────────────────────────────────────────
 
-/// Receiver's ACK to a `ContributionSubmit`. Returned by the typed
-/// handler post-`engine.put_contribution`.
+/// Wire message — generic Contribution submit. Body is persist's
+/// `ContributionEnvelope` with any `contribution_type`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ContributionSubmit(pub PContributionEnvelope);
+
+/// Wire message — Vote cast. Body is persist's `VoteEnvelope`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct VoteCast(pub PVoteEnvelope);
+
+/// Wire message — Deferral request (type-specific dispatch alongside
+/// `ContributionSubmit`). Body MUST have
+/// `contribution_type = DeferralRequest`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DeferralRequest(pub PContributionEnvelope);
+
+/// Wire message — Deferral response. Body MUST have
+/// `contribution_type = DeferralResponse`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DeferralResponse(pub PContributionEnvelope);
+
+/// Wire message — Expertise attestation. Body MUST have
+/// `contribution_type = ExpertiseAttestation`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ExpertiseAttestationPublish(pub PContributionEnvelope);
+
+/// Wire message — Moderation event publication. Body is persist's
+/// standalone `ModerationEvent` envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ModerationEventPublish(pub PModerationEvent);
+
+/// Wire message — Slashing attestation publication. Body is persist's
+/// standalone `SlashingAttestation` envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SlashingAttestationPublish(pub PSlashingAttestation);
+
+/// Wire message — Reconsideration request. Body is persist's
+/// standalone `ReconsiderationRequest` envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ReconsiderationRequest(pub PReconsiderationRequest);
+
+// ── Ack response types ───────────────────────────────────────────────────
+
+/// Ack for `ContributionSubmit` / `DeferralResponse`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContributionAck {
-    /// Persisted contribution id (may equal the envelope's id, or wrap it).
+    /// Persisted contribution id (echoes `envelope.contribution_id`).
     pub contribution_id: String,
     /// When persist accepted the write.
     pub accepted_at: DateTime<Utc>,
 }
 
-/// Receiver's ACK to a `VoteCast`. Carries the cast-time vote weight
-/// so the sender can display "your vote counted as W" without a
-/// second round-trip.
+/// Ack for `VoteCast`. Carries cast-time weight so the sender can
+/// display "your vote counted as W" without a second round-trip.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoteAck {
-    /// Persisted vote id.
+    /// Persisted vote id (echoes `envelope.vote_id`).
     pub vote_id: String,
-    /// `Credits × expertise_multiplier × active_tier_multiplier` at
-    /// cast time. Snapshot value; the aggregate recomputes on each
-    /// downstream read per `MISSION.md` §3.4.
+    /// Weight at cast time per `SCHEMA.md` §5.2.
     pub weight: VoteWeight,
     /// When persist accepted the cast.
     pub recorded_at: DateTime<Utc>,
 }
 
-/// Receiver's ACK to a `DeferralRequest`. Returns the routed-set so
-/// the consumer (CIRIS agent) knows who's being asked.
+/// Ack for `DeferralRequest`. Returns the routed-set per
+/// `MISSION.md` §3.3 so the consumer knows who's being asked.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeferralRouting {
-    /// Echo of the request's `deferral_id`.
+    /// Echo of the request's `contribution_id`.
     pub deferral_id: String,
-    /// Federation identities selected per `MISSION.md` §3.3 (non-zero
-    /// Expertise × Active tier × diversity policy × bounded count).
-    pub routed_responders: Vec<ContributorId>,
+    /// Federation identities selected per §3.3.
+    pub routed_responders: Vec<String>,
     /// When persist accepted the request.
     pub accepted_at: DateTime<Utc>,
 }
 
-/// Receiver's ACK to a `DeferralResponse`. Confirms the response was
-/// accepted into the per-deferral aggregate.
+/// Ack for `DeferralResponse`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeferralResponseAck {
     /// Persisted response id.
@@ -95,69 +154,54 @@ pub struct DeferralResponseAck {
     pub accepted_at: DateTime<Utc>,
 }
 
-/// Receiver's ACK to an `ExpertiseAttestationPublish`. Echoes the
-/// persisted contribution id; the standing-jump effect on the target's
-/// Expertise ledger is observable via `engine.get_expertise_ledger`.
+/// Ack for `ExpertiseAttestationPublish`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExpertiseAttestationAck {
-    /// Persisted contribution id (the attestation is recorded as a
-    /// Contribution row per SCHEMA.md §3.1).
+    /// Persisted contribution id.
     pub contribution_id: String,
     /// When persist accepted the attestation.
     pub accepted_at: DateTime<Utc>,
     /// Whether this attestation triggered the cell's jump-threshold
-    /// witness-set gate per `MISSION.md` §3.7. If `true`, the envelope's
-    /// `witness_set` field was validated; if `false`, the attestation
-    /// was below threshold and witness-free.
+    /// witness-set gate per `MISSION.md` §3.7.
     pub jump_threshold_triggered: bool,
 }
 
-/// Receiver's ACK to a `ModerationEventPublish`. Carries the
-/// moderation-event id and a placeholder for the eventual
-/// SlashingAttestation cross-reference (filled when the quorum
-/// adjudication completes downstream).
+/// Ack for `ModerationEventPublish`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModerationEventAck {
-    /// Persisted contribution id (the moderation event is recorded as
-    /// a Contribution row per SCHEMA.md §3.1).
-    pub contribution_id: String,
+    /// Persisted moderation id (echoes `envelope.moderation_id`).
+    pub moderation_id: String,
     /// When persist accepted the filing.
     pub accepted_at: DateTime<Utc>,
 }
 
-/// Receiver's ACK to a `SlashingAttestationPublish`. SlashingAttestation
-/// is a standalone row class (not a Contribution); the persisted id is
-/// distinct from the originating moderation event's id.
+/// Ack for `SlashingAttestationPublish`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlashingAttestationAck {
-    /// Persisted attestation id (the row's identifier in the
-    /// `slashing_attestations` table per CIRISPersist Appendix A.2 row 6).
-    pub attestation_id: String,
+    /// Persisted attestation id (echoes `envelope.slashing_id`).
+    pub slashing_id: String,
     /// When persist accepted the attestation.
     pub accepted_at: DateTime<Utc>,
 }
 
-/// Receiver's ACK to a `ReconsiderationRequest`. Confirms the request
-/// passed the recursion + time bounds and was accepted onto the audit
-/// chain; the fresh-quorum adjudication outcome arrives later as a
-/// separate `ReconsiderationAttestation` row (v0.1.0 cut+ work).
+/// Ack for `ReconsiderationRequest`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReconsiderationRequestAck {
-    /// Persisted contribution id.
-    pub contribution_id: String,
+    /// Persisted request id (echoes `envelope.request_id`).
+    pub request_id: String,
     /// When persist accepted the request.
     pub accepted_at: DateTime<Utc>,
 }
 
-// ── Message impls (the wire contract) ────────────────────────────────────
+// ── Message impls ────────────────────────────────────────────────────────
 
-impl Message for ContributionEnvelope {
+impl Message for ContributionSubmit {
     const TYPE: MessageType = MessageType::ContributionSubmit;
     const DELIVERY: Delivery = DURABLE_CONSENSUS;
     type Response = ContributionAck;
 }
 
-impl Message for Vote {
+impl Message for VoteCast {
     const TYPE: MessageType = MessageType::VoteCast;
     const DELIVERY: Delivery = DURABLE_CONSENSUS;
     type Response = VoteAck;
@@ -175,19 +219,19 @@ impl Message for DeferralResponse {
     type Response = DeferralResponseAck;
 }
 
-impl Message for ExpertiseAttestation {
+impl Message for ExpertiseAttestationPublish {
     const TYPE: MessageType = MessageType::ExpertiseAttestationPublish;
     const DELIVERY: Delivery = DURABLE_CONSENSUS;
     type Response = ExpertiseAttestationAck;
 }
 
-impl Message for ModerationEvent {
+impl Message for ModerationEventPublish {
     const TYPE: MessageType = MessageType::ModerationEventPublish;
     const DELIVERY: Delivery = DURABLE_CONSENSUS;
     type Response = ModerationEventAck;
 }
 
-impl Message for SlashingAttestation {
+impl Message for SlashingAttestationPublish {
     const TYPE: MessageType = MessageType::SlashingAttestationPublish;
     const DELIVERY: Delivery = DURABLE_CONSENSUS;
     type Response = SlashingAttestationAck;

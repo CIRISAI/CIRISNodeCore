@@ -1,36 +1,30 @@
-//! Typed payloads per SCHEMA.md §4 and §8-§9.
+//! Typed policy payloads for the persist envelope shapes.
 //!
-//! The Contribution envelope (`crate::contribution::ContributionEnvelope`)
-//! carries `payload: serde_json::Value`. These typed structs are what
-//! that JSON deserializes into, discriminated by the envelope's
-//! `contribution_type` + `subject.subject_kind`.
+//! Persist's wire envelopes (`ContributionEnvelope`, `ModerationEvent`,
+//! `SlashingAttestation`, `ReconsiderationRequest`) carry the
+//! per-row-class identity + signature + audit timestamps + an opaque
+//! `payload: serde_json::Value` field. The types in this module are
+//! the **policy schemas** for that Value field — typed enums and
+//! discriminators that node-core owns as the consensus-layer policy
+//! authority.
 //!
-//! Standalone (non-Contribution) attestation row classes — currently
-//! [`slashing_attestation::SlashingAttestation`] — live alongside the
-//! payloads since they share the typed-wire dispatch shape but are
-//! written to their own persist tables via dedicated `NodeCoreEngine`
-//! methods (Appendix A.2 rows 6 / 8).
+//! Persist is the substrate, not the policy: it doesn't care what's
+//! in `payload` as long as the envelope verifies. Node-core defines
+//! what `payload` means per `contribution_type`.
 //!
 //! v0.1.0-dev coverage:
 //!
-//! - §4.7 [`deferral::DeferralRequest`]
-//! - §4.8 [`deferral::DeferralResponse`]
-//! - §4.10 / §7 [`expertise_attestation::ExpertiseAttestation`]
-//! - §4.11 / §8 [`moderation_event::ModerationEvent`]
-//! - §8 [`slashing_attestation::SlashingAttestation`] (standalone)
-//! - §4.12 / §9 [`reconsideration::ReconsiderationRequest`]
+//! - §4.7  [`deferral::DeferralRequestPayload`]
+//! - §4.8  [`deferral::DeferralResponsePayload`]
+//! - §4.10 [`expertise_attestation::ExpertiseAttestationPayload`]
+//! - §4.11 [`moderation_event::ModerationEventPayload`]
+//! - §8    [`slashing_attestation::SlashingAttestationPayload`]
+//! - §4.12 [`reconsideration::ReconsiderationRequestPayload`]
 //!
-//! Remaining (covered by `serde_json::Value` in the envelope payload
-//! field for v0.1.0-dev; typed structs land in v0.1.0 cut):
-//!
-//! - §4.1 `arc_question`
-//! - §4.2 `proposed_battery`
-//! - §4.3 `prompt_edit`
-//! - §4.4 `guide_edit`
-//! - §4.5 `accord_edit`
-//! - §4.6 `failure_pattern` (ticket)
-//! - §4.9 `wa_candidacy`
-//! - §9 `ReconsiderationAttestation` (the quorum-issued outcome row)
+//! Pending typed payloads (Value is the only option today):
+//! `arc_question` §4.1, `proposed_battery` §4.2, `prompt_edit` §4.3,
+//! `guide_edit` §4.4, `accord_edit` §4.5, `failure_pattern` §4.6,
+//! `wa_candidacy` §4.9, `ReconsiderationAttestation` §9.
 
 pub mod deferral;
 pub mod expertise_attestation;

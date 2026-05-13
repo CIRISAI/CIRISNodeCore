@@ -1,64 +1,56 @@
-//! In-memory `MockEngine` — implements [`NodeCoreEngine`] for tests.
+//! In-memory `MockEngine` — implements persist's
+//! [`NodeCoreService`] (v0.7.4) for handler tests.
 //!
-//! Closure of FSD/SUBSTRATE_INTEGRATION.md OQ-3 ("tests/support/ in this
-//! crate; promote to a separate crate only when downstream consumers
-//! want it"). Lives in `tests/support/` so each integration test file
-//! at the top of `tests/` can include it via `mod support;`.
+//! Uses RPITIT (`impl Future + Send`) per persist's trait — no
+//! `async_trait` dep. Single `Mutex<MockState>` for write-set
+//! inspection. Fixture setters pre-load read views; inspectors
+//! return clones of recorded writes.
 //!
-//! Discipline:
-//!
-//! - **Records writes verbatim.** Each typed-write method appends to an
-//!   internal Vec; the persisted id returned is a deterministic ULID
-//!   built from the test's mock counter so assertions are stable.
-//! - **Canned reads.** Fixture setters (`set_routable`, `set_credits`,
-//!   `set_expertise`) pre-load the read views the handler calls into.
-//! - **Inspectors for assertions.** `contributions()`, `votes()`,
-//!   `moderation_events()`, etc. return clones of recorded writes so
-//!   tests can verify what the handler persisted.
-//! - **No real crypto.** `steward_sign` returns a deterministic
-//!   `HybridSignature` shaped like the real thing but with placeholder
-//!   bytes — never use this mock to validate signatures, only to
-//!   verify handler logic invokes the signing path.
+//! Tracks all 9 typed writes (contributions, votes, ledger updates,
+//! moderation, slashing, reconsideration request + attestation,
+//! promotion attestation) and the `is_canonical` flip on target rows.
 
-#![allow(dead_code)] // each integration test file uses a subset of the helpers
+#![allow(dead_code)] // each integration-test file uses a subset
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::Mutex;
 
-use async_trait::async_trait;
 use chrono::Utc;
 
-use ciris_node_core::{
-    Cell, ContributionEnvelope, ContributorId, Error, HybridSignature, NodeCoreEngine, Result,
-    Vote,
-};
-use ciris_node_core::ledger::{
-    CommonsCreditsLedger, CreditsEntry, ExpertiseEntry, ExpertiseLedger, VoteWeight,
+use ciris_node_core::substrate::{
+    Cell, ContributionEnvelope, ContributionListPage, ContributionType, ContributionsFilter,
+    CreditsLedgerEntry, CreditsUpdate, ExpertiseLedgerEntry, ExpertiseUpdate, HybridSignature,
+    ListCursor, ModerationEvent, NodeCoreService, PromotionAttestation, ReconsiderationAttestation,
+    ReconsiderationRequest, RoutableContributor, SlashingAttestation, SubstrateError,
+    TargetRowKind, VoteEnvelope, VoteListPage, VoteWeight, VotesFilter,
 };
 
-/// Test fixture state. All mutable state lives behind a single
-/// `Mutex` — fine for unit-test workloads, simple to reason about.
 #[derive(Default)]
 struct MockState {
-    // Recorded writes
     contributions: Vec<ContributionEnvelope>,
-    votes: Vec<Vote>,
+    votes: Vec<VoteEnvelope>,
+    moderation_events: Vec<ModerationEvent>,
+    slashing_attestations: Vec<SlashingAttestation>,
+    reconsideration_requests: Vec<ReconsiderationRequest>,
+    reconsideration_attestations: Vec<ReconsiderationAttestation>,
+    promotion_attestations: Vec<PromotionAttestation>,
 
-    // Canned read views — populated by fixture setters
-    // Key: (domain, language)
-    routable: HashMap<(String, String), Vec<ContributorId>>,
-    // Key: (contributor, domain, language, subject)
-    credits: HashMap<(ContributorId, String, String, String), f64>,
-    // Key: (contributor, domain, language)
-    expertise: HashMap<(ContributorId, String, String), f64>,
-    // Active tier — present means active
-    active_tier: std::collections::HashSet<ContributorId>,
+    // Canonical-promotion state — mirrors V011's `is_canonical` column.
+    canonical: HashMap<String, bool>,
 
-    // Counter for deterministic generated ids
-    next_id: u32,
+    // Fixture-loaded read views.
+    // Key for routable: (domain, language)
+    routable: HashMap<(String, String), Vec<RoutableContributor>>,
+    // Key for credits: (contributor, domain, language, subject)
+    credits: HashMap<(String, String, String, String), f64>,
+    // Key for expertise: (contributor, domain, language) → (expertise, active_tier)
+    expertise: HashMap<(String, String, String), (f64, bool)>,
+    // Active-tier override (in addition to per-cell). Present means active.
+    active_set: HashSet<String>,
 }
 
-/// In-memory [`NodeCoreEngine`] for handler tests.
+/// In-memory `NodeCoreService` impl for tests.
 pub struct MockEngine {
     state: Mutex<MockState>,
 }
@@ -72,225 +64,397 @@ impl MockEngine {
 
     // ── Fixture setters ──────────────────────────────────────────────────
 
-    /// Pre-load routable-contributors response for `(domain, language)`.
-    pub fn set_routable(&self, domain: &str, language: &str, who: Vec<ContributorId>) {
-        let mut st = self.state.lock().unwrap();
-        st.routable
+    pub fn set_routable(&self, domain: &str, language: &str, who: Vec<RoutableContributor>) {
+        self.state
+            .lock()
+            .unwrap()
+            .routable
             .insert((domain.into(), language.into()), who);
     }
 
     pub fn set_credits(
         &self,
-        contributor: &ContributorId,
+        contributor: &str,
         domain: &str,
         language: &str,
         subject: &str,
         credits: f64,
     ) {
-        let mut st = self.state.lock().unwrap();
-        st.credits.insert(
-            (contributor.clone(), domain.into(), language.into(), subject.into()),
+        self.state.lock().unwrap().credits.insert(
+            (
+                contributor.into(),
+                domain.into(),
+                language.into(),
+                subject.into(),
+            ),
             credits,
         );
     }
 
     pub fn set_expertise(
         &self,
-        contributor: &ContributorId,
+        contributor: &str,
         domain: &str,
         language: &str,
         standing: f64,
+        active: bool,
     ) {
-        let mut st = self.state.lock().unwrap();
-        st.expertise.insert(
-            (contributor.clone(), domain.into(), language.into()),
-            standing,
-        );
-    }
-
-    pub fn set_active(&self, contributor: &ContributorId, active: bool) {
-        let mut st = self.state.lock().unwrap();
+        self.state
+            .lock()
+            .unwrap()
+            .expertise
+            .insert(
+                (contributor.into(), domain.into(), language.into()),
+                (standing, active),
+            );
         if active {
-            st.active_tier.insert(contributor.clone());
-        } else {
-            st.active_tier.remove(contributor);
+            self.state.lock().unwrap().active_set.insert(contributor.into());
         }
     }
 
-    // ── Inspectors for assertions ────────────────────────────────────────
+    // ── Inspectors ───────────────────────────────────────────────────────
 
     pub fn contributions(&self) -> Vec<ContributionEnvelope> {
         self.state.lock().unwrap().contributions.clone()
     }
 
-    pub fn votes(&self) -> Vec<Vote> {
+    pub fn votes(&self) -> Vec<VoteEnvelope> {
         self.state.lock().unwrap().votes.clone()
+    }
+
+    pub fn promotion_attestations(&self) -> Vec<PromotionAttestation> {
+        self.state.lock().unwrap().promotion_attestations.clone()
+    }
+
+    pub fn is_canonical(&self, id: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .canonical
+            .get(id)
+            .copied()
+            .unwrap_or(false)
     }
 
     pub fn write_count(&self) -> usize {
         let st = self.state.lock().unwrap();
-        st.contributions.len() + st.votes.len()
-    }
-
-    // ── Internal helpers ─────────────────────────────────────────────────
-
-    fn next_id(&self, prefix: &str) -> String {
-        let mut st = self.state.lock().unwrap();
-        st.next_id += 1;
-        format!("{prefix}_mock_{:08x}", st.next_id)
+        st.contributions.len()
+            + st.votes.len()
+            + st.moderation_events.len()
+            + st.slashing_attestations.len()
+            + st.reconsideration_requests.len()
+            + st.reconsideration_attestations.len()
+            + st.promotion_attestations.len()
     }
 }
 
-#[async_trait]
-impl NodeCoreEngine for MockEngine {
-    async fn put_contribution(&self, envelope: ContributionEnvelope) -> Result<String> {
-        let id = self.next_id("ctrb");
-        let mut st = self.state.lock().unwrap();
-        st.contributions.push(envelope);
-        Ok(id)
-    }
-
-    async fn cast_vote(&self, vote: Vote) -> Result<String> {
-        let id = self.next_id("vote");
-        let mut st = self.state.lock().unwrap();
-        st.votes.push(vote);
-        Ok(id)
-    }
-
-    async fn update_credits_ledger(
+impl NodeCoreService for MockEngine {
+    fn put_contribution(
         &self,
-        contributor: &ContributorId,
-        cell: &Cell,
-        delta: f64,
-    ) -> Result<()> {
-        let subject = cell.subject.clone().unwrap_or_default();
-        let key = (contributor.clone(), cell.domain.clone(), cell.language.clone(), subject);
-        let mut st = self.state.lock().unwrap();
-        let entry = st.credits.entry(key).or_insert(0.0);
-        let next = *entry + delta;
-        if next < 0.0 {
-            return Err(Error::LedgerInvariant(format!(
-                "credits would go negative: {} + {} = {}",
-                *entry, delta, next
-            )));
+        env: ContributionEnvelope,
+    ) -> impl Future<Output = Result<(), SubstrateError>> + Send {
+        let envelope = env;
+        async move {
+            self.state.lock().unwrap().contributions.push(envelope);
+            Ok(())
         }
-        *entry = next;
-        Ok(())
     }
 
-    async fn update_expertise_ledger(
+    fn cast_vote(
         &self,
-        contributor: &ContributorId,
-        cell: &Cell,
-        delta: f64,
-    ) -> Result<()> {
-        let key = (contributor.clone(), cell.domain.clone(), cell.language.clone());
-        let mut st = self.state.lock().unwrap();
-        let entry = st.expertise.entry(key).or_insert(0.0);
-        let next = *entry + delta;
-        if next < 0.0 {
-            return Err(Error::LedgerInvariant(format!(
-                "expertise would go negative: {} + {} = {}",
-                *entry, delta, next
-            )));
+        env: VoteEnvelope,
+    ) -> impl Future<Output = Result<(), SubstrateError>> + Send {
+        let envelope = env;
+        async move {
+            self.state.lock().unwrap().votes.push(envelope);
+            Ok(())
         }
-        *entry = next;
-        Ok(())
     }
 
-    async fn read_vote_weight(
+    fn update_credits_ledger(
         &self,
-        contributor: &ContributorId,
-        cell: &Cell,
-    ) -> Result<VoteWeight> {
-        let st = self.state.lock().unwrap();
-        let subject = cell.subject.clone().unwrap_or_default();
-        let credits = st
-            .credits
-            .get(&(contributor.clone(), cell.domain.clone(), cell.language.clone(), subject))
-            .copied()
-            .unwrap_or(0.0);
-        let expertise = st
-            .expertise
-            .get(&(contributor.clone(), cell.domain.clone(), cell.language.clone()))
-            .copied()
-            .unwrap_or(0.0);
-        let active = st.active_tier.contains(contributor);
-        Ok(VoteWeight {
-            credits,
-            expertise_multiplier: expertise,
-            active_tier_multiplier: if active { 1.0 } else { 0.0 },
-        })
+        update: CreditsUpdate,
+    ) -> impl Future<Output = Result<(), SubstrateError>> + Send {
+        async move {
+            if update.new_balance < 0.0 {
+                return Err(SubstrateError::InvalidArgument(format!(
+                    "credits non-negative invariant: new_balance {} < 0",
+                    update.new_balance
+                )));
+            }
+            let key = (
+                update.contributor_id,
+                update.domain,
+                update.language,
+                update.subject,
+            );
+            self.state.lock().unwrap().credits.insert(key, update.new_balance);
+            Ok(())
+        }
     }
 
-    async fn get_credits_ledger(&self, contributor: &ContributorId) -> Result<CommonsCreditsLedger> {
-        let st = self.state.lock().unwrap();
-        let entries = st
-            .credits
-            .iter()
-            .filter(|((c, _, _, _), _)| c == contributor)
-            .map(|((_, d, l, s), credits)| CreditsEntry {
-                cell: Cell::credits(d, l, s),
-                credits: *credits,
-                updated_at: Utc::now(),
-            })
-            .collect();
-        Ok(CommonsCreditsLedger {
-            contributor_id: contributor.clone(),
-            entries,
-            ledger_signature: mock_signature(),
-        })
+    fn update_expertise_ledger(
+        &self,
+        update: ExpertiseUpdate,
+    ) -> impl Future<Output = Result<(), SubstrateError>> + Send {
+        async move {
+            if update.new_expertise < 0.0 {
+                return Err(SubstrateError::InvalidArgument(format!(
+                    "expertise non-negative invariant: new_expertise {} < 0",
+                    update.new_expertise
+                )));
+            }
+            let key = (update.contributor_id.clone(), update.domain, update.language);
+            self.state
+                .lock()
+                .unwrap()
+                .expertise
+                .insert(key, (update.new_expertise, update.new_active_tier));
+            if update.new_active_tier {
+                self.state.lock().unwrap().active_set.insert(update.contributor_id);
+            }
+            Ok(())
+        }
     }
 
-    async fn get_expertise_ledger(&self, contributor: &ContributorId) -> Result<ExpertiseLedger> {
-        let st = self.state.lock().unwrap();
-        let active = st.active_tier.contains(contributor);
-        let entries = st
-            .expertise
-            .iter()
-            .filter(|((c, _, _), _)| c == contributor)
-            .map(|((_, d, l), standing)| ExpertiseEntry {
-                cell: Cell::expertise(d, l),
-                standing: *standing,
-                active_tier: active,
-                updated_at: Utc::now(),
-            })
-            .collect();
-        Ok(ExpertiseLedger {
-            contributor_id: contributor.clone(),
-            entries,
-            ledger_signature: mock_signature(),
-        })
+    fn put_moderation_event(
+        &self,
+        event: ModerationEvent,
+    ) -> impl Future<Output = Result<(), SubstrateError>> + Send {
+        let envelope = event;
+        async move {
+            self.state.lock().unwrap().moderation_events.push(envelope);
+            Ok(())
+        }
     }
 
-    async fn routable_contributors(
+    fn put_slashing_attestation(
+        &self,
+        att: SlashingAttestation,
+    ) -> impl Future<Output = Result<(), SubstrateError>> + Send {
+        let envelope = att;
+        async move {
+            self.state.lock().unwrap().slashing_attestations.push(envelope);
+            Ok(())
+        }
+    }
+
+    fn put_reconsideration_request(
+        &self,
+        req: ReconsiderationRequest,
+    ) -> impl Future<Output = Result<(), SubstrateError>> + Send {
+        let envelope = req;
+        async move {
+            self.state.lock().unwrap().reconsideration_requests.push(envelope);
+            Ok(())
+        }
+    }
+
+    fn put_reconsideration_attestation(
+        &self,
+        att: ReconsiderationAttestation,
+    ) -> impl Future<Output = Result<(), SubstrateError>> + Send {
+        let envelope = att;
+        async move {
+            self.state.lock().unwrap().reconsideration_attestations.push(envelope);
+            Ok(())
+        }
+    }
+
+    fn put_promotion_attestation(
+        &self,
+        att: PromotionAttestation,
+    ) -> impl Future<Output = Result<(), SubstrateError>> + Send {
+        let attestation = att;
+        async move {
+            let mut st = self.state.lock().unwrap();
+            if let TargetRowKind::Contribution = attestation.target_kind {
+                for tid in &attestation.target_ids {
+                    if !st.contributions.iter().any(|c| &c.contribution_id == tid) {
+                        return Err(SubstrateError::InvalidArgument(format!(
+                            "target_id {tid} not in contributions table"
+                        )));
+                    }
+                }
+            }
+            for tid in &attestation.target_ids {
+                st.canonical.insert(tid.clone(), true);
+            }
+            st.promotion_attestations.push(attestation);
+            Ok(())
+        }
+    }
+
+    fn routable_contributors(
         &self,
         domain: &str,
         language: &str,
-    ) -> Result<Vec<ContributorId>> {
-        let st = self.state.lock().unwrap();
-        Ok(st
-            .routable
-            .get(&(domain.into(), language.into()))
-            .cloned()
-            .unwrap_or_default())
+    ) -> impl Future<Output = Result<Vec<RoutableContributor>, SubstrateError>> + Send {
+        let domain = domain.to_owned();
+        let language = language.to_owned();
+        async move {
+            Ok(self
+                .state
+                .lock()
+                .unwrap()
+                .routable
+                .get(&(domain, language))
+                .cloned()
+                .unwrap_or_default())
+        }
     }
 
-    async fn steward_sign(&self, _canonical_bytes: &[u8]) -> Result<HybridSignature> {
-        Ok(mock_signature())
+    fn read_vote_weight(
+        &self,
+        contributor_id: &str,
+        domain: &str,
+        language: &str,
+        subject: &str,
+    ) -> impl Future<Output = Result<Option<VoteWeight>, SubstrateError>> + Send {
+        let cid = contributor_id.to_owned();
+        let d = domain.to_owned();
+        let l = language.to_owned();
+        let s = subject.to_owned();
+        async move {
+            let st = self.state.lock().unwrap();
+            let credits = st
+                .credits
+                .get(&(cid.clone(), d.clone(), l.clone(), s.clone()))
+                .copied()
+                .unwrap_or(0.0);
+            let (expertise, active) = st
+                .expertise
+                .get(&(cid.clone(), d.clone(), l.clone()))
+                .copied()
+                .unwrap_or((0.0, false));
+            let active_mult = if active { 1.0 } else { 0.0 };
+            Ok(Some(VoteWeight {
+                contributor_id: cid,
+                domain: d,
+                language: l,
+                subject: s,
+                credits,
+                expertise_multiplier: expertise,
+                active_tier_multiplier: active_mult,
+                weight: credits * expertise * active_mult,
+            }))
+        }
     }
 
-    fn canonicalize(&self, value: &serde_json::Value) -> Result<Vec<u8>> {
-        // Deterministic for tests; real persist canonicalizer is the
-        // PythonJsonDumpsCanonicalizer shape per CIRISPersist#7.
-        Ok(serde_json::to_vec(value)?)
+    fn list_contributions(
+        &self,
+        _filter: ContributionsFilter,
+        _cursor: Option<ListCursor>,
+        _limit: i64,
+    ) -> impl Future<Output = Result<ContributionListPage, SubstrateError>> + Send {
+        async move {
+            Ok(ContributionListPage {
+                items: self.state.lock().unwrap().contributions.clone(),
+                next_cursor: None,
+            })
+        }
+    }
+
+    fn list_votes(
+        &self,
+        _filter: VotesFilter,
+        _cursor: Option<ListCursor>,
+        _limit: i64,
+    ) -> impl Future<Output = Result<VoteListPage, SubstrateError>> + Send {
+        async move {
+            Ok(VoteListPage {
+                items: self.state.lock().unwrap().votes.clone(),
+                next_cursor: None,
+            })
+        }
+    }
+
+    fn get_credits_ledger(
+        &self,
+        contributor_id: &str,
+        domain: &str,
+        language: &str,
+        subject: &str,
+    ) -> impl Future<Output = Result<Option<CreditsLedgerEntry>, SubstrateError>> + Send {
+        let cid = contributor_id.to_owned();
+        let d = domain.to_owned();
+        let l = language.to_owned();
+        let s = subject.to_owned();
+        async move {
+            let balance = self
+                .state
+                .lock()
+                .unwrap()
+                .credits
+                .get(&(cid.clone(), d.clone(), l.clone(), s.clone()))
+                .copied();
+            Ok(balance.map(|b| CreditsLedgerEntry {
+                contributor_id: cid,
+                domain: d,
+                language: l,
+                subject: s,
+                balance: b,
+                last_update_contribution: None,
+                last_updated_at: Utc::now(),
+                created_at: Utc::now(),
+            }))
+        }
+    }
+
+    fn get_expertise_ledger(
+        &self,
+        contributor_id: &str,
+        domain: &str,
+        language: &str,
+    ) -> impl Future<Output = Result<Option<ExpertiseLedgerEntry>, SubstrateError>> + Send {
+        let cid = contributor_id.to_owned();
+        let d = domain.to_owned();
+        let l = language.to_owned();
+        async move {
+            let entry = self
+                .state
+                .lock()
+                .unwrap()
+                .expertise
+                .get(&(cid.clone(), d.clone(), l.clone()))
+                .copied();
+            Ok(entry.map(|(e, active)| ExpertiseLedgerEntry {
+                contributor_id: cid,
+                domain: d,
+                language: l,
+                expertise: e,
+                is_active: active,
+                last_updated_at: Utc::now(),
+                last_update_contribution: None,
+                created_at: Utc::now(),
+            }))
+        }
     }
 }
 
-fn mock_signature() -> HybridSignature {
+pub fn placeholder_signature() -> HybridSignature {
     HybridSignature {
-        ed25519: "mock_ed25519_placeholder".into(),
+        ed25519: "test_sig_placeholder".into(),
         ml_dsa_65: None,
         signed_at: Utc::now(),
+    }
+}
+
+pub fn build_envelope(
+    contribution_id: &str,
+    contribution_type: ContributionType,
+    author_id: &str,
+    cell: Cell,
+    payload: serde_json::Value,
+) -> ContributionEnvelope {
+    ContributionEnvelope {
+        contribution_id: contribution_id.into(),
+        contribution_type,
+        author_id: author_id.into(),
+        subject: cell,
+        payload,
+        witness_set: None,
+        signature: placeholder_signature(),
+        submitted_at: Utc::now(),
     }
 }
