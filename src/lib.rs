@@ -56,6 +56,7 @@
 
 pub mod aggregate;
 pub mod payloads;
+pub mod routing;
 pub mod service;
 pub mod sign;
 pub mod substrate;
