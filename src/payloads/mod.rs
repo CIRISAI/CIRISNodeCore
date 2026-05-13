@@ -1,31 +1,39 @@
-//! Typed payloads per SCHEMA.md §4.
+//! Typed payloads per SCHEMA.md §4 and §8-§9.
 //!
 //! The Contribution envelope (`crate::contribution::ContributionEnvelope`)
 //! carries `payload: serde_json::Value`. These typed structs are what
 //! that JSON deserializes into, discriminated by the envelope's
 //! `contribution_type` + `subject.subject_kind`.
 //!
+//! Standalone (non-Contribution) attestation row classes — currently
+//! [`slashing_attestation::SlashingAttestation`] — live alongside the
+//! payloads since they share the typed-wire dispatch shape but are
+//! written to their own persist tables via dedicated `NodeCoreEngine`
+//! methods (Appendix A.2 rows 6 / 8).
+//!
 //! v0.1.0-dev coverage:
 //!
-//! - §4.7 [`deferral::DeferralRequest`] — full shape pinned.
-//! - §4.8 [`deferral::DeferralResponse`] — full shape pinned.
-//! - §4.1–§4.6, §4.9–§4.12 — stubs; full shapes land as implementation
-//!   matures. See `SCHEMA.md` for the wire definitions.
+//! - §4.7 [`deferral::DeferralRequest`]
+//! - §4.8 [`deferral::DeferralResponse`]
+//! - §4.10 / §7 [`expertise_attestation::ExpertiseAttestation`]
+//! - §4.11 / §8 [`moderation_event::ModerationEvent`]
+//! - §8 [`slashing_attestation::SlashingAttestation`] (standalone)
+//! - §4.12 / §9 [`reconsideration::ReconsiderationRequest`]
+//!
+//! Remaining (covered by `serde_json::Value` in the envelope payload
+//! field for v0.1.0-dev; typed structs land in v0.1.0 cut):
+//!
+//! - §4.1 `arc_question`
+//! - §4.2 `proposed_battery`
+//! - §4.3 `prompt_edit`
+//! - §4.4 `guide_edit`
+//! - §4.5 `accord_edit`
+//! - §4.6 `failure_pattern` (ticket)
+//! - §4.9 `wa_candidacy`
+//! - §9 `ReconsiderationAttestation` (the quorum-issued outcome row)
 
 pub mod deferral;
-
-// TODO: typed payloads for the remaining SCHEMA.md §4 subjects.
-// Tracking module declarations follow once each gets a typed struct;
-// for now each Contribution validates its raw `serde_json::Value`
-// payload at the validation boundary.
-//
-// pub mod arc_question;          // §4.1
-// pub mod proposed_battery;      // §4.2
-// pub mod prompt_edit;           // §4.3
-// pub mod guide_edit;            // §4.4
-// pub mod accord_edit;           // §4.5
-// pub mod failure_pattern;       // §4.6 (ticket)
-// pub mod wa_candidacy;          // §4.9
-// pub mod expertise_attestation; // §4.10
-// pub mod moderation_event;      // §4.11
-// pub mod reconsideration;       // §4.12
+pub mod expertise_attestation;
+pub mod moderation_event;
+pub mod reconsideration;
+pub mod slashing_attestation;

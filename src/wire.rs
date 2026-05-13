@@ -17,6 +17,10 @@ use crate::contribution::ContributionEnvelope;
 use crate::identity::ContributorId;
 use crate::ledger::VoteWeight;
 use crate::payloads::deferral::{DeferralRequest, DeferralResponse};
+use crate::payloads::expertise_attestation::ExpertiseAttestation;
+use crate::payloads::moderation_event::ModerationEvent;
+use crate::payloads::reconsideration::ReconsiderationRequest;
+use crate::payloads::slashing_attestation::SlashingAttestation;
 use crate::vote::Vote;
 
 // ── Delivery policy ──────────────────────────────────────────────────────
@@ -91,6 +95,60 @@ pub struct DeferralResponseAck {
     pub accepted_at: DateTime<Utc>,
 }
 
+/// Receiver's ACK to an `ExpertiseAttestationPublish`. Echoes the
+/// persisted contribution id; the standing-jump effect on the target's
+/// Expertise ledger is observable via `engine.get_expertise_ledger`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExpertiseAttestationAck {
+    /// Persisted contribution id (the attestation is recorded as a
+    /// Contribution row per SCHEMA.md §3.1).
+    pub contribution_id: String,
+    /// When persist accepted the attestation.
+    pub accepted_at: DateTime<Utc>,
+    /// Whether this attestation triggered the cell's jump-threshold
+    /// witness-set gate per `MISSION.md` §3.7. If `true`, the envelope's
+    /// `witness_set` field was validated; if `false`, the attestation
+    /// was below threshold and witness-free.
+    pub jump_threshold_triggered: bool,
+}
+
+/// Receiver's ACK to a `ModerationEventPublish`. Carries the
+/// moderation-event id and a placeholder for the eventual
+/// SlashingAttestation cross-reference (filled when the quorum
+/// adjudication completes downstream).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModerationEventAck {
+    /// Persisted contribution id (the moderation event is recorded as
+    /// a Contribution row per SCHEMA.md §3.1).
+    pub contribution_id: String,
+    /// When persist accepted the filing.
+    pub accepted_at: DateTime<Utc>,
+}
+
+/// Receiver's ACK to a `SlashingAttestationPublish`. SlashingAttestation
+/// is a standalone row class (not a Contribution); the persisted id is
+/// distinct from the originating moderation event's id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlashingAttestationAck {
+    /// Persisted attestation id (the row's identifier in the
+    /// `slashing_attestations` table per CIRISPersist Appendix A.2 row 6).
+    pub attestation_id: String,
+    /// When persist accepted the attestation.
+    pub accepted_at: DateTime<Utc>,
+}
+
+/// Receiver's ACK to a `ReconsiderationRequest`. Confirms the request
+/// passed the recursion + time bounds and was accepted onto the audit
+/// chain; the fresh-quorum adjudication outcome arrives later as a
+/// separate `ReconsiderationAttestation` row (v0.1.0 cut+ work).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReconsiderationRequestAck {
+    /// Persisted contribution id.
+    pub contribution_id: String,
+    /// When persist accepted the request.
+    pub accepted_at: DateTime<Utc>,
+}
+
 // ── Message impls (the wire contract) ────────────────────────────────────
 
 impl Message for ContributionEnvelope {
@@ -117,8 +175,26 @@ impl Message for DeferralResponse {
     type Response = DeferralResponseAck;
 }
 
-// `ExpertiseAttestationPublish` / `ModerationEventPublish` /
-// `SlashingAttestationPublish` / `ReconsiderationRequest` impls land
-// alongside their typed payloads (`payloads/{expertise_attestation,
-// moderation_event, slashing_attestation, reconsideration}.rs`),
-// pending in `payloads/mod.rs`.
+impl Message for ExpertiseAttestation {
+    const TYPE: MessageType = MessageType::ExpertiseAttestationPublish;
+    const DELIVERY: Delivery = DURABLE_CONSENSUS;
+    type Response = ExpertiseAttestationAck;
+}
+
+impl Message for ModerationEvent {
+    const TYPE: MessageType = MessageType::ModerationEventPublish;
+    const DELIVERY: Delivery = DURABLE_CONSENSUS;
+    type Response = ModerationEventAck;
+}
+
+impl Message for SlashingAttestation {
+    const TYPE: MessageType = MessageType::SlashingAttestationPublish;
+    const DELIVERY: Delivery = DURABLE_CONSENSUS;
+    type Response = SlashingAttestationAck;
+}
+
+impl Message for ReconsiderationRequest {
+    const TYPE: MessageType = MessageType::ReconsiderationRequest;
+    const DELIVERY: Delivery = DURABLE_CONSENSUS;
+    type Response = ReconsiderationRequestAck;
+}
