@@ -6,30 +6,32 @@
 //! node-core code can pin against the substrate's source-of-truth
 //! types without reaching into persist's namespace at every site.
 //!
-//! # Divergence today (v0.1.0-dev)
+//! # Status (v0.7.1 validated)
 //!
-//! Node-core ALSO publishes its own wire types at [`crate::contribution`],
-//! [`crate::vote`], [`crate::ledger`] etc., and its own
-//! [`crate::engine::NodeCoreEngine`] trait. The two type families are
-//! intentionally parallel during the v0.1.0-dev → v0.1.0 cut window:
+//! `tests/substrate_contract.rs` is the validation spike — implements
+//! `NodeCoreService` for an in-memory mock using RPITIT (no
+//! `async_trait`), constructs every wire envelope from scratch, and
+//! round-trips all 14 trait methods. 7/7 tests pass against v0.7.1.
+//! Contract fits node-core's needs.
 //!
-//! - **Persist's types** are envelope-shaped (id + signature + opaque
-//!   `payload: serde_json::Value`) and follow `impl Future + Send`
-//!   GAT trait shape. Source of truth at the storage boundary.
-//! - **Node-core's types** carry the policy enums (`Allegation`,
-//!   `Grounds`, `SlashingOutcome`, `AccuserStakeDisposition`, etc.)
-//!   that fill the envelope's payload field. Use `async_trait` and
-//!   `Arc<dyn>` for the test seam.
+//! # One known gap (filed as CIRISPersist#32)
 //!
-//! When CIRISPersist v0.7.0 cuts final (α4-α6 to land), node-core's
-//! v0.1.0 release collapses the two: re-export persist's wire types
-//! as the canonical wire shapes; relegate node-core's parallel types
-//! to thin payload-only structs (`*Payload` suffix) that fill the
-//! `.payload` Value field. [`NodeCore`](crate::NodeCore) becomes
-//! generic over `E: NodeCoreService` to consume persist's RPITIT
-//! trait directly. Tracked in
+//! No write method to flip `is_canonical: FALSE → TRUE`. Persist's
+//! V011 schema has the column, the read-side filter handles the
+//! split, but the trait has no `mark_canonical` / `put_promotion_attestation`
+//! to flip. Blocks the SCHEMA.md §13.3 canonical-promotion path —
+//! filed for a v0.7.x patch.
+//!
+//! # OQ-7 collapse status
+//!
+//! Node-core still publishes parallel wire types at
+//! [`crate::contribution`], [`crate::vote`], etc. plus its own
+//! [`crate::engine::NodeCoreEngine`] async_trait. The collapse
+//! (re-export persist's types as canonical; rename payloads to
+//! `*Payload`; make `NodeCore` generic over `E: NodeCoreService`)
+//! is deferred to a focused subsequent commit. See
 //! [`FSD/SUBSTRATE_INTEGRATION.md`](../../FSD/SUBSTRATE_INTEGRATION.md)
-//! §5 sequencing.
+//! §6 OQ-7 for the 5-step plan.
 
 pub use ciris_persist::cirisnode::types::{
     Cell, ContributionEnvelope, ContributionListPage, ContributionType, ContributionsFilter,
@@ -54,7 +56,13 @@ mod tests {
         let _cell = Cell {
             domain: "mental_health".into(),
             language: "am".into(),
-            subject: "arc_question".into(),
+            subject: Some("arc_question".into()),
+        };
+        // Expertise-granularity — subject omitted per SCHEMA §7 / §10.
+        let _expertise_cell = Cell {
+            domain: "mental_health".into(),
+            language: "am".into(),
+            subject: None,
         };
         let _err: SubstrateError = SubstrateError::Conflict("test".into());
         assert_eq!(_err.kind(), "cirisnode_conflict");
