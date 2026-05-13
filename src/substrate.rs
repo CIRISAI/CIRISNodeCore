@@ -14,13 +14,14 @@
 //! round-trips all 14 trait methods. 7/7 tests pass against v0.7.1.
 //! Contract fits node-core's needs.
 //!
-//! # One known gap (filed as CIRISPersist#32)
+//! # CIRISPersist#32 — closed in v0.7.2
 //!
-//! No write method to flip `is_canonical: FALSE → TRUE`. Persist's
-//! V011 schema has the column, the read-side filter handles the
-//! split, but the trait has no `mark_canonical` / `put_promotion_attestation`
-//! to flip. Blocks the SCHEMA.md §13.3 canonical-promotion path —
-//! filed for a v0.7.x patch.
+//! v0.7.2 added the `put_promotion_attestation` method + the
+//! `PromotionAttestation` + `TargetRowKind` types — exactly the
+//! Option B shape recommended in the issue. Trait now has 15
+//! methods (was 14); transactional flip with affected-row-count
+//! assertion keeps the canonical-promotion path safe under partial
+//! failure. No open substrate asks.
 //!
 //! # OQ-7 collapse status
 //!
@@ -36,9 +37,9 @@
 pub use ciris_persist::cirisnode::types::{
     Cell, ContributionEnvelope, ContributionListPage, ContributionType, ContributionsFilter,
     CreditsLedgerEntry, CreditsUpdate, DiversityProof, ExpertiseLedgerEntry, ExpertiseUpdate,
-    HybridSignature, ListCursor, ModerationEvent, ReconsiderationAttestation,
-    ReconsiderationRequest, RoutableContributor, SlashingAttestation, VoteEnvelope, VoteListPage,
-    VoteWeight, VotesFilter, Witness, WitnessSet,
+    HybridSignature, ListCursor, ModerationEvent, PromotionAttestation,
+    ReconsiderationAttestation, ReconsiderationRequest, RoutableContributor, SlashingAttestation,
+    TargetRowKind, VoteEnvelope, VoteListPage, VoteWeight, VotesFilter, Witness, WitnessSet,
 };
 
 pub use ciris_persist::cirisnode::{Error as SubstrateError, NodeCoreService};

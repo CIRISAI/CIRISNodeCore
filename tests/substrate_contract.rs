@@ -16,9 +16,9 @@ use chrono::Utc;
 use ciris_node_core::substrate::{
     Cell, ContributionEnvelope, ContributionListPage, ContributionType, ContributionsFilter,
     CreditsLedgerEntry, CreditsUpdate, ExpertiseLedgerEntry, ExpertiseUpdate, HybridSignature,
-    ListCursor, ModerationEvent, NodeCoreService, ReconsiderationAttestation,
+    ListCursor, ModerationEvent, NodeCoreService, PromotionAttestation, ReconsiderationAttestation,
     ReconsiderationRequest, RoutableContributor, SlashingAttestation, SubstrateError,
-    VoteEnvelope, VoteListPage, VoteWeight, VotesFilter,
+    TargetRowKind, VoteEnvelope, VoteListPage, VoteWeight, VotesFilter,
 };
 
 // ── Tiny in-memory mock impl ─────────────────────────────────────────────
@@ -36,6 +36,9 @@ struct State {
     slashing_attestations: Vec<SlashingAttestation>,
     reconsideration_requests: Vec<ReconsiderationRequest>,
     reconsideration_attestations: Vec<ReconsiderationAttestation>,
+    promotion_attestations: Vec<PromotionAttestation>,
+    /// Mirrors persist's transactional flip: contribution_id → is_canonical.
+    canonical: HashMap<String, bool>,
     credits: HashMap<(String, String, String, String), f64>,
     expertise: HashMap<(String, String, String), (f64, bool)>,
 }
@@ -114,6 +117,36 @@ impl NodeCoreService for SpikeMock {
             .unwrap()
             .reconsideration_attestations
             .push(att);
+        Ok(())
+    }
+
+    async fn put_promotion_attestation(
+        &self,
+        att: PromotionAttestation,
+    ) -> Result<(), SubstrateError> {
+        let mut st = self.state.lock().unwrap();
+
+        // Mirror persist's transactional shape (v0.7.2 doc):
+        // affected-row-count assertion — every named target must exist.
+        // We model "existing" by checking the contributions Vec for
+        // Contribution-targeted promotions; other target_kinds aren't
+        // tracked in this spike mock, so we pretend they exist.
+        if let TargetRowKind::Contribution = att.target_kind {
+            for tid in &att.target_ids {
+                if !st.contributions.iter().any(|c| &c.contribution_id == tid) {
+                    return Err(SubstrateError::InvalidArgument(format!(
+                        "target_id {tid} not found in contributions table"
+                    )));
+                }
+            }
+        }
+
+        // Flip is_canonical on each named target — transaction is
+        // all-or-nothing per persist's contract.
+        for tid in &att.target_ids {
+            st.canonical.insert(tid.clone(), true);
+        }
+        st.promotion_attestations.push(att);
         Ok(())
     }
 
@@ -392,6 +425,80 @@ async fn moderation_chain_round_trips() {
         signature: placeholder_signature(),
     };
     mock.put_reconsideration_attestation(recon_att).await.unwrap();
+}
+
+#[tokio::test]
+async fn promotion_attestation_flips_targets_and_records_attestation() {
+    // CIRISPersist#32 closed in v0.7.2. Verify the new
+    // put_promotion_attestation method round-trips with the
+    // transactional-flip semantics persist documents.
+    let mock = SpikeMock::new();
+
+    let env = ContributionEnvelope {
+        contribution_id: "01HXPROMOTE0000000000000000".into(),
+        contribution_type: ContributionType::Proposal,
+        author_id: "alice_pubkey_b64".into(),
+        subject: Cell {
+            domain: "mental_health".into(),
+            language: "am".into(),
+            subject: Some("arc_question".into()),
+        },
+        payload: serde_json::json!({"question_id": "am_mh_v4_q01"}),
+        witness_set: None,
+        signature: placeholder_signature(),
+        submitted_at: Utc::now(),
+    };
+    mock.put_contribution(env.clone()).await.unwrap();
+
+    let promo = PromotionAttestation {
+        attestation_id: "01HXPROMOATT00000000000000".into(),
+        target_kind: TargetRowKind::Contribution,
+        target_ids: vec![env.contribution_id.clone()],
+        attested_by: "consensus_crate_pubkey".into(),
+        aggregate_evidence: serde_json::json!({
+            "vote_tally": {"approve": 12, "reject": 2},
+            "witness_count": 5,
+            "threshold_window_days": 7
+        }),
+        signature: placeholder_signature(),
+        attested_at: Utc::now(),
+    };
+    mock.put_promotion_attestation(promo.clone()).await.unwrap();
+
+    // Per persist's contract: targets flipped to canonical, attestation
+    // INSERTed — atomically.
+    let st = mock.state.lock().unwrap();
+    assert_eq!(st.promotion_attestations.len(), 1);
+    assert_eq!(
+        st.canonical.get(&env.contribution_id).copied().unwrap_or(false),
+        true,
+        "target should be canonical post-promotion"
+    );
+}
+
+#[tokio::test]
+async fn promotion_attestation_rejects_unknown_target() {
+    // Mirror the affected-row-count assertion in persist's v0.7.2
+    // doc: if any named target doesn't exist, the entire transaction
+    // rolls back with InvalidArgument.
+    let mock = SpikeMock::new();
+
+    let promo = PromotionAttestation {
+        attestation_id: "01HXPROMOATT10000000000000".into(),
+        target_kind: TargetRowKind::Contribution,
+        target_ids: vec!["01HXNONEXISTENT0000000000".into()],
+        attested_by: "consensus_crate_pubkey".into(),
+        aggregate_evidence: serde_json::json!({}),
+        signature: placeholder_signature(),
+        attested_at: Utc::now(),
+    };
+    let result = mock.put_promotion_attestation(promo).await;
+    assert!(matches!(result, Err(SubstrateError::InvalidArgument(_))));
+
+    // Verify nothing got mutated.
+    let st = mock.state.lock().unwrap();
+    assert!(st.promotion_attestations.is_empty());
+    assert!(st.canonical.is_empty());
 }
 
 #[tokio::test]

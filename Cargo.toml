@@ -15,18 +15,24 @@ name = "ciris_node_core"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Substrate. Persist v0.7.1 ships the federation-consensus surface
+# Substrate. Persist v0.7.4 ships the federation-consensus surface
 # per FSD/CIRIS_PERSIST.md Appendix A: wire types in
-# `ciris_persist::cirisnode::types` + `NodeCoreService` trait (14
-# methods: 8 typed-writes + 6 reads, RPITIT shape) + PostgresBackend
-# impl + real envelope signature verify (Ed25519 against the
-# contributor-identity-as-pubkey per SCHEMA.md §2.2; persist owns
-# the canonicalizer via `cirisnode::verify::verify_envelope_signed`).
+# `ciris_persist::cirisnode::types` + `NodeCoreService` trait (15
+# methods: 9 typed-writes + 6 reads, RPITIT shape) + PostgresBackend
+# impl + Ed25519 envelope verify via
+# `cirisnode::verify::verify_envelope_signed` against the
+# contributor-identity-as-pubkey (SCHEMA.md §2.2).
+#
+# v0.7.2 (CIRISPersist#32) added `put_promotion_attestation` and the
+# `PromotionAttestation` / `TargetRowKind` types — closes the
+# canonical-promotion write gap node-core flagged.
+# v0.7.3 was CI hygiene only. v0.7.4 wired pipeline orchestration
+# (lens-side; transparent to node-core).
 #
 # `cirisnode` feature pulls in `postgres` transitively for the
 # PostgresBackend impl. Node-core itself opens no connections —
 # the host process holds the `Engine`.
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v0.7.1", version = "0", features = ["cirisnode"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v0.7.4", version = "0", features = ["cirisnode"] }
 
 # Edge v0.1.2 (2026-05-12) ships the 8 federation-consensus
 # MessageType variants from CIRISEdge#6 — ContributionSubmit, VoteCast,
