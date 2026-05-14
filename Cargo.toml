@@ -15,34 +15,24 @@ name = "ciris_node_core"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Substrate. Persist v0.7.4 ships the federation-consensus surface
-# per FSD/CIRIS_PERSIST.md Appendix A: wire types in
-# `ciris_persist::cirisnode::types` + `NodeCoreService` trait (15
-# methods: 9 typed-writes + 6 reads, RPITIT shape) + PostgresBackend
+# Substrate. Persist v0.9.1 — `src/cirisnode/` track is API-stable
+# since v0.7.4 (zero diff in that subtree v0.7.4..v0.9.1; all v0.8.x
+# / v0.9.x work was CIRISAgent 2.9.0 adoption — cirisgraph,
+# cirisaudit, telemetry, incident records absorption — not relevant
+# to node-core). Pinned in lockstep with `ciris-lens-core` v0.9.1.
+#
+# The `NodeCoreService` contract (FSD/CIRIS_PERSIST.md Appendix A):
+# 15 methods (9 typed-writes + 6 reads, RPITIT) + PostgresBackend
 # impl + Ed25519 envelope verify via
 # `cirisnode::verify::verify_envelope_signed` against the
 # contributor-identity-as-pubkey (SCHEMA.md §2.2).
-#
-# v0.7.2 (CIRISPersist#32) added `put_promotion_attestation` and the
-# `PromotionAttestation` / `TargetRowKind` types — closes the
-# canonical-promotion write gap node-core flagged.
-# v0.7.3 was CI hygiene only. v0.7.4 wired pipeline orchestration
-# (lens-side; transparent to node-core).
-#
-# `cirisnode` feature pulls in `postgres` transitively for the
-# PostgresBackend impl. Node-core itself opens no connections —
-# the host process holds the `Engine`.
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v0.7.4", version = "0", features = ["cirisnode"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v0.9.1", version = "0", features = ["cirisnode"] }
 
-# Edge v0.1.2 (2026-05-12) ships the 8 federation-consensus
-# MessageType variants from CIRISEdge#6 — ContributionSubmit, VoteCast,
-# ExpertiseAttestationPublish, ModerationEventPublish,
-# SlashingAttestationPublish, ReconsiderationRequest, DeferralRequest,
-# DeferralResponse — alongside persist v0.6.0 + verify v2.0.2.
-# Node-core registers handlers via
-# `edge.register_handler::<ContributionSubmit, _>(...)` etc. per
-# `FSD/SUBSTRATE_INTEGRATION.md` §3.
-ciris-edge = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v0.1.2", version = "0" }
+# Edge v0.1.4 — `src/messages/` + `src/handler.rs` API-stable since
+# v0.1.2 (CIRISEdge#6 closure with the 8 federation-consensus
+# MessageType variants); v0.1.3 / v0.1.4 were persist + verify
+# lockstep bumps. Pinned alongside `ciris-lens-core` v0.1.4.
+ciris-edge = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v0.1.4", version = "0" }
 
 # Serde + canonicalization. Canonicalization itself routes through
 # persist's `Engine.canonicalize_envelope_for_signing` — see

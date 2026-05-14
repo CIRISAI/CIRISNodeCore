@@ -1,4 +1,5 @@
-//! Re-exports of CIRISPersist v0.7.0-α3's federation-consensus contract.
+//! Re-exports of CIRISPersist's federation-consensus contract
+//! (currently pinned at v0.9.1; cirisnode track API-stable since v0.7.1).
 //!
 //! Persist's `cirisnode` module hosts the canonical wire types and the
 //! [`NodeCoreService`] trait per `CIRISPersist/FSD/CIRIS_PERSIST.md`

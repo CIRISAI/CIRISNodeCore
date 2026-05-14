@@ -1,5 +1,5 @@
 //! Edge wire-dispatch newtypes for the 8 federation-consensus
-//! `MessageType` variants (CIRISEdge v0.1.2+).
+//! `MessageType` variants (CIRISEdge v0.1.4 — surface stable since v0.1.2).
 //!
 //! Each newtype is `#[serde(transparent)]` so JSON wire-encoding is
 //! identical to persist's underlying envelope type — the wrapper

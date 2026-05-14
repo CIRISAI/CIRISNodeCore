@@ -1,8 +1,8 @@
 //! `ciris-node-core` — second-tier consensus runtime for the CIRIS federation.
 //!
 //! Implements the eleven primitives from [`MISSION.md`] §2 by composing
-//! CIRISPersist's `NodeCoreService` substrate (v0.7.4) with CIRISEdge's
-//! typed-handler dispatch (v0.1.2). The node-core crate hosts:
+//! CIRISPersist's `NodeCoreService` substrate (v0.9.1) with CIRISEdge's
+//! typed-handler dispatch (v0.1.4). The node-core crate hosts:
 //!
 //! - **Wire newtype wrappers** ([`wire`]) over persist's envelope
 //!   shapes — exists for the orphan rule on `impl Message`. Serde-
@@ -74,7 +74,7 @@ pub use substrate::{
 
 /// Crate-level error alias — `ciris_node_core::Error` is persist's
 /// [`SubstrateError`]. All trait methods return this type per
-/// `NodeCoreService` v0.7.4.
+/// `NodeCoreService` v0.9.1.
 pub type Error = SubstrateError;
 
 /// Crate-level result alias.
