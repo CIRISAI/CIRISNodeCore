@@ -15,18 +15,11 @@ name = "ciris_node_core"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Substrate. Persist v0.9.1 — `src/cirisnode/` track is API-stable
-# since v0.7.4 (zero diff in that subtree v0.7.4..v0.9.1; all v0.8.x
-# / v0.9.x work was CIRISAgent 2.9.0 adoption — cirisgraph,
-# cirisaudit, telemetry, incident records absorption — not relevant
-# to node-core). Pinned in lockstep with `ciris-lens-core` v0.9.1.
-#
-# The `NodeCoreService` contract (FSD/CIRIS_PERSIST.md Appendix A):
-# 15 methods (9 typed-writes + 6 reads, RPITIT) + PostgresBackend
-# impl + Ed25519 envelope verify via
-# `cirisnode::verify::verify_envelope_signed` against the
-# contributor-identity-as-pubkey (SCHEMA.md §2.2).
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v0.9.1", version = "0", features = ["cirisnode"] }
+# Substrate. Persist v1.3.0 adds `ciris_persist::federation::FederationDirectory`
+# (trait + TrustType/TrustRelationship/TrustGrant/TrustRow/TrustFilter
+# types) absorbing our `src/trust.rs` placeholder per the M2 cut. The
+# `cirisnode::NodeCoreService` surface is unchanged from v0.9.1.
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v1.3.0", version = "1", features = ["cirisnode"] }
 
 # Edge v0.1.4 — `src/messages/` + `src/handler.rs` API-stable since
 # v0.1.2 (CIRISEdge#6 closure with the 8 federation-consensus

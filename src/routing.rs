@@ -192,7 +192,7 @@ fn select_with_diversity<M: ContributorMetadataProvider>(
 // ── Deferral routing (composes trust + diversity) ────────────────────────
 
 use crate::trust::{
-    list_vouched_for, FederationDirectory, TrustFilter, TrustRelationship,
+    fed_err, list_vouched_for, FederationDirectory, TrustFilter, TrustRelationship,
 };
 
 /// Result of a full deferral-routing pass. Captures the resolver
@@ -240,7 +240,8 @@ where
             include_expired: false,
             ..Default::default()
         })
-        .await?;
+        .await
+        .map_err(fed_err)?;
 
     // Union of vouched-for resolvers across registries.
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();

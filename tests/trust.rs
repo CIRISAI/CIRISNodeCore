@@ -267,7 +267,7 @@ async fn self_trust_grant_rejected_at_directory_boundary() {
         .await;
     assert!(matches!(
         result,
-        Err(ciris_node_core::substrate::SubstrateError::InvalidArgument(_))
+        Err(ciris_persist::federation::Error::InvalidArgument(_))
     ));
 }
 
@@ -286,6 +286,6 @@ async fn registry_grant_requires_non_empty_domains() {
         .await;
     assert!(matches!(
         result,
-        Err(ciris_node_core::substrate::SubstrateError::InvalidArgument(_))
+        Err(ciris_persist::federation::Error::InvalidArgument(_))
     ));
 }
