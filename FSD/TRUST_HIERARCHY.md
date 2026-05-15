@@ -1,12 +1,18 @@
 # FSD: Trust Hierarchy — DIRECT/REGISTRY trust as the deferral-routing seam
 
-**Status:** Design (draft) — supports CIRISNodeCore#2.
+**Status:** Design (draft v2) — supports CIRISNodeCore#2.
 **Author:** Eric Moore (CIRIS Team) with Claude Opus 4.7
-**Created:** 2026-05-15
+**Created:** 2026-05-15 (v1); **Revised:** 2026-05-15 (v2 — collapse + push-upstream pass).
 **Risk:** Architectural. Adds the trust primitive that makes
-WiseAuthorityService subsumable into NodeCore. Cross-coordinates with
-CIRISPersist#47 (federation_keys schema) and CIRISAgent#760 (Accord §RC
-consent_role).
+WiseAuthorityService subsumable into NodeCore.
+
+**Cross-coordinates with:**
+- **CIRISPersist#47** — Counter-RII substrate (`federation_keys.consent_role`).
+  The trust-axis columns + the `FederationDirectory` trait this FSD
+  proposes are part of that same substrate package. This FSD pins the
+  policy semantics on top of the storage primitive #47 establishes.
+- **CIRISAgent#760** — Accord §RC `consent_role` primitive. The
+  `trust_type` enum here tracks whichever lock #760 produces (A/B/C).
 
 ---
 
@@ -31,6 +37,11 @@ routing decision becomes:
 
 The agent never hardcodes endpoints. WA subsumes into NodeCore.
 
+This is the **policy layer** that sits on top of CIRISPersist#47's
+Counter-RII storage substrate — same data, two layers of concern.
+Persist owns the columns + raw CRUD; node-core owns the
+transitive-resolution policy + deferral routing.
+
 ---
 
 ## 2. Trust axes (locked from CIRISNodeCore#2)
@@ -40,7 +51,7 @@ Four axes per grant:
 | Axis | Type | Required | Notes |
 |---|---|---|---|
 | `key` | Ed25519 pubkey (base64) | yes | Identity is the key per SCHEMA §2.2 |
-| `trust_type` | `Temporary` / `Partnered` / `Anonymous` | yes | Mirrors CIRISAgent ConsentService taxonomy |
+| `trust_type` | `Temporary` / `Partnered` / `Anonymous` | yes | Mirrors CIRISAgent ConsentService taxonomy. Tracks CIRISAgent#760 lock. |
 | `trust_relationship` | `Direct` / `Registry` | yes | New axis introduced here |
 | `trust_domains` | `Vec<String>` | required when `Registry` | NEVER global; domain-scoped vouching only |
 
@@ -71,13 +82,51 @@ Real-world analog: medical boards vouch for licensed doctors. You
 trust the medical board for medical questions. You don't trust the
 medical board to certify lawyers.
 
+### 3.1 Transitive trust does NOT inherit `trust_type`
+
+If A trusts K_B as `Partnered` + `Registry`, and K_B vouches for K_C
+in domain D, then K_C is `Transitive` — NOT `Partnered`. K_B's
+Partnered relationship is between A and K_B; K_C's relationship to A
+is mediated through the registry. `Transitive` is its own [`TrustEdge`]
+variant; it doesn't promote to a non-transitive type via the vouch.
+
+### 3.2 Revocation propagates at query time, not write time
+
+When A revokes its trust in K_B (a registry), all of K_B's
+vouched-for keys lose their transitive trust for A — atomically and
+without a sweep. The transitive resolution algorithm (§5) reads K_B's
+current trust state on every query; if K_B is no longer trusted, no
+transitive edge through K_B exists. The vouching `registry_vouch`
+Contributions stay on the audit chain unchanged; they just stop
+resolving.
+
+This means: no background revocation worker. No stale state. The
+audit chain is the source of truth for vouches; the directory is the
+source of truth for current trust grants.
+
+### 3.3 Bootstrap for TEMPORARY agents without a steward
+
+The grantor field on every trust row is a federation pubkey. For
+stewarded deployments, the steward key signs grants. For TEMPORARY
+agents lacking a stewarded ancestor:
+
+- Initial trust grants land at agent-construction time, inherited
+  from the spawning environment's grant set (operator's CIRIS-RED
+  default trust list, or whatever the deployment template provides).
+- Self-issued grants are rejected at the persist boundary —
+  `trusted_by == key` violates the integrity rule.
+- Agents without inherited grants OR a steward operate with zero
+  trust grants, which is the deferral-disabled state: the agent
+  refuses to defer because it has no trust path to resolvers.
+
 ---
 
 ## 4. Where the trust hierarchy lives
 
-### 4.1 Storage — CIRISPersist (cross-link CIRISPersist#47)
+### 4.1 Storage + raw CRUD — CIRISPersist (cross-link CIRISPersist#47)
 
-Trust grants land as additive columns on `federation_keys`:
+Trust grants land as additive columns on `federation_keys`. Same V020
+migration that #47 ships, with the trust-axis columns folded in:
 
 ```sql
 ALTER TABLE federation_keys ADD COLUMN
@@ -85,13 +134,13 @@ ALTER TABLE federation_keys ADD COLUMN
                         CHECK (trust_type IN ('temporary','partnered','anonymous')),
   trust_relationship    TEXT NOT NULL DEFAULT 'direct'
                         CHECK (trust_relationship IN ('direct','registry')),
-  trust_domains         TEXT[]                      -- nullable; required when relationship='registry'
+  trust_domains         TEXT[]
                         CHECK (trust_relationship = 'direct' OR
                                (trust_relationship = 'registry' AND trust_domains IS NOT NULL
                                 AND array_length(trust_domains, 1) > 0)),
   trusted_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  trusted_by            TEXT NOT NULL,              -- grantor pubkey
-  expires_at            TIMESTAMPTZ                 -- nullable
+  trusted_by            TEXT NOT NULL CHECK (trusted_by != key),  -- no self-trust
+  expires_at            TIMESTAMPTZ
 ;
 ```
 
@@ -99,56 +148,43 @@ Transitions (grant / revoke / extend / domain-add / domain-remove)
 write to `cirisaudit` per CIRISAgent#756 Q4 — audit chain owns state
 transitions.
 
-### 4.2 Trait — CIRISNodeCore
+### 4.2 Raw query trait — CIRISPersist (proposed)
 
-Persist exposes the storage; node-core composes the policy. The
-`TrustLedger` trait lives in node-core, NOT persist — same pattern as
-the eleven-primitive surface that sits over persist's typed-write
-methods.
+Persist exposes a new `FederationDirectory` trait alongside
+`NodeCoreService`. Raw CRUD + simple lookups; **no** transitive
+resolution (that's node-core policy):
 
 ```rust
-// src/trust.rs (new module)
-
-pub trait TrustLedger: Send + Sync {
-    /// Grant trust to a key. `signed_by` MUST equal one of the agent's
-    /// authorized grantor keys (typically the steward key). Audited
-    /// via cirisaudit.
+// proposed in ciris_persist::cirisnode (or a new module if scope warrants)
+pub trait FederationDirectory: Send + Sync {
+    /// Insert or update a trust row. `grant.trusted_by` is verified
+    /// against the federation_keys.signing_key_id integrity rule.
     fn grant_trust(
         &self,
         grant: TrustGrant,
-    ) -> impl Future<Output = Result<(), SubstrateError>> + Send;
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 
-    /// Revoke a trust grant. Audited.
+    /// Soft-delete a trust row by setting `expires_at = NOW()`. Audit
+    /// row recorded in cirisaudit.
     fn revoke_trust(
         &self,
         key: &str,
-        signed_by: &str,
-    ) -> impl Future<Output = Result<(), SubstrateError>> + Send;
+        revoked_by: &str,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 
-    /// Lookup: is K trusted for `domain`? Returns the resolved trust
-    /// edge (Direct → trusted-as-peer, Registry → trusted-as-voucher,
-    /// Transitive → vouched-for, None → untrusted).
-    fn query_trust(
+    /// Point lookup — the raw federation_keys row including trust
+    /// columns. No transitive resolution.
+    fn lookup_trust(
         &self,
         key: &str,
-        domain: &str,
-    ) -> impl Future<Output = Result<TrustEdge, SubstrateError>> + Send;
+    ) -> impl Future<Output = Result<Option<TrustRow>, Error>> + Send;
 
-    /// Returns keys A trusts as registries for `domain`. Used by
-    /// the deferral router to find vouchers.
-    fn list_registries_for_domain(
+    /// All currently-trusted keys filtered by relationship + (for
+    /// registries) domain. Used by node-core's transitive resolver.
+    fn list_trusted_keys(
         &self,
-        domain: &str,
-    ) -> impl Future<Output = Result<Vec<String>, SubstrateError>> + Send;
-
-    /// Returns keys vouched-for by `registry_key` in `domain`. Reads
-    /// from `cirisnode.contributions` filtered to
-    /// `contribution_type = registry_vouch`.
-    fn list_vouched_for(
-        &self,
-        registry_key: &str,
-        domain: &str,
-    ) -> impl Future<Output = Result<Vec<String>, SubstrateError>> + Send;
+        filter: TrustFilter,
+    ) -> impl Future<Output = Result<Vec<TrustRow>, Error>> + Send;
 }
 
 pub struct TrustGrant {
@@ -156,34 +192,112 @@ pub struct TrustGrant {
     pub trust_type: TrustType,
     pub trust_relationship: TrustRelationship,
     pub trust_domains: Option<Vec<String>>,
-    pub signed_by: String,
+    pub trusted_by: String,
     pub expires_at: Option<DateTime<Utc>>,
+}
+
+pub struct TrustRow {
+    pub key: String,
+    pub trust_type: TrustType,
+    pub trust_relationship: TrustRelationship,
+    pub trust_domains: Option<Vec<String>>,
+    pub trusted_by: String,
+    pub trusted_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+pub struct TrustFilter {
+    pub trust_type: Option<TrustType>,
+    pub trust_relationship: Option<TrustRelationship>,
+    pub domain: Option<String>,  // only meaningful with relationship=Registry
+    pub include_expired: bool,
+}
+```
+
+This is **5 methods + 4 types** on persist. The trait is consumable by
+both `ciris-lens-core` (for Counter-RII trust-aware detection paths,
+CIRISLensCore#21's downstream needs) and `ciris-node-core` (for
+deferral routing). Neither has to depend on the other; both depend on
+persist as they already do.
+
+If persist team prefers to extend `NodeCoreService` rather than add a
+sibling trait, that's their call — the surface is the same shape
+either way. Push the contract upstream; let persist organize.
+
+### 4.3 Transitive resolution — CIRISNodeCore (a function, not a trait)
+
+Node-core's value-add is the transitive resolution policy. One free
+function over the persist directory:
+
+```rust
+// crate::trust (new module)
+pub async fn resolve_trust<D: FederationDirectory>(
+    directory: &D,
+    key: &str,
+    domain: &str,
+) -> Result<TrustEdge, SubstrateError> {
+    // 1. Direct lookup
+    if let Some(row) = directory.lookup_trust(key).await? {
+        if !is_expired(&row) {
+            return Ok(match row.trust_relationship {
+                TrustRelationship::Direct => TrustEdge::Direct { trust_type: row.trust_type },
+                TrustRelationship::Registry => TrustEdge::Registry {
+                    trust_type: row.trust_type,
+                    domains: row.trust_domains.unwrap_or_default(),
+                },
+            });
+        }
+    }
+
+    // 2. Transitive — search for a currently-trusted registry that vouches
+    //    for `key` in `domain`.
+    let registries = directory
+        .list_trusted_keys(TrustFilter {
+            trust_relationship: Some(TrustRelationship::Registry),
+            domain: Some(domain.into()),
+            include_expired: false,
+            ..Default::default()
+        })
+        .await?;
+    for registry in registries {
+        if registry_vouches_for(&registry.key, key, domain).await? {
+            return Ok(TrustEdge::Transitive {
+                via_registry: registry.key,
+            });
+        }
+    }
+
+    Ok(TrustEdge::Untrusted)
 }
 
 pub enum TrustEdge {
     Direct { trust_type: TrustType },
     Registry { trust_type: TrustType, domains: Vec<String> },
-    /// K_C is trusted because K_B (a domain-registry) vouched for K_C.
-    Transitive { via_registry: String, domain: String },
+    Transitive { via_registry: String },  // domain implicit from query
     Untrusted,
 }
 ```
 
-Default impl bridges to persist via the engine handle — same shape as
-`crate::service::NodeCore<E: NodeCoreService>`.
+One function. No trait. No constructor. The transitive search is the
+only non-trivial logic and it's a dozen lines.
+
+The `registry_vouches_for` helper queries `cirisnode.contributions`
+via existing `list_contributions` filter:
+`contribution_type='registry_vouch' AND author_id=$registry AND
+payload->>'vouched_key' = $key AND payload->>'vouched_domain' = $domain`.
 
 ---
 
 ## 5. Registry-vouching as a Contribution kind
 
-A registry vouching for a resolver is itself a federation event. New
-variant added to `SCHEMA.md` §3.1 `contribution_type` enum:
+A registry vouching for a resolver is a federation event. New variant
+added to `SCHEMA.md` §3.1 `contribution_type` enum:
 
 ```
 | `registry_vouch` | §4.13 | A registry vouches for a key in a domain |
 ```
 
-Typed payload (node-core's `crate::payloads::registry_vouch`):
+Typed payload in node-core's `crate::payloads::registry_vouch`:
 
 ```rust
 pub struct RegistryVouchPayload {
@@ -196,91 +310,91 @@ pub struct RegistryVouchPayload {
 
 Envelope-level: `author_id = K_B` (the registry), standard signature.
 Witness-set required when the vouch would jump K_C's transitive-trust
-count past a policy-tunable threshold (mirrors the ExpertiseAttestation
-jump-threshold gate at §3.5).
+count past a policy-tunable threshold (mirrors the
+`ExpertiseAttestation` jump-threshold gate at §3.5).
 
-`TrustLedger::list_vouched_for` reads from `cirisnode.contributions`
-filtered to this `contribution_type` + `subject.subject = vouched_domain`.
+**Revocation of a vouch is author-only.** K_B revokes by submitting a
+new `registry_vouch` with the same `vouched_key` + `vouched_domain`
+and `expires_at = now()`. Counter-votes are not supported — they
+muddy the trust graph and overlap with the `moderation_event` /
+`slashing_attestation` path for bad-faith vouching.
 
 ---
 
-## 6. DeferralRouter — the seam that makes WA eliminable
+## 6. DeferralRouter — a function, not a struct
 
 ```rust
-// src/router.rs (new module)
+// crate::routing — extend the existing module
+pub async fn route_deferral<E, D, C>(
+    engine: &E,
+    directory: &D,
+    classifier: C,
+    question_context: &str,
+    preferences: Option<&RoutingPreferences>,
+    metadata: &impl ContributorMetadataProvider,
+) -> Result<RoutingDecision, SubstrateError>
+where
+    E: NodeCoreService,
+    D: FederationDirectory,
+    C: Fn(&str) -> Result<String, SubstrateError>,
+{
+    let domain = classifier(question_context)?;
 
-pub struct DeferralRouter<E: NodeCoreService, T: TrustLedger> {
-    engine: Arc<E>,
-    trust: Arc<T>,
-    classifier: Arc<dyn DomainClassifier>,
-    witness_diversity: WitnessDiversityPolicy,
-}
-
-impl<E: NodeCoreService, T: TrustLedger> DeferralRouter<E, T> {
-    /// Pure-policy method — no envelope construction. Caller signs +
-    /// submits via crate::sign + crate::service::NodeCore.
-    pub async fn select_resolvers(
-        &self,
-        question_context: &str,
-    ) -> Result<RoutingDecision, SubstrateError> {
-        // 1. Classify the domain
-        let domain = self.classifier.classify(question_context)?;
-
-        // 2. Find registries A trusts for this domain
-        let registries = self.trust.list_registries_for_domain(&domain).await?;
-
-        // 3. Union of vouched-for resolvers across registries
-        let mut candidates: Vec<String> = Vec::new();
-        for registry in &registries {
-            let vouched = self.trust.list_vouched_for(registry, &domain).await?;
-            candidates.extend(vouched);
-        }
-
-        // 4. Apply Witness-Diversity — reuse crate::routing::select_routed's
-        //    diversity algorithm. Resolver metadata = persist's federation_keys
-        //    row's jurisdiction + operator fields.
-        let routing_outcome = apply_diversity(
-            candidates,
-            &self.witness_diversity,
-            self.engine.as_ref(),
-        ).await?;
-
-        Ok(RoutingDecision {
-            domain,
-            registries_consulted: registries,
-            selected_resolvers: routing_outcome.routed,
-            diversity_summary: routing_outcome,
+    // Find registries trusted for this domain.
+    let registries = directory
+        .list_trusted_keys(TrustFilter {
+            trust_relationship: Some(TrustRelationship::Registry),
+            domain: Some(domain.clone()),
+            include_expired: false,
+            ..Default::default()
         })
-    }
-}
+        .await?;
 
-pub trait DomainClassifier: Send + Sync {
-    fn classify(&self, question_context: &str) -> Result<String, SubstrateError>;
+    // Union of vouched-for resolvers across registries.
+    let mut candidates: Vec<RoutableContributor> = Vec::new();
+    for registry in &registries {
+        let vouched = list_vouched(engine, &registry.key, &domain).await?;
+        candidates.extend(vouched);
+    }
+
+    // Apply Witness-Diversity via existing crate::routing::select_routed.
+    let outcome = select_routed_inner(candidates, preferences, metadata);
+
+    Ok(RoutingDecision {
+        domain,
+        registries_consulted: registries.into_iter().map(|r| r.key).collect(),
+        selected_resolvers: outcome.routed,
+        diversity_summary: outcome,
+    })
 }
 ```
 
-The router returns a `RoutingDecision`; the caller (agent shim or
-NodeClient method) constructs the signed `DeferralRequest`
-Contribution per existing `crate::wire::DeferralRequest` shape, sends
-it via `engine.put_contribution`, gets the routed-set ack back.
+One function. The `classifier` is a closure — single method, no
+state, no shared dispatch (same blanket-impl pattern
+`ContributorMetadataProvider` uses today). Callers pass `|ctx|
+Ok("medical_deferral".into())` or whatever heuristic / lens-core
+classifier they prefer.
+
+`list_vouched` is a small helper over `engine.list_contributions` with
+the filter from §4.3's `registry_vouches_for`.
 
 ---
 
 ## 7. Multi-resolver aggregation reuses existing primitives
 
-When N resolvers are routed (N > 1 — the typical case for high-stakes
+When N resolvers are routed (N > 1 — typical for high-stakes
 deferrals), each resolver casts a Vote on the deferral_request
-Contribution. The §7 weighted aggregate (`crate::aggregate`) we
-already built computes the rolling tally. Threshold-crossing for "the
-deferral is resolved" is policy:
+Contribution. The §7 weighted aggregate (`crate::aggregate`, shipped)
+computes the rolling tally. Threshold-crossing for "deferral
+resolved" is consumer policy:
 
 - **Unanimous** (strict): all resolvers must approve.
 - **Quorum-weighted**: `approval_ratio() >= 0.66` per
   `Aggregate::Resolved`.
 - **First-N**: first N substantive responses; abstains don't count.
 
-Selectable at consumer policy time. Default = quorum-weighted (matches
-the rubric crowdsourcing flow's threshold gate).
+Default = quorum-weighted (matches the rubric crowdsourcing flow's
+threshold gate).
 
 ---
 
@@ -292,76 +406,61 @@ primitive — bounds enforced by the engine (180-day time bound for
 NewEvidence / ProceduralError, unlimited for QuorumCompromise; 3
 filings trips harassment review).
 
-No new spec work for this — the path already exists.
+No new spec work.
 
 ---
 
-## 9. Migration — agent's hardcoded WAs become DIRECT trust grants
-
-On first boot of the post-fold agent:
-
-1. Read agent's current `cirisnode_url` + WA endpoint config from
-   the pre-fold state.
-2. For each configured endpoint, derive the WA's Ed25519 pubkey (from
-   its registration record in CIRISRegistry).
-3. Issue a `TrustGrant { key, trust_type: Temporary, trust_relationship:
-   Direct, trust_domains: None, signed_by: steward_key, expires_at:
-   Some(now + 90d) }` — Temporary + Direct + 90-day expiry forces a
-   review pass before automatic expiration.
-4. Audit the migration grant in `cirisaudit`.
-
-Existing deployments don't change deferral routing behavior; they just
-flow the decision through the trust ledger. After the migration
-window, the steward can upgrade to `Partnered` + `Registry` grants if
-the WA is part of a multi-resolver structure.
-
----
-
-## 10. Out of scope (this FSD)
+## 9. Out of scope (this FSD)
 
 - **Domain taxonomy ownership** — the canonical set of domain
   identifiers (e.g. `medical_deferral`, `legal_review`,
-  `ethical_arbitration`) is federation policy, not encoded here.
-  Either a CIRISRegistry-published manifest or a CIRISAgent-side
-  config list. Lean: registry manifest matching the `manifest.json`
-  pattern for languages. Decision deferred to the v0.1.0 cut.
-- **`DomainClassifier` impl** — the heuristic that maps question
+  `ethical_arbitration`). Either a CIRISRegistry-published manifest
+  or a CIRISAgent-side config list. Lean: registry manifest matching
+  the `manifest.json` pattern for languages. Decision deferred to
+  v0.1.0 cut.
+- **`DomainClassifier` heuristic** — the impl that maps question
   context to a domain identifier. Plausibly a CIRISLensCore-side
-  scoring task (lens-core already classifies trace content). Out of
-  this FSD's scope.
-- **ConsentService fold into LensCore** — separate issue
-  (CIRISAgent#760 + forthcoming LensCore issue). Shares the
-  `trust_type` column shape but owns its own decay protocol +
-  bilateral PARTNERED approval loop.
+  scoring task (lens-core already classifies trace content). The
+  trait shape (closure) is here; the impl isn't.
+- **CIRISAgent migration sequence** — converting hardcoded WA
+  endpoints into DIRECT trust grants on first boot of the post-fold
+  agent is CIRISAgent's concern. Covered in the CIRISAgent issue that
+  lands the WA shim (forthcoming after #1 Phase 1).
+- **ConsentService fold into LensCore** — separate issue (CIRISAgent
+  #760 + forthcoming LensCore issue). Shares the `trust_type` column
+  shape with this design but owns its own decay protocol + bilateral
+  PARTNERED approval loop.
 
 ---
 
-## 11. Implementation order
+## 10. Implementation order
 
 | # | Step | Dep | Repo |
 |---|---|---|---|
-| 1 | `federation_keys` trust columns (V020+ migration) | CIRISAgent#760 §RC consent_role lock | CIRISPersist (#47 absorbs) |
-| 2 | `registry_vouch` Contribution variant — SCHEMA + payload struct + impl Message + handler | (1) | CIRISNodeCore (this repo) |
-| 3 | `TrustLedger` trait + persist-backed impl + in-memory mock | (1) + (2) | CIRISNodeCore |
-| 4 | `DeferralRouter` + `DomainClassifier` trait + stub classifier | (3) | CIRISNodeCore |
-| 5 | PyO3 surface for the above (extends CIRISNodeCore#1 Phase 1) | (4) + #1 Phase 1 | CIRISNodeCore |
-| 6 | WiseAuthority shim at agent — delegates to NodeClient through the trust ledger | (5) | CIRISAgent |
-| 7 | Migration: hardcoded WA endpoints → DIRECT trust grants | (6) | CIRISAgent |
+| 1 | `federation_keys` trust columns + `FederationDirectory` trait + PostgresBackend impl | CIRISAgent#760 §RC consent_role lock | CIRISPersist (absorbs into #47) |
+| 2 | `registry_vouch` Contribution variant — SCHEMA + payload struct + impl Message + handler | (1) | CIRISNodeCore |
+| 3 | `crate::trust::resolve_trust` function + tests against MockEngine | (1) + (2) | CIRISNodeCore |
+| 4 | `crate::routing::route_deferral` function | (3) | CIRISNodeCore |
+| 5 | PyO3 surface (extends CIRISNodeCore#1 Phase 1) | (4) + #1 Phase 1 | CIRISNodeCore |
+| 6 | WiseAuthority shim at agent — delegates to NodeClient + the trust ledger | (5) | CIRISAgent |
 
 Steps 2-5 are all node-core work and can land in successive commits
-once (1) ships in persist. Steps 6-7 are cross-repo + need CIRISAgent
-team coordination.
+once (1) ships. Step 6 is cross-repo + CIRISAgent migration coverage.
 
 ---
 
-## 12. References
+## 11. References
 
 - CIRISNodeCore#1 — adapter swap (PyO3 surface this FSD extends)
 - CIRISNodeCore#2 — the umbrella issue this FSD details
-- CIRISPersist#47 — federation_keys schema for trust columns
+- CIRISPersist#47 — Counter-RII substrate (absorbs §4.1 columns + §4.2 trait)
 - CIRISAgent#760 — Accord §RC consent_role primitive (trust_type origin)
-- `MISSION.md` — eleven primitives (Identity, Vote, Moderation,
-  Witness-Diversity, Reconsideration, Truth-Grounding, Contribution,
-  Expertise — all consumed by the design)
-- `SCHEMA.md` §3.1 — adds `registry_vouch` to the contribution_type
-  enum; §13.2 pending/canonical split applies unchanged.
+- CIRISLensCore#21 — Counter-RII detector (downstream consumer of `FederationDirectory`)
+- `MISSION.md` — eleven primitives consumed by the design
+  (Identity, Vote, Moderation, Witness-Diversity, Reconsideration,
+  Truth-Grounding, Contribution, Expertise)
+- `SCHEMA.md` §3.1 — adds `registry_vouch` to the `contribution_type`
+  enum; §13.2 pending/canonical split applies unchanged
+- `crate::aggregate` (shipped at `9b584aa`) — multi-resolver tallying
+- `crate::routing` (shipped at `9eef3f5`) — Witness-Diversity selection
+- `crate::sign` (shipped at `ca8ddde`) — envelope construction
