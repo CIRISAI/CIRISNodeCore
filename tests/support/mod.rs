@@ -25,6 +25,9 @@ use ciris_node_core::substrate::{
     ReconsiderationRequest, RoutableContributor, SlashingAttestation, SubstrateError,
     TargetRowKind, VoteEnvelope, VoteListPage, VoteWeight, VotesFilter,
 };
+use ciris_node_core::trust::{
+    FederationDirectory, TrustFilter, TrustGrant, TrustRelationship, TrustRow,
+};
 
 #[derive(Default)]
 struct MockState {
@@ -48,6 +51,9 @@ struct MockState {
     expertise: HashMap<(String, String, String), (f64, bool)>,
     // Active-tier override (in addition to per-cell). Present means active.
     active_set: HashSet<String>,
+
+    // FederationDirectory state — trust rows keyed by `key`.
+    trust_rows: HashMap<String, TrustRow>,
 }
 
 /// In-memory `NodeCoreService` impl for tests.
@@ -343,13 +349,54 @@ impl NodeCoreService for MockEngine {
 
     fn list_contributions(
         &self,
-        _filter: ContributionsFilter,
+        filter: ContributionsFilter,
         _cursor: Option<ListCursor>,
         _limit: i64,
     ) -> impl Future<Output = Result<ContributionListPage, SubstrateError>> + Send {
+        let filter = filter;
         async move {
+            let st = self.state.lock().unwrap();
+            let items: Vec<ContributionEnvelope> = st
+                .contributions
+                .iter()
+                .filter(|env| {
+                    if let Some(ct) = filter.contribution_type {
+                        if env.contribution_type != ct {
+                            return false;
+                        }
+                    }
+                    if let Some(ref dom) = filter.domain {
+                        if &env.subject.domain != dom {
+                            return false;
+                        }
+                    }
+                    if let Some(ref lang) = filter.language {
+                        if &env.subject.language != lang {
+                            return false;
+                        }
+                    }
+                    if let Some(ref sk) = filter.subject_kind {
+                        if env.subject.subject.as_deref() != Some(sk.as_str()) {
+                            return false;
+                        }
+                    }
+                    if let Some(ref author) = filter.author_id {
+                        if &env.author_id != author {
+                            return false;
+                        }
+                    }
+                    if let Some(canonical) = filter.is_canonical {
+                        let is_can = st.canonical.get(&env.contribution_id).copied().unwrap_or(false);
+                        if is_can != canonical {
+                            return false;
+                        }
+                    }
+                    true
+                })
+                .cloned()
+                .collect();
             Ok(ContributionListPage {
-                items: self.state.lock().unwrap().contributions.clone(),
+                items,
                 next_cursor: None,
             })
         }
@@ -428,6 +475,116 @@ impl NodeCoreService for MockEngine {
                 last_update_contribution: None,
                 created_at: Utc::now(),
             }))
+        }
+    }
+}
+
+impl FederationDirectory for MockEngine {
+    fn grant_trust(
+        &self,
+        grant: TrustGrant,
+    ) -> impl Future<Output = Result<(), SubstrateError>> + Send {
+        let g = grant;
+        async move {
+            if g.trusted_by == g.key {
+                return Err(SubstrateError::InvalidArgument(
+                    "trusted_by must differ from key (no self-trust)".into(),
+                ));
+            }
+            if matches!(g.trust_relationship, TrustRelationship::Registry) {
+                let empty = g
+                    .trust_domains
+                    .as_ref()
+                    .map(|v| v.is_empty())
+                    .unwrap_or(true);
+                if empty {
+                    return Err(SubstrateError::InvalidArgument(
+                        "registry trust requires non-empty trust_domains".into(),
+                    ));
+                }
+            }
+            let row = TrustRow {
+                key: g.key.clone(),
+                trust_type: g.trust_type,
+                trust_relationship: g.trust_relationship,
+                trust_domains: g.trust_domains,
+                trusted_by: g.trusted_by,
+                trusted_at: Utc::now(),
+                expires_at: g.expires_at,
+            };
+            self.state.lock().unwrap().trust_rows.insert(g.key, row);
+            Ok(())
+        }
+    }
+
+    fn revoke_trust(
+        &self,
+        key: &str,
+        _revoked_by: &str,
+    ) -> impl Future<Output = Result<(), SubstrateError>> + Send {
+        let key = key.to_owned();
+        async move {
+            let mut st = self.state.lock().unwrap();
+            if let Some(row) = st.trust_rows.get_mut(&key) {
+                row.expires_at = Some(Utc::now());
+            }
+            Ok(())
+        }
+    }
+
+    fn lookup_trust(
+        &self,
+        key: &str,
+    ) -> impl Future<Output = Result<Option<TrustRow>, SubstrateError>> + Send {
+        let key = key.to_owned();
+        async move { Ok(self.state.lock().unwrap().trust_rows.get(&key).cloned()) }
+    }
+
+    fn list_trusted_keys(
+        &self,
+        filter: TrustFilter,
+    ) -> impl Future<Output = Result<Vec<TrustRow>, SubstrateError>> + Send {
+        async move {
+            let st = self.state.lock().unwrap();
+            let now = Utc::now();
+            let mut out: Vec<TrustRow> = st
+                .trust_rows
+                .values()
+                .filter(|row| {
+                    if !filter.include_expired {
+                        if let Some(t) = row.expires_at {
+                            if t <= now {
+                                return false;
+                            }
+                        }
+                    }
+                    if let Some(tt) = filter.trust_type {
+                        if row.trust_type != tt {
+                            return false;
+                        }
+                    }
+                    if let Some(tr) = filter.trust_relationship {
+                        if row.trust_relationship != tr {
+                            return false;
+                        }
+                    }
+                    if let Some(ref d) = filter.domain {
+                        let in_domain = row
+                            .trust_domains
+                            .as_ref()
+                            .map(|v| v.iter().any(|x| x == d))
+                            .unwrap_or(false);
+                        if !in_domain {
+                            return false;
+                        }
+                    }
+                    true
+                })
+                .cloned()
+                .collect();
+            // Deterministic ordering for tests.
+            out.sort_by(|a, b| a.key.cmp(&b.key));
+            Ok(out)
         }
     }
 }

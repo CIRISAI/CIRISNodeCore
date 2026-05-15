@@ -30,4 +30,5 @@ pub mod deferral;
 pub mod expertise_attestation;
 pub mod moderation_event;
 pub mod reconsideration;
+pub mod registry_vouch;
 pub mod slashing_attestation;

@@ -201,3 +201,184 @@ async fn default_preferences_apply_when_none_passed() {
     assert_eq!(outcome.routed.len(), 9, "default max per §3.3 step 4");
     assert!(outcome.min_met, "default min=5 met");
 }
+
+// ── route_deferral integration (composes trust + diversity) ─────────────
+
+use ciris_node_core::routing::route_deferral;
+use ciris_node_core::substrate::{Cell, ContributionType};
+use ciris_node_core::trust::{
+    FederationDirectory, TrustGrant, TrustRelationship, TrustType,
+};
+use ciris_node_core::payloads::registry_vouch::{
+    RegistryVouchPayload, SUBJECT_KIND as VOUCH_SUBJECT_KIND,
+};
+
+fn make_vouch_envelope(
+    registry: &str,
+    vouched_key: &str,
+    domain: &str,
+) -> ciris_node_core::substrate::ContributionEnvelope {
+    let payload = serde_json::to_value(RegistryVouchPayload {
+        vouched_key: vouched_key.into(),
+        vouched_domain: domain.into(),
+        expires_at: None,
+        rationale: "fixture".into(),
+    })
+    .unwrap();
+    support::build_envelope(
+        &format!("vouch_{registry}_{vouched_key}"),
+        ContributionType::Proposal,
+        registry,
+        Cell {
+            domain: domain.into(),
+            language: "en".into(),
+            subject: Some(VOUCH_SUBJECT_KIND.into()),
+        },
+        payload,
+    )
+}
+
+async fn setup_routing_world(mock: &MockEngine) {
+    use ciris_node_core::NodeCoreService;
+    // Two registries trusted in medical_deferral; each vouches for two resolvers.
+    mock.grant_trust(TrustGrant {
+        key: "K_R1".into(),
+        trust_type: TrustType::Temporary,
+        trust_relationship: TrustRelationship::Registry,
+        trust_domains: Some(vec!["medical_deferral".into()]),
+        trusted_by: "steward".into(),
+        expires_at: None,
+    })
+    .await
+    .unwrap();
+    mock.grant_trust(TrustGrant {
+        key: "K_R2".into(),
+        trust_type: TrustType::Temporary,
+        trust_relationship: TrustRelationship::Registry,
+        trust_domains: Some(vec!["medical_deferral".into()]),
+        trusted_by: "steward".into(),
+        expires_at: None,
+    })
+    .await
+    .unwrap();
+
+    // R1 vouches for resolvers alice, bob; R2 vouches for carol, dan.
+    for env in [
+        make_vouch_envelope("K_R1", "alice", "medical_deferral"),
+        make_vouch_envelope("K_R1", "bob", "medical_deferral"),
+        make_vouch_envelope("K_R2", "carol", "medical_deferral"),
+        make_vouch_envelope("K_R2", "dan", "medical_deferral"),
+    ] {
+        mock.put_contribution(env).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn route_deferral_composes_trust_and_vouches() {
+    let mock = MockEngine::new();
+    setup_routing_world(&mock).await;
+
+    let classifier = |_ctx: &str| Ok::<_, ciris_node_core::substrate::SubstrateError>(
+        "medical_deferral".to_string(),
+    );
+    let no_metadata = |_id: &str| None::<ContributorMetadata>;
+
+    let decision = route_deferral(
+        &mock,
+        &mock,
+        classifier,
+        "Stage-2 medication register check",
+        None, // default preferences: max=9, min=5, diversity=None
+        &no_metadata,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(decision.domain, "medical_deferral");
+    assert_eq!(decision.registries_consulted.len(), 2);
+    assert!(decision.registries_consulted.contains(&"K_R1".to_string()));
+    assert!(decision.registries_consulted.contains(&"K_R2".to_string()));
+    // 4 vouched resolvers; default max=9 → all included.
+    assert_eq!(decision.selected_resolvers.len(), 4);
+    for who in ["alice", "bob", "carol", "dan"] {
+        assert!(
+            decision.selected_resolvers.contains(&who.to_string()),
+            "missing {who}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn route_deferral_bounded_by_max_responders() {
+    use ciris_node_core::payloads::deferral::{DiversityPolicy, RoutingPreferences};
+    let mock = MockEngine::new();
+    setup_routing_world(&mock).await;
+
+    let prefs = RoutingPreferences {
+        min_responders: Some(2),
+        max_responders: Some(2),
+        diversity: Some(DiversityPolicy::None),
+    };
+    let classifier = |_ctx: &str| Ok::<_, ciris_node_core::substrate::SubstrateError>(
+        "medical_deferral".to_string(),
+    );
+    let no_metadata = |_id: &str| None::<ContributorMetadata>;
+
+    let decision = route_deferral(
+        &mock,
+        &mock,
+        classifier,
+        "x",
+        Some(&prefs),
+        &no_metadata,
+    )
+    .await
+    .unwrap();
+    assert_eq!(decision.selected_resolvers.len(), 2);
+    assert!(decision.diversity_summary.min_met);
+}
+
+#[tokio::test]
+async fn route_deferral_with_no_trusted_registries_returns_empty() {
+    let mock = MockEngine::new();
+    // No grants, no vouches.
+    let classifier = |_ctx: &str| Ok::<_, ciris_node_core::substrate::SubstrateError>(
+        "medical_deferral".to_string(),
+    );
+    let no_metadata = |_id: &str| None::<ContributorMetadata>;
+    let decision = route_deferral(
+        &mock,
+        &mock,
+        classifier,
+        "x",
+        None,
+        &no_metadata,
+    )
+    .await
+    .unwrap();
+    assert!(decision.registries_consulted.is_empty());
+    assert!(decision.selected_resolvers.is_empty());
+}
+
+#[tokio::test]
+async fn route_deferral_filters_to_classifier_domain() {
+    let mock = MockEngine::new();
+    setup_routing_world(&mock).await;
+    // Classifier returns a domain the registries don't cover.
+    let classifier = |_ctx: &str| Ok::<_, ciris_node_core::substrate::SubstrateError>(
+        "legal_review".to_string(),
+    );
+    let no_metadata = |_id: &str| None::<ContributorMetadata>;
+    let decision = route_deferral(
+        &mock,
+        &mock,
+        classifier,
+        "x",
+        None,
+        &no_metadata,
+    )
+    .await
+    .unwrap();
+    assert!(decision.registries_consulted.is_empty());
+    assert!(decision.selected_resolvers.is_empty());
+}

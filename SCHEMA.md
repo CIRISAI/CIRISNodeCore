@@ -203,6 +203,7 @@ shapes within `proposal`-type Contributions.
 | `accord_edit` | A diff against the canonical localized ACCORD body | Required |
 | `failure_pattern` | A signed ticket: agent is observed to fail pattern X with evidence | None (witness diversity not required for filing tickets; required for adjudication) |
 | `free_form` | Narrative argument or commentary | None |
+| `registry_vouch` | A registry attests that another key is a qualified resolver in a domain (per `FSD/TRUST_HIERARCHY.md`) | Required if vouch jumps target's transitive-trust count past the cell's jump-threshold policy parameter |
 
 ---
 
@@ -434,6 +435,45 @@ Per `MISSION.md` §4.10 / §5.7. Witness set always required. Subject
 to recursion bound (one per ground per SlashingAttestation; three
 triggers harassment review) and time bound (180-day default for
 NEW_EVIDENCE / PROCEDURAL_ERROR; unlimited for QUORUM_COMPROMISE).
+
+### 4.13 `registry_vouch`
+
+Per `FSD/TRUST_HIERARCHY.md`. A registry key vouches that another key
+is a qualified resolver in a domain. Rides a `proposal`-type
+`ContributionEnvelope` with `subject.subject_kind = "registry_vouch"`.
+
+The envelope's `author_id` is the registry doing the vouching; the
+envelope's `subject.{domain, language}` carries the cell whose
+`subject_kind = "registry_vouch"` flag puts the row in the
+trust-graph query path. The vouched-for key + the domain scope live
+in the typed payload below.
+
+Payload:
+
+```json
+{
+  "vouched_key": "<base64url Ed25519 — K_C>",
+  "vouched_domain": "medical_deferral",
+  "expires_at": "2027-05-15T00:00:00Z",
+  "rationale": "Verified board certification in psychiatry; 8 years substantive contribution in the cell."
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `vouched_key` | ContributorId | yes | K_C — the key being vouched for. Federation identity is the pubkey per §2.2. |
+| `vouched_domain` | string | yes | Domain scope of the vouch. MUST be one of the cell-permitted domain identifiers (canonical taxonomy TBD per `FSD/TRUST_HIERARCHY.md` §9). |
+| `expires_at` | ISO timestamp | optional | `None` = open-ended. Engine-side query treats expired vouches as if revoked (`MISSION.md` §3.9-equivalent at the trust-graph layer). |
+| `rationale` | string | yes | Free-text justification recorded on the audit chain. |
+
+Witness-set required when the vouch would jump K_C's transitive-trust
+count past the cell's jump-threshold policy parameter — mirrors the
+ExpertiseAttestation gate at §3.5.
+
+Revocation is **author-only**: K_B revokes by submitting a new
+`registry_vouch` with the same `vouched_key` + `vouched_domain` and
+`expires_at = now()`. Counter-votes are not supported; bad-faith
+vouches route through `moderation_event` / `slashing_attestation`.
 
 ---
 

@@ -188,3 +188,151 @@ fn select_with_diversity<M: ContributorMetadataProvider>(
     }
     routed
 }
+
+// ── Deferral routing (composes trust + diversity) ────────────────────────
+
+use crate::trust::{
+    list_vouched_for, FederationDirectory, TrustFilter, TrustRelationship,
+};
+
+/// Result of a full deferral-routing pass. Captures the resolver
+/// set plus the audit-trail metadata callers persist.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoutingDecision {
+    /// Domain the question was classified to.
+    pub domain: String,
+    /// Registries consulted (currently trusted for the domain).
+    pub registries_consulted: Vec<String>,
+    /// Resolvers chosen after diversity selection.
+    pub selected_resolvers: Vec<String>,
+    /// Diversity summary (jurisdictions, operators, min_met).
+    pub diversity_summary: RoutingOutcome,
+}
+
+/// Compose: classify → consult trusted registries → expand vouched
+/// resolvers → apply Witness-Diversity selection.
+///
+/// Per `MISSION.md` §3.3 + `FSD/TRUST_HIERARCHY.md` §6.
+///
+/// `classifier` is a closure (single method, no state); pass any
+/// `Fn(&str) -> Result<String, SubstrateError>`.
+pub async fn route_deferral<E, D, C, M>(
+    engine: &E,
+    directory: &D,
+    classifier: C,
+    question_context: &str,
+    preferences: Option<&crate::payloads::deferral::RoutingPreferences>,
+    metadata: &M,
+) -> Result<RoutingDecision, crate::substrate::SubstrateError>
+where
+    E: NodeCoreService,
+    D: FederationDirectory,
+    C: Fn(&str) -> Result<String, crate::substrate::SubstrateError>,
+    M: ContributorMetadataProvider,
+{
+    let domain = classifier(question_context)?;
+
+    // Trusted registries for this domain.
+    let registries = directory
+        .list_trusted_keys(TrustFilter {
+            trust_relationship: Some(TrustRelationship::Registry),
+            domain: Some(domain.clone()),
+            include_expired: false,
+            ..Default::default()
+        })
+        .await?;
+
+    // Union of vouched-for resolvers across registries.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut candidates: Vec<RoutableContributor> = Vec::new();
+    for registry in &registries {
+        let vouched = list_vouched_for(engine, &registry.key, &domain).await?;
+        for key in vouched {
+            if seen.insert(key.clone()) {
+                // Pull each candidate's expertise via routable_contributors —
+                // call once per (domain, language) cell rather than per-key.
+                // For v0.1.0-dev: assume one cell at a time; multi-language
+                // routing is a v0.1.0-cut concern.
+                candidates.push(RoutableContributor {
+                    contributor_id: key,
+                    expertise: 0.0, // populated below
+                });
+            }
+        }
+    }
+
+    // Enrich expertise from routable_contributors for the cell. We use
+    // the first registry's perceived cell language — domain alone is
+    // the routing key here. Language enrichment + cross-language
+    // routing is on the v0.1.0-cut roadmap.
+    let language = preferences
+        .and_then(|_p| None::<&str>) // RoutingPreferences doesn't carry language today
+        .unwrap_or("");
+    if !language.is_empty() {
+        let routable_with_expertise = engine.routable_contributors(&domain, language).await?;
+        for c in &mut candidates {
+            if let Some(found) = routable_with_expertise.iter().find(|r| r.contributor_id == c.contributor_id) {
+                c.expertise = found.expertise;
+            }
+        }
+    }
+
+    let diversity_summary = select_with_diversity_outcome(candidates, preferences, metadata);
+
+    let registries_consulted = registries.into_iter().map(|r| r.key).collect();
+    let selected_resolvers = diversity_summary.routed.clone();
+
+    Ok(RoutingDecision {
+        domain,
+        registries_consulted,
+        selected_resolvers,
+        diversity_summary,
+    })
+}
+
+/// Inner diversity selection that takes a pre-built candidate set.
+/// Mirrors [`select_routed`]'s sort + diversity sweep over an
+/// arbitrary candidate vec, without re-querying the engine.
+fn select_with_diversity_outcome<M: ContributorMetadataProvider>(
+    mut candidates: Vec<RoutableContributor>,
+    preferences: Option<&crate::payloads::deferral::RoutingPreferences>,
+    metadata: &M,
+) -> RoutingOutcome {
+    candidates.sort_by(|a, b| {
+        b.expertise
+            .partial_cmp(&a.expertise)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let max = preferences
+        .and_then(|p| p.max_responders)
+        .unwrap_or(DEFAULT_MAX) as usize;
+    let min = preferences
+        .and_then(|p| p.min_responders)
+        .unwrap_or(DEFAULT_MIN) as usize;
+    let policy = preferences
+        .and_then(|p| p.diversity)
+        .unwrap_or(crate::payloads::deferral::DiversityPolicy::None);
+
+    let routed = select_with_diversity(candidates, policy, max, metadata);
+
+    let mut jurisdictions: Vec<String> = Vec::new();
+    let mut operators: Vec<String> = Vec::new();
+    for id in &routed {
+        if let Some(m) = metadata.metadata(id) {
+            if !jurisdictions.contains(&m.jurisdiction) {
+                jurisdictions.push(m.jurisdiction);
+            }
+            if !operators.contains(&m.operator) {
+                operators.push(m.operator);
+            }
+        }
+    }
+
+    RoutingOutcome {
+        min_met: routed.len() >= min,
+        routed,
+        jurisdictions_distinct: jurisdictions,
+        operators_distinct: operators,
+    }
+}

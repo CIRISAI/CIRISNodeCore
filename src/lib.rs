@@ -60,6 +60,7 @@ pub mod routing;
 pub mod service;
 pub mod sign;
 pub mod substrate;
+pub mod trust;
 pub mod wire;
 
 pub use service::NodeCore;

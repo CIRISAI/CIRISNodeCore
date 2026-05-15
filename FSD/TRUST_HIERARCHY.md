@@ -290,12 +290,27 @@ payload->>'vouched_key' = $key AND payload->>'vouched_domain' = $domain`.
 
 ## 5. Registry-vouching as a Contribution kind
 
-A registry vouching for a resolver is a federation event. New variant
-added to `SCHEMA.md` §3.1 `contribution_type` enum:
+A registry vouching for a resolver is a federation event. Encoded as
+a new `subject_kind` under `Proposal` per `SCHEMA.md` §3.2 (NOT a new
+top-level `contribution_type` variant per §3.1):
 
 ```
-| `registry_vouch` | §4.13 | A registry vouches for a key in a domain |
+| `registry_vouch` | §4.13 | A registry vouches for a key in a domain | Required if vouch jumps target's transitive-trust count past threshold |
 ```
+
+Encoding as `Proposal` + `subject_kind = "registry_vouch"` is
+structurally equivalent to adding a §3.1 variant (the storage shape,
+the query path via `ContributionsFilter::subject_kind`, the
+witness-set gate are all identical), but it avoids churning persist's
+top-level `ContributionType` enum (which would force a coordinated
+release across all federation consumers). Persist accepts it today
+unchanged.
+
+Envelope shape:
+- `contribution_type = Proposal` (existing variant)
+- `subject.{domain, language, subject = Some("registry_vouch")}`
+- `author_id = K_B` (the registry)
+- `payload` = `RegistryVouchPayload` per below
 
 Typed payload in node-core's `crate::payloads::registry_vouch`:
 
