@@ -10,7 +10,12 @@ v1.0 CIRISNodeCore spec.
 **Cross-references**: `MISSION.md` (the why and the primitives narrative);
 `tests/safety/` in CIRISAgent (canonical batteries shipped in the attested
 wheel); `FEDERATION_THREAT_MODEL.md` (substrate primitives this layer
-builds on); `ACCORD.md` §VII (M-1).
+builds on); `ACCORD.md` §VII (M-1); `FSD/MESSAGE_TAXONOMY.md` (rationale
+for §3.2 subject_kind choices — FIPA ACL + Searle speech-act grounding +
+the lake's agency-gradient argument); `FSD/TRUST_HIERARCHY.md` (trust-axis
+primitive consumed by every Trust-gated / Witness-set-gated row in §4);
+`CIRISPersist/FSD/FEDERATION_TRUST_INTERFACE.md` (substrate impl + the
+v1.5.0 `TrustPurpose::Service` extension proposed in MESSAGE_TAXONOMY §6.1).
 
 Every load-bearing claim in `MISSION.md` carries an Implementation Status
 tag (`[Spec]` / `[Impl]` / `[Deployed (pilot|folded)]`). The same tags
@@ -204,6 +209,14 @@ shapes within `proposal`-type Contributions.
 | `failure_pattern` | A signed ticket: agent is observed to fail pattern X with evidence | None (witness diversity not required for filing tickets; required for adjudication) |
 | `free_form` | Narrative argument or commentary | None |
 | `registry_vouch` | A registry attests that another key is a qualified resolver in a domain (per `FSD/TRUST_HIERARCHY.md`) | Required if vouch jumps target's transitive-trust count past the cell's jump-threshold policy parameter |
+| `trust_grant` | Purpose-scoped trust grant per `CIRISPersist/FSD/FEDERATION_TRUST_INTERFACE.md`. Materializes a row in `federation_trust_grants` when it lands on the audit chain. | Required when grant is wildcarded (`scope='*'`) or on high-stakes `(purpose, scope)` tuples per consumer policy |
+| `test_result` | Result of running an `arc_question` or `proposed_battery` against an agent. Typed evidence for the Coherence Ratchet rather than inferred from generic `proposal` envelopes. | None (routine); witness-set policy at adjudication time |
+| `improvement` | Substrate or content improvement proposal that doesn't fit `prompt_edit` / `guide_edit` / `accord_edit` (tooling, infra, schema, etc.) | Required (same as other edit proposals) |
+| `gratitude_signal` | Bilateral peer-to-peer quality signal per CIRISAgent's PoB §5.6 / `ciris_engine/schemas/services/agent_credits.py:75`. Closes the bilateral verification loop as a cryptographic event. | None (bilateral primitive) |
+| `assistance_request` | **Peer-to-peer broadcast** request for help. Distinct from §4.7 `deferral_request` (peer → trusted entity through the trust hierarchy / WA routing): assistance is broadcast to all peers, any peer may respond, no domain classification, no witness diversity, no registry lookup. The lightweight pre-trust path. | None |
+| `assistance_response` | Peer's response to an `assistance_request`. Any peer may respond to any visible request; the requester applies its own acceptance policy (trust grants, reputation, etc.) to filter responses. | None |
+| `notification` | **Peer-to-peer fire-and-forget update** about the environment or the results of an action. Sender does not expect a response (responses are optional). Three load-bearing categories: `environment` (observed state of the world), `action_result` (sender completed an action and is reporting), `state_change` (sender's own state changed). Operators MAY add categories. | None (routine); `anomaly`-category notifications MAY require witness-set at consumer policy. |
+| `notification_response` | Peer's optional support / rebut / clarify response to a `notification`. The consensus-on-observations pattern — peers can concur with or dispute an observation without it being a formal §8 `moderation_event` accusation. | None (peer dialogue) |
 
 ---
 
@@ -474,6 +487,527 @@ Revocation is **author-only**: K_B revokes by submitting a new
 `registry_vouch` with the same `vouched_key` + `vouched_domain` and
 `expires_at = now()`. Counter-votes are not supported; bad-faith
 vouches route through `moderation_event` / `slashing_attestation`.
+
+### 4.14 `trust_grant`
+
+Per `CIRISPersist/FSD/FEDERATION_TRUST_INTERFACE.md` §3.2. A
+purpose-scoped trust grant from the granter (the envelope's
+`author_id`) to a grantee key. Materializes a row in
+`federation_trust_grants` when the Contribution lands on the audit
+chain — persist's ingest hook is the bridge.
+
+Payload:
+
+```json
+{
+  "grantee_key": "<base64 hybrid pubkey>",
+  "purpose": "contribution",
+  "scope": "proposal:registry_vouch",
+  "expires_at": "2027-05-15T00:00:00Z",
+  "rationale": "Verified review track record on registry-vouching contributions over 6 months."
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `grantee_key` | ContributorId | yes | Base64 hybrid pubkey of the grantee. SCHEMA §2.2. |
+| `purpose` | enum | yes | `technical` \| `deferral` \| `contribution`. Scope shape depends on purpose. |
+| `scope` | string | yes | Purpose-specific opaque string. See `CIRISPersist/FSD/FEDERATION_TRUST_INTERFACE.md` §3.3 for the scope grammar per purpose; canonical `contribution` scopes include `proposal:<subject_kind>` and `vote:proposal:<subject_kind>`. Wildcards (`*`) are strict trust elevations. |
+| `expires_at` | ISO timestamp | optional | `None` = open-ended. Engine projects expired grants as if revoked. |
+| `rationale` | string | yes | Free-text justification recorded on the audit chain. |
+
+Revocation is **author-only** (mirrors §4.13): the granter emits a
+new `trust_grant` with the same `(grantee_key, purpose, scope)` and
+`expires_at = now()`. Counter-revocations are not supported;
+bad-faith grants route through `moderation_event` /
+`slashing_attestation`.
+
+Witness-set requirement: required when `scope = "*"` (wildcard
+elevation) or for high-stakes `(purpose, scope)` tuples per consumer
+policy. The policy table is node-core's concern; persist enforces the
+witness-set presence per envelope-level §3.5.
+
+### 4.15 `test_result`
+
+Result of running an `arc_question` (§4.1) or a `proposed_battery`
+(§4.2) against an agent under test. Typed evidence for the Coherence
+Ratchet rather than inference from generic `proposal` envelopes.
+
+Payload:
+
+```json
+{
+  "question_id": "am_mh_v4_q01",
+  "question_version": 1,
+  "agent_under_test": "<base64 hybrid pubkey>",
+  "trace_id": "trace_01HX...",
+  "scored_at": "2026-05-15T14:30:00Z",
+  "scores": {
+    "EthicalPDMAEvaluator": 0.78,
+    "epistemic_humility_conscience": 0.91
+  },
+  "hard_fail_hits": ["U2"],
+  "soft_fail_hits": []
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `question_id` | string | yes | Matches §4.1 `question_id`. |
+| `question_version` | u32 | yes | Question version at scoring time. |
+| `agent_under_test` | ContributorId | yes | Hybrid pubkey of the scored agent. |
+| `trace_id` | string | yes | Reference into CIRISLensCore's trace store. |
+| `scored_at` | ISO timestamp | yes | When the scoring pass produced this result. |
+| `scores` | map<string, f64> | yes | `faculty_target → score` per §4.1 `faculty_targets`. |
+| `hard_fail_hits` | string[] | yes (may be empty) | Rubric U-codes the agent hit. |
+| `soft_fail_hits` | string[] | yes (may be empty) | Soft-fail rubric criteria the agent hit. |
+
+Author of the envelope is the **scorer's** key (typically a
+foundation-model-judge or a calibrated scoring agent). Witness-set
+not required at filing; required at adjudication time when results
+flow into `moderation_event` / Reconsideration.
+
+### 4.16 `improvement`
+
+Substrate or content improvement proposal that doesn't fit
+`prompt_edit` / `guide_edit` / `accord_edit` — tooling, infra, schema
+changes, build-system tweaks, etc. The escape hatch for improvements
+that don't decompose cleanly onto the existing edit-proposal kinds.
+
+Payload:
+
+```json
+{
+  "target_kind": "tooling",
+  "target_ref": "CIRISAgent/qa_runner/safety_battery.py",
+  "rationale": "Add structured-output mode to the battery runner so per-faculty scores ride a typed channel instead of free-text parsing.",
+  "diff": "...unified diff..."
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `target_kind` | string | yes | Free-form category. Canonical values include `tooling`, `schema`, `infra`, `build`, `ci`. Operators MAY introduce additional values. |
+| `target_ref` | string | yes | Repo + path or component identifier the improvement targets. |
+| `rationale` | string | yes | Free-text justification recorded on the audit chain. |
+| `diff` | string | optional | Unified diff if applicable. Absent for design-only proposals. |
+
+Witness-set required at envelope level — high-stakes per §3.5 (same
+discipline as `prompt_edit` / `guide_edit` / `accord_edit`).
+
+### 4.17 `gratitude_signal`
+
+Bilateral peer-to-peer quality signal per CIRISAgent's PoB §5.6.
+Canonical payload shape per
+`CIRISAgent/ciris_engine/schemas/services/agent_credits.py:75` —
+this section reproduces the wire shape; PoB owns the semantics.
+
+Payload:
+
+```json
+{
+  "from_agent_id": "<base64 Ed25519 pubkey hash>",
+  "to_agent_id": "<base64 Ed25519 pubkey hash>",
+  "interaction_id": "interaction_01HX...",
+  "quality_score": 0.87,
+  "message": "Thank you — the medication-register clarification was exactly the seam I needed.",
+  "timestamp": "2026-05-15T14:30:00Z"
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `from_agent_id` | string | yes | Ed25519 pubkey hash of the signaling agent. Equals envelope `author_id`. |
+| `to_agent_id` | string | yes | Ed25519 pubkey hash of the receiving agent. |
+| `interaction_id` | string | yes | Deterministic id binding both parties' trace ids — duplicate prevention per PoB §1.4. |
+| `quality_score` | f64 | yes | `0.0 ≤ x ≤ 1.0`. Quality rating of the interaction. |
+| `message` | string | optional | ≤ 280 characters. Optional gratitude message. |
+| `timestamp` | ISO timestamp | yes | When the signal was created. |
+
+Envelope-level `signature` covers the canonical bytes per §2.4 —
+this replaces PoB's separate `DualSignature` field since the
+NodeCore envelope already carries a hybrid signature. Receiving
+agents validate against §2.4 + apply their per-deployment acceptance
+policy (PoB §5.6 — acceptance hangs on the recipient's
+Contribution-purpose trust grants for `proposal:gratitude_signal`).
+
+Witness-set not required at envelope level — the bilateral
+verification IS the primitive. Bad-faith signals (Sybil flooding,
+gratitude graphs that don't correspond to real interactions) flow
+through `moderation_event` / `slashing_attestation`.
+
+### 4.18 `assistance_request`
+
+Peer-to-peer broadcast request for help. Distinct from §4.7
+`deferral_request`: assistance is broadcast to all peers (no trust
+hierarchy, no domain classification, no witness diversity), any peer
+may respond, requester applies its own acceptance policy to filter
+responses. The lightweight pre-trust path per
+`FSD/MESSAGE_TAXONOMY.md` §4.
+
+Payload:
+
+```json
+{
+  "title": "Quick clarification on Amharic medication terminology",
+  "context": "I'm uncertain whether to use ሳይኮተራፒ or የንግግር ሕክምና in Stage 2 disclosure. Any Am-speaker willing to weigh in?",
+  "response_format": "freeform",
+  "deadline": "2026-05-16T18:00:00Z",
+  "preferred_audience": "amharic-mental-health"
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `title` | string | yes | Short label for receiver-side filtering. |
+| `context` | string | yes | The request body. |
+| `response_format` | enum | yes | `binary` / `categorical` / `freeform` (same enum as §4.7). |
+| `deadline` | ISO timestamp | optional | Soft hint; receiver MAY ignore late responses. |
+| `preferred_audience` | string | optional | Free-form descriptor; non-enforced hint (e.g. `"amharic-mental-health"`, `"federation-ops"`). Filtering is receiver-side policy. |
+
+The envelope's `contribution_id` is the `assistance_id` referenced by
+`assistance_response` payloads.
+
+### 4.19 `assistance_response`
+
+Peer's response to an `assistance_request`.
+
+Payload:
+
+```json
+{
+  "assistance_id": "01HX...",
+  "response": "Use የንግግር ሕክምና in Stage 2 — ሳይኮተራፒ reads clinical to a layperson asking for help.",
+  "confidence": 0.8,
+  "supporting_trace_refs": ["trace_01HX..."]
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `assistance_id` | ULID | yes | Back-ref to the originating `assistance_request` envelope's `contribution_id`. |
+| `response` | string | yes | The reply. Shape constrained by the request's `response_format`. |
+| `confidence` | f64 | optional | `0.0 ≤ x ≤ 1.0`. Responder's self-reported confidence. |
+| `supporting_trace_refs` | string[] | optional | CIRISLensCore trace ids or evidence pointers. |
+
+Witness-set not required. The requester aggregates responses per its
+own policy (no §5 Vote machinery on the wire — assistance is
+informal).
+
+### 4.20 `notification`
+
+Peer-to-peer fire-and-forget update about the environment or the
+results of an action. Sender does not expect a response (responses
+are optional per §4.21). Categories distinguish observation classes
+for receiver-side filtering.
+
+Payload:
+
+```json
+{
+  "title": "Reticulum transport degraded on eu-1 region",
+  "context": "Packet loss climbing past 30% to the Hetzner Veilid bridge over the last 20 minutes; recommend failover to HTTP fallback for am-cell traffic.",
+  "category": "environment",
+  "subject_ref": "edge_node_eu_1",
+  "evidence_refs": ["trace_01HX...", "trace_01HY..."],
+  "expires_at": "2026-05-16T00:00:00Z"
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `title` | string | yes | Short label. |
+| `context` | string | yes | The observation. |
+| `category` | string | yes | Canonical values: `environment` / `action_result` / `state_change` / `anomaly`. Operators MAY add categories; receivers filter on this. |
+| `subject_ref` | string | optional | Free-form reference to a thing being observed (contribution_id, key, agent identifier, node identifier). |
+| `evidence_refs` | string[] | optional | Trace ids or other supporting refs. |
+| `expires_at` | ISO timestamp | optional | When the notification is no longer relevant. |
+
+Witness-set not required for `environment` / `action_result` /
+`state_change`. The `anomaly` category MAY require witness-set at
+consumer policy — flagging anomalies is structurally close to a
+filing-stage `moderation_event` and the same anti-Sybil discipline
+applies.
+
+### 4.21 `notification_response`
+
+Peer's optional support / rebut / clarify response to a
+`notification`. The consensus-on-observations pattern: peers concur
+with or dispute an observation without escalating to a §4.11
+`moderation_event` formal accusation.
+
+Payload:
+
+```json
+{
+  "notification_id": "01HX...",
+  "stance": "support",
+  "rationale": "Confirmed; our am-cell health probes showing the same packet-loss profile out of eu-1 since 14:00 UTC.",
+  "evidence_refs": ["trace_01HX..."]
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `notification_id` | ULID | yes | Back-ref to the original notification's `contribution_id`. |
+| `stance` | enum | yes | `support` / `rebut` / `clarify`. |
+| `rationale` | string | yes | Free-text explanation. |
+| `evidence_refs` | string[] | optional | Supporting evidence. |
+
+Witness-set not required (peer dialogue). When a notification
+attracts many `rebut` responses, the originator MAY follow up with a
+`cancellation` (§4.28) or a corrected `notification`; aggregation is
+consumer-policy.
+
+### 4.22 `unsolicited_guidance`
+
+Bilateral, **trust-gated** assertion-with-implicit-directive sent
+from a granted-trust peer to a specific recipient. Distinct from
+§4.8 `deferral_response` (solicited, in response to a prior
+`deferral_request`) and from §4.20 `notification` (broadcast,
+ungated). The federation-wire shape of CIRISAgent's existing
+`unsolicited_guidance` flow at
+`ciris_engine/logic/adapters/discord/discord_observer.py:600`.
+
+Receiver MUST check that sender holds an active `trust_grant` (per
+§4.14) with appropriate purpose+scope before acting on the guidance.
+Default acceptance: `trust_grant.purpose=Deferral, scope=*` OR
+`purpose=Contribution, scope=guidance` (subject to receiver policy).
+
+Payload:
+
+```json
+{
+  "recipient_key": "<base64 hybrid pubkey>",
+  "guidance_text": "Stage-2 medication register check completed — recommend the agent default to የንግግር ሕክምና in clinical guidance contexts and reserve ሳይኮተራፒ for explicit clinical-team interactions.",
+  "references": ["01HX...", "01HY..."],
+  "urgency": "normal"
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `recipient_key` | ContributorId | yes | Federation identity of the recipient agent. The recipient's acceptance policy MUST check sender's `trust_grant` against this key. |
+| `guidance_text` | string | yes | The guidance. |
+| `references` | string[] | optional | Prior contribution_ids the guidance references (e.g. a `deferral_request` the sender is following up on without a formal `deferral_response`). |
+| `urgency` | enum | yes | `low` / `normal` / `high`. High urgency MAY surface as a priority-elevated task per agent runtime policy. |
+
+Witness-set not required at envelope level — bilateral; trust gate
+provides the integrity check. Bad-faith guidance flows through
+`moderation_event` / `slashing_attestation`.
+
+### 4.23 `service_announcement`
+
+Service-offering advertisement per `FSD/MESSAGE_TAXONOMY.md` §5.
+Durable Contribution stating "I offer this capability; here's how to
+invoke me." Discoverable by `list_contributions(subject_kind=service_announcement)`.
+
+Per-invocation RPC does NOT ride the audit chain — see §5.2 of the
+taxonomy FSD; invocations go over edge `MessageType::ServiceRequest`
+(proposed CIRISEdge expansion).
+
+Payload:
+
+```json
+{
+  "service_kind": "llm",
+  "service_name": "amharic_clinical_companion",
+  "version": "1.0",
+  "capabilities": {
+    "models": ["claude-opus-4-7", "claude-sonnet-4-6"],
+    "max_context_tokens": 200000,
+    "supports_streaming": true,
+    "languages": ["am", "en"]
+  },
+  "endpoints": [
+    { "transport": "reticulum", "address": "<reticulum-destination>" },
+    { "transport": "http", "address": "https://..." }
+  ],
+  "terms": "Trust grant `service:llm:*` required for invocation. Per-call usage logged to `service_usage_summary` daily."
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `service_kind` | string | yes | Canonical kind: `llm` / `embedding` / `transcribe` / `classifier` / `tool` / `custom:<kind>`. |
+| `service_name` | string | yes | Per-offer human label. Distinct from `service_kind`. |
+| `version` | string | yes | Service version. Bumps when capability surface changes. |
+| `capabilities` | object | yes | Service-specific capability descriptor. Schema varies per `service_kind`. |
+| `endpoints` | array | yes | Each entry: `{transport, address}`. Multiple transports per service supported. |
+| `terms` | string | optional | Free-text terms-of-service / authorization-prerequisites note. |
+
+Author of the envelope is the **service-offering** key. Witness-set
+required when `service_kind` is high-stakes per consumer policy
+(e.g. medical-LLM offering). Default: open.
+
+### 4.24 `service_deprecation`
+
+Retracts a prior `service_announcement`. Author-only revocation
+(mirrors §4.13 / §4.14 precedent).
+
+Payload:
+
+```json
+{
+  "service_announcement_id": "01HX...",
+  "effective_at": "2026-06-01T00:00:00Z",
+  "reason": "Model claude-opus-4-7 deprecated; migrating to claude-opus-4-8. New service_announcement will follow."
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `service_announcement_id` | ULID | yes | Back-ref to the announcement being retracted. MUST be authored by the same key issuing this deprecation. |
+| `effective_at` | ISO timestamp | yes | When the deprecation takes effect. `now()` for immediate; future for graceful retirement. |
+| `reason` | string | yes | Free-text rationale recorded on the audit chain. |
+
+Witness-set not required.
+
+### 4.25 `service_usage_summary`
+
+Aggregated per-window usage report. Aggregated to the chain (not
+per-call) to keep audit-chain volume sane while preserving
+accountability + commons-credit attribution.
+
+Payload:
+
+```json
+{
+  "service_announcement_id": "01HX...",
+  "window_start": "2026-05-15T00:00:00Z",
+  "window_end": "2026-05-16T00:00:00Z",
+  "invocation_count": 1247,
+  "successful_count": 1219,
+  "failed_count": 28,
+  "aggregate_metrics": {
+    "p50_latency_ms": 320,
+    "p99_latency_ms": 2100,
+    "total_tokens_in": 2340000,
+    "total_tokens_out": 1820000
+  },
+  "caller_distribution": {
+    "<caller_pubkey_b64>": 412,
+    "<caller_pubkey_b64>": 188
+  }
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `service_announcement_id` | ULID | yes | The service being reported on. |
+| `window_start` / `window_end` | ISO timestamp | yes | Reporting window. |
+| `invocation_count` | u64 | yes | Total calls in window. |
+| `successful_count` | u64 | yes | Calls that completed without error. |
+| `failed_count` | u64 | yes | Calls that errored. |
+| `aggregate_metrics` | object | optional | Service-kind-specific metrics. |
+| `caller_distribution` | object | optional | Per-caller call counts (pubkey → count). Privacy-policy-gated; operators MAY redact callers below a noise floor. |
+
+Witness-set not required. Bad-faith reports (inflated counts for
+commons-credit gaming) flow through `moderation_event` /
+`slashing_attestation`.
+
+### 4.26 `commitment`
+
+Commissive primitive — sender commits to a future action. Per
+`FSD/MESSAGE_TAXONOMY.md` §7 (FIPA `agree` / `accept-proposal` gap).
+Bilateral when `recipient_key` is set; broadcast otherwise.
+
+Payload:
+
+```json
+{
+  "commitment_text": "I will publish the v0.1.0-cut release of ciris-node-core by 2026-06-01.",
+  "recipient_key": null,
+  "action_kind": "release",
+  "due_at": "2026-06-01T00:00:00Z",
+  "references": ["01HX..."]
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `commitment_text` | string | yes | The commitment. |
+| `recipient_key` | ContributorId | optional | If set, bilateral — the named peer is the addressee. If null, broadcast — all peers are witnesses. |
+| `action_kind` | string | yes | Free-form category. Canonical: `release` / `migration` / `audit` / `resolution`. |
+| `due_at` | ISO timestamp | yes | When the commitment falls due. |
+| `references` | string[] | optional | Prior contribution_ids the commitment is in response to. |
+
+Witness-set required for high-stakes commitments per consumer
+policy. Default: open for broadcast; trust-gated for bilateral
+(receiver checks sender's trust grants).
+
+Resolution (did the commitment hold?) is deferred to a follow-up
+FSD — `commitment` today is the declaration, not the lifecycle.
+
+### 4.27 `subscription_request`
+
+Subscribe to an ongoing notification stream matching a filter. Per
+`FSD/MESSAGE_TAXONOMY.md` §7 (FIPA `subscribe` / `request-whenever`
+gap). Trust-gated — the publisher checks the subscriber's trust
+grants before accepting.
+
+Payload:
+
+```json
+{
+  "publisher_key": "<base64 hybrid pubkey>",
+  "filter": {
+    "subject_kind": "notification",
+    "category": "anomaly",
+    "subject_ref_prefix": "edge_node_"
+  },
+  "expires_at": "2026-08-15T00:00:00Z",
+  "delivery_endpoint": null
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `publisher_key` | ContributorId | yes | Federation identity of the agent being subscribed to. |
+| `filter` | object | yes | Subscription filter — what events the subscriber wants. Schema: `subject_kind` (one of §3.2 values), plus subject-kind-specific fields (e.g. `category` for `notification`, `service_kind` for `service_announcement`). |
+| `expires_at` | ISO timestamp | optional | When the subscription auto-expires. `None` = open-ended. |
+| `delivery_endpoint` | string | optional | Edge transport hint. `None` = use whichever transport the publisher prefers. |
+
+Witness-set not required at envelope level. The publisher's
+acceptance policy is what gates whether the subscription is
+honored — `subscription_request` is the consumer's ask; publisher
+fulfillment is dialogical (matching events arrive as ordinary
+`notification`-shaped Contributions OR via edge transit).
+
+Subscription is revoked via §4.28 `cancellation` naming the
+`subscription_request`'s `contribution_id`.
+
+### 4.28 `cancellation`
+
+Retract an in-flight request before it resolves. Per
+`FSD/MESSAGE_TAXONOMY.md` §7 (FIPA `cancel` gap). Author-only.
+
+Payload:
+
+```json
+{
+  "cancels_contribution_id": "01HX...",
+  "reason": "Withdrawing deferral — resolved internally without WA input."
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `cancels_contribution_id` | ULID | yes | The contribution being cancelled. MUST be authored by the same key issuing the cancellation (engine enforces). |
+| `reason` | string | yes | Free-text rationale recorded on the audit chain. |
+
+Witness-set not required (author-only revocation).
+
+Applicable to: `deferral_request`, `assistance_request`,
+`subscription_request`, `commitment`, `*_edit` (withdraw a proposal
+before voting closes), `service_announcement` (use
+`service_deprecation` §4.24 instead for service offerings — it
+carries `effective_at` semantics `cancellation` doesn't).
+
+Not applicable to: completed transactions
+(`*_response`, `vote`, `slashing_attestation`, `promotion_attestation`)
+— those route through `reconsideration_request` (§4.12) or
+`moderation_event` (§4.11) instead.
 
 ---
 
