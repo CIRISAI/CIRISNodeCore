@@ -30,6 +30,40 @@ pub use ciris_persist::federation::{
     FederationDirectory, TrustFilter, TrustGrant, TrustRelationship, TrustRow, TrustType,
 };
 
+use serde::{Deserialize, Serialize};
+
+/// Trust purpose for §4.14 `trust_grant` Contribution payloads per
+/// `CIRISPersist/FSD/FEDERATION_TRUST_INTERFACE.md` §3 +
+/// `FSD/MESSAGE_TAXONOMY.md` §6.1.
+///
+/// **v0.1.0-dev placeholder.** Defined locally pending CIRISPersist
+/// v1.5.0's `TrustPurpose` extension (alongside the existing
+/// `TrustType` / `TrustRelationship` axes). When persist v1.5.0
+/// ships, this module replaces the local definition with
+/// `pub use ciris_persist::federation::TrustPurpose`.
+///
+/// Scope grammar per purpose (per persist FSD §3.3):
+///
+/// | Purpose | Scope shape | Wildcard | Example |
+/// |---|---|---|---|
+/// | `Technical` | `manifest:<id>` / `channel:<name>` / `artifact:<hash>` | `manifest:*` | `manifest:CIRISAgent-2.8.9` |
+/// | `Deferral` | `<domain>` (free-form lowercase) | `*` | `medical_deferral` |
+/// | `Contribution` | `<contribution_type>` / `<contribution_type>:<subject_kind>` / `vote:<...>` | `*` | `proposal:registry_vouch` |
+/// | `Service` | `service:<kind>` / `service:<kind>:<resource>` | `*` | `service:llm:claude-opus-4-7` |
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustPurpose {
+    /// Technical purposes — build manifests, channel access, artifact pins.
+    Technical,
+    /// Deferral routing per `MISSION.md` §3.3.
+    Deferral,
+    /// Contribution authoring + voting per the §3.1 / §3.2 taxonomy.
+    Contribution,
+    /// Service invocation per `FSD/MESSAGE_TAXONOMY.md` §5. Gates
+    /// access to advertised `service_announcement` offerings.
+    Service,
+}
+
 use crate::payloads::registry_vouch::{RegistryVouchPayload, SUBJECT_KIND as VOUCH_SUBJECT_KIND};
 use crate::substrate::{ContributionType, ContributionsFilter, NodeCoreService, SubstrateError};
 

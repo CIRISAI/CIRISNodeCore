@@ -10,21 +10,16 @@
 //!
 //! Persist is the substrate, not the policy: it doesn't care what's
 //! in `payload` as long as the envelope verifies. Node-core defines
-//! what `payload` means per `contribution_type`.
+//! what `payload` means per `contribution_type` + `subject_kind`.
 //!
-//! v0.1.0-dev coverage:
+//! Each module exposes a `SUBJECT_KIND` constant matching the
+//! corresponding SCHEMA.md §3.2 / §3.1 wire value, plus the typed
+//! struct + round-trip serde tests. Constants must match SCHEMA
+//! verbatim — that invariant is tested in each module.
 //!
-//! - §4.7  [`deferral::DeferralRequestPayload`]
-//! - §4.8  [`deferral::DeferralResponsePayload`]
-//! - §4.10 [`expertise_attestation::ExpertiseAttestationPayload`]
-//! - §4.11 [`moderation_event::ModerationEventPayload`]
-//! - §8    [`slashing_attestation::SlashingAttestationPayload`]
-//! - §4.12 [`reconsideration::ReconsiderationRequestPayload`]
+//! Taxonomy + placement: see [`FSD/MESSAGE_TAXONOMY.md`].
 //!
-//! Pending typed payloads (Value is the only option today):
-//! `arc_question` §4.1, `proposed_battery` §4.2, `prompt_edit` §4.3,
-//! `guide_edit` §4.4, `accord_edit` §4.5, `failure_pattern` §4.6,
-//! `wa_candidacy` §4.9, `ReconsiderationAttestation` §9.
+//! [`FSD/MESSAGE_TAXONOMY.md`]: https://github.com/CIRISAI/CIRISNodeCore/blob/main/FSD/MESSAGE_TAXONOMY.md
 
 pub mod deferral;
 pub mod expertise_attestation;
@@ -32,3 +27,21 @@ pub mod moderation_event;
 pub mod reconsideration;
 pub mod registry_vouch;
 pub mod slashing_attestation;
+
+// ─── §3.2 subject_kind additions (FSD/MESSAGE_TAXONOMY round) ────────────
+
+pub mod assistance_request;
+pub mod assistance_response;
+pub mod cancellation;
+pub mod commitment;
+pub mod gratitude_signal;
+pub mod improvement;
+pub mod notification;
+pub mod notification_response;
+pub mod service_announcement;
+pub mod service_deprecation;
+pub mod service_usage_summary;
+pub mod subscription_request;
+pub mod test_result;
+pub mod trust_grant;
+pub mod unsolicited_guidance;
