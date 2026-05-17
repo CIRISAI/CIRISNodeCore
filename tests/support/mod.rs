@@ -26,7 +26,8 @@ use ciris_node_core::substrate::{
     TargetRowKind, VoteEnvelope, VoteListPage, VoteWeight, VotesFilter,
 };
 use ciris_node_core::trust::{
-    FederationDirectory, TrustFilter, TrustGrant, TrustRelationship, TrustRow,
+    AuditService, FederationDirectory, TrustFilter, TrustGrant, TrustGrantFilter, TrustGrantRow,
+    TrustPurpose, TrustRelationship, TrustRow,
 };
 
 // Other FederationDirectory types — needed for the 14 stubbed methods
@@ -35,6 +36,11 @@ use ciris_persist::federation::{
     Attestation, HybridPendingRow, KeyRecord, Revocation, SignedAttestation, SignedKeyRecord,
     SignedRevocation,
 };
+
+// AuditService support types — needed for the 3 required stubs
+// (record_entry / list_entries / verify_chain).
+use ciris_persist::audit::{AuditEntry, AuditFilter, AuditListPage, ChainVerification};
+use ciris_persist::audit::types::AuditCursor;
 
 #[derive(Default)]
 struct MockState {
@@ -59,8 +65,15 @@ struct MockState {
     // Active-tier override (in addition to per-cell). Present means active.
     active_set: HashSet<String>,
 
-    // FederationDirectory state — trust rows keyed by `key`.
+    // FederationDirectory state — V020 trust rows keyed by `key`.
+    // Deprecated in v1.6.0; kept for back-compat with tests targeting
+    // the old API while the swap to AuditService stabilizes.
     trust_rows: HashMap<String, TrustRow>,
+
+    // AuditService state — v1.5.x trust-grant projection rows. Keyed
+    // by grant_id. Populated via `set_trust_grant` fixture helper;
+    // queried via the AuditService impl.
+    trust_grants: HashMap<uuid::Uuid, TrustGrantRow>,
 }
 
 /// In-memory `NodeCoreService` impl for tests.
@@ -122,6 +135,40 @@ impl MockEngine {
             );
         if active {
             self.state.lock().unwrap().active_set.insert(contributor.into());
+        }
+    }
+
+    /// Insert a v1.5.x trust-grant projection row. Test fixture for
+    /// the `AuditService` surface — production grants flow through
+    /// signed Contribution events + persist's projection hook, but
+    /// tests stuff the projection directly.
+    pub fn set_trust_grant(&self, grant: TrustGrantRow) {
+        let id = grant.grant_id;
+        self.state.lock().unwrap().trust_grants.insert(id, grant);
+    }
+
+    /// Convenience: build a `TrustGrantRow` from the load-bearing
+    /// fields. Defaults `tenant_id="test"`, `chain_event_id=0`,
+    /// `chain_event_hash=[]`, `granted_at=now()`.
+    pub fn make_grant(
+        grantee: &str,
+        granter: &str,
+        purpose: TrustPurpose,
+        scope: &str,
+    ) -> TrustGrantRow {
+        TrustGrantRow {
+            grant_id: uuid::Uuid::new_v4(),
+            grantee_key: grantee.into(),
+            granter_key: granter.into(),
+            purpose,
+            scope: scope.into(),
+            granted_at: Utc::now(),
+            expires_at: None,
+            revoked_at: None,
+            revoked_by: None,
+            chain_event_id: 0,
+            chain_event_hash: Vec::new(),
+            tenant_id: "test".into(),
         }
     }
 
@@ -732,6 +779,139 @@ impl FederationDirectory for MockEngine {
         _limit: i64,
     ) -> impl Future<Output = Result<Vec<HybridPendingRow>, FedErr>> + Send {
         async { Err(fed_stub("list_hybrid_pending_revocations")) }
+    }
+}
+
+// ── AuditService impl (v1.5.x trust-grant projection surface) ───────────
+//
+// Three required methods (record_entry / list_entries / verify_chain)
+// return Backend errors — node-core tests don't exercise the audit
+// chain ingest path directly. The other 12 trait methods use defaults
+// from the upstream trait (most return NotImplemented). We override
+// only `lookup_trust_grant` + `list_trust_grants` with real test
+// logic against `trust_grants` state populated via `set_trust_grant`.
+
+impl AuditService for MockEngine {
+    fn record_entry(
+        &self,
+        _entry: AuditEntry,
+    ) -> impl Future<Output = Result<(), ciris_persist::audit::Error>> + Send {
+        async {
+            Err(ciris_persist::audit::Error::Backend(
+                "MockEngine: record_entry not implemented in node-core test fixtures".into(),
+            ))
+        }
+    }
+
+    fn list_entries(
+        &self,
+        _filter: AuditFilter,
+        _cursor: Option<AuditCursor>,
+        _limit: i64,
+    ) -> impl Future<Output = Result<AuditListPage, ciris_persist::audit::Error>> + Send {
+        async {
+            Err(ciris_persist::audit::Error::Backend(
+                "MockEngine: list_entries not implemented in node-core test fixtures".into(),
+            ))
+        }
+    }
+
+    fn verify_chain(
+        &self,
+        _tenant_id: &str,
+        _from_sequence: i64,
+        _to_sequence: Option<i64>,
+    ) -> impl Future<Output = Result<ChainVerification, ciris_persist::audit::Error>> + Send {
+        async {
+            Err(ciris_persist::audit::Error::Backend(
+                "MockEngine: verify_chain not implemented in node-core test fixtures".into(),
+            ))
+        }
+    }
+
+    // Real impls for the trust-grant read path —
+    // `crate::trust::resolve_trust` + `crate::routing::route_deferral`
+    // consume these.
+
+    fn lookup_trust_grant(
+        &self,
+        grantee_key: &str,
+        purpose: TrustPurpose,
+        scope: &str,
+        include_revoked: bool,
+        include_expired: bool,
+    ) -> impl Future<Output = Result<Vec<TrustGrantRow>, ciris_persist::audit::Error>> + Send
+    {
+        let grantee = grantee_key.to_owned();
+        let scope = scope.to_owned();
+        async move {
+            let st = self.state.lock().unwrap();
+            let now = Utc::now();
+            let rows: Vec<TrustGrantRow> = st
+                .trust_grants
+                .values()
+                .filter(|g| g.grantee_key == grantee && g.purpose == purpose && g.scope == scope)
+                .filter(|g| include_revoked || g.revoked_at.is_none())
+                .filter(|g| match g.expires_at {
+                    Some(t) if t <= now => include_expired,
+                    _ => true,
+                })
+                .cloned()
+                .collect();
+            Ok(rows)
+        }
+    }
+
+    fn list_trust_grants(
+        &self,
+        filter: TrustGrantFilter,
+    ) -> impl Future<Output = Result<Vec<TrustGrantRow>, ciris_persist::audit::Error>> + Send
+    {
+        async move {
+            let st = self.state.lock().unwrap();
+            let now = Utc::now();
+            let mut rows: Vec<TrustGrantRow> = st
+                .trust_grants
+                .values()
+                .filter(|g| {
+                    if let Some(ref k) = filter.grantee_key {
+                        if &g.grantee_key != k {
+                            return false;
+                        }
+                    }
+                    if let Some(ref k) = filter.granter_key {
+                        if &g.granter_key != k {
+                            return false;
+                        }
+                    }
+                    if let Some(p) = filter.purpose {
+                        if g.purpose != p {
+                            return false;
+                        }
+                    }
+                    if let Some(ref pfx) = filter.scope_prefix {
+                        if !g.scope.starts_with(pfx) {
+                            return false;
+                        }
+                    }
+                    if !filter.include_revoked && g.revoked_at.is_some() {
+                        return false;
+                    }
+                    if !filter.include_expired {
+                        if let Some(t) = g.expires_at {
+                            if t <= now {
+                                return false;
+                            }
+                        }
+                    }
+                    true
+                })
+                .cloned()
+                .collect();
+            // Deterministic ordering for tests.
+            rows.sort_by(|a, b| a.grant_id.cmp(&b.grant_id));
+            Ok(rows)
+        }
     }
 }
 

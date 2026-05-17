@@ -206,9 +206,7 @@ async fn default_preferences_apply_when_none_passed() {
 
 use ciris_node_core::routing::route_deferral;
 use ciris_node_core::substrate::{Cell, ContributionType};
-use ciris_node_core::trust::{
-    FederationDirectory, TrustGrant, TrustRelationship, TrustType,
-};
+use ciris_node_core::trust::TrustPurpose;
 use ciris_node_core::payloads::registry_vouch::{
     RegistryVouchPayload, SUBJECT_KIND as VOUCH_SUBJECT_KIND,
 };
@@ -240,27 +238,21 @@ fn make_vouch_envelope(
 
 async fn setup_routing_world(mock: &MockEngine) {
     use ciris_node_core::NodeCoreService;
-    // Two registries trusted in medical_deferral; each vouches for two resolvers.
-    mock.grant_trust(TrustGrant {
-        key: "K_R1".into(),
-        trust_type: TrustType::Temporary,
-        trust_relationship: TrustRelationship::Registry,
-        trust_domains: Some(vec!["medical_deferral".into()]),
-        trusted_by: "steward".into(),
-        expires_at: None,
-    })
-    .await
-    .unwrap();
-    mock.grant_trust(TrustGrant {
-        key: "K_R2".into(),
-        trust_type: TrustType::Temporary,
-        trust_relationship: TrustRelationship::Registry,
-        trust_domains: Some(vec!["medical_deferral".into()]),
-        trusted_by: "steward".into(),
-        expires_at: None,
-    })
-    .await
-    .unwrap();
+    // Two registries trusted in medical_deferral via v1.5.x signed-grant
+    // projection; each vouches for two resolvers via registry_vouch
+    // Contributions.
+    mock.set_trust_grant(MockEngine::make_grant(
+        "K_R1",
+        "steward",
+        TrustPurpose::Deferral,
+        "medical_deferral",
+    ));
+    mock.set_trust_grant(MockEngine::make_grant(
+        "K_R2",
+        "steward",
+        TrustPurpose::Deferral,
+        "medical_deferral",
+    ));
 
     // R1 vouches for resolvers alice, bob; R2 vouches for carol, dan.
     for env in [

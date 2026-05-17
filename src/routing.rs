@@ -192,7 +192,7 @@ fn select_with_diversity<M: ContributorMetadataProvider>(
 // ── Deferral routing (composes trust + diversity) ────────────────────────
 
 use crate::trust::{
-    fed_err, list_vouched_for, FederationDirectory, TrustFilter, TrustRelationship,
+    audit_err, list_vouched_for, AuditService, TrustGrantFilter, TrustPurpose,
 };
 
 /// Result of a full deferral-routing pass. Captures the resolver
@@ -216,9 +216,9 @@ pub struct RoutingDecision {
 ///
 /// `classifier` is a closure (single method, no state); pass any
 /// `Fn(&str) -> Result<String, SubstrateError>`.
-pub async fn route_deferral<E, D, C, M>(
+pub async fn route_deferral<E, A, C, M>(
     engine: &E,
-    directory: &D,
+    audit: &A,
     classifier: C,
     question_context: &str,
     preferences: Option<&crate::payloads::deferral::RoutingPreferences>,
@@ -226,48 +226,56 @@ pub async fn route_deferral<E, D, C, M>(
 ) -> Result<RoutingDecision, crate::substrate::SubstrateError>
 where
     E: NodeCoreService,
-    D: FederationDirectory,
+    A: AuditService,
     C: Fn(&str) -> Result<String, crate::substrate::SubstrateError>,
     M: ContributorMetadataProvider,
 {
     let domain = classifier(question_context)?;
 
-    // Trusted registries for this domain.
-    let registries = directory
-        .list_trusted_keys(TrustFilter {
-            trust_relationship: Some(TrustRelationship::Registry),
-            domain: Some(domain.clone()),
+    // Trusted registries for this domain — v1.5.x signed-grant
+    // projection. Live grants only (revoked + expired filtered server-side).
+    let grants = audit
+        .list_trust_grants(TrustGrantFilter {
+            purpose: Some(TrustPurpose::Deferral),
+            scope_prefix: Some(domain.clone()),
+            include_revoked: false,
             include_expired: false,
             ..Default::default()
         })
         .await
-        .map_err(fed_err)?;
+        .map_err(audit_err)?;
+
+    // Filter to exact-scope matches (scope_prefix would also match
+    // longer-prefix scopes; exact equality is the registry-for-this-
+    // domain semantic). Dedup keys — a key can hold the same grant
+    // from multiple granters.
+    let mut registries: Vec<String> = Vec::new();
+    for g in grants {
+        if g.scope == domain && !registries.contains(&g.grantee_key) {
+            registries.push(g.grantee_key);
+        }
+    }
 
     // Union of vouched-for resolvers across registries.
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut candidates: Vec<RoutableContributor> = Vec::new();
-    for registry in &registries {
-        let vouched = list_vouched_for(engine, &registry.key, &domain).await?;
+    for registry_key in &registries {
+        let vouched = list_vouched_for(engine, registry_key, &domain).await?;
         for key in vouched {
             if seen.insert(key.clone()) {
-                // Pull each candidate's expertise via routable_contributors —
-                // call once per (domain, language) cell rather than per-key.
-                // For v0.1.0-dev: assume one cell at a time; multi-language
-                // routing is a v0.1.0-cut concern.
                 candidates.push(RoutableContributor {
                     contributor_id: key,
-                    expertise: 0.0, // populated below
+                    expertise: 0.0, // populated below if language is set
                 });
             }
         }
     }
 
-    // Enrich expertise from routable_contributors for the cell. We use
-    // the first registry's perceived cell language — domain alone is
-    // the routing key here. Language enrichment + cross-language
-    // routing is on the v0.1.0-cut roadmap.
+    // Enrich expertise from routable_contributors when language hint
+    // available. v0.1.0-dev: single-cell assumption; multi-language
+    // routing is a v0.1.0-cut concern.
     let language = preferences
-        .and_then(|_p| None::<&str>) // RoutingPreferences doesn't carry language today
+        .and_then(|_p| None::<&str>)
         .unwrap_or("");
     if !language.is_empty() {
         let routable_with_expertise = engine.routable_contributors(&domain, language).await?;
@@ -280,7 +288,7 @@ where
 
     let diversity_summary = select_with_diversity_outcome(candidates, preferences, metadata);
 
-    let registries_consulted = registries.into_iter().map(|r| r.key).collect();
+    let registries_consulted = registries;
     let selected_resolvers = diversity_summary.routed.clone();
 
     Ok(RoutingDecision {
