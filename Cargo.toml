@@ -21,11 +21,14 @@ crate-type = ["cdylib", "rlib"]
 # `cirisnode::NodeCoreService` surface is unchanged from v0.9.1.
 ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v1.8.1", version = "1", features = ["cirisnode", "cirisaudit"] }
 
-# Edge v0.1.4 — `src/messages/` + `src/handler.rs` API-stable since
-# v0.1.2 (CIRISEdge#6 closure with the 8 federation-consensus
-# MessageType variants); v0.1.3 / v0.1.4 were persist + verify
-# lockstep bumps. Pinned alongside `ciris-lens-core` v0.1.4.
-ciris-edge = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v0.1.4", version = "0" }
+# Edge v0.2.5 — carries persist v1.8.1, closing the transitive
+# pin-divergence gap (CIRISEdge#10). Consumed surface verified stable
+# v0.1.4 → v0.2.5: `src/messages/` unchanged (MessageType enum +
+# envelopes byte-stable); `src/handler.rs` + `src/edge.rs` changes
+# are purely additive (new InlineTextMessage trait, send_inline /
+# speak_pipeline methods) plus the StewardSigner→LocalSigner rename
+# node-core doesn't consume. `register_handler` signature unchanged.
+ciris-edge = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v0.2.5", version = "0" }
 
 # Serde + canonicalization. Canonicalization itself routes through
 # persist's `Engine.canonicalize_envelope_for_signing` — see
