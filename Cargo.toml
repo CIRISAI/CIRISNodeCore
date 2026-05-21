@@ -19,16 +19,19 @@ crate-type = ["cdylib", "rlib"]
 # (trait + TrustType/TrustRelationship/TrustGrant/TrustRow/TrustFilter
 # types) absorbing our `src/trust.rs` placeholder per the M2 cut. The
 # `cirisnode::NodeCoreService` surface is unchanged from v0.9.1.
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v1.8.1", version = "1", features = ["cirisnode", "cirisaudit"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v1.10.2", version = "1", features = ["cirisnode", "cirisaudit"] }
 
-# Edge v0.2.5 — carries persist v1.8.1, closing the transitive
-# pin-divergence gap (CIRISEdge#10). Consumed surface verified stable
-# v0.1.4 → v0.2.5: `src/messages/` unchanged (MessageType enum +
-# envelopes byte-stable); `src/handler.rs` + `src/edge.rs` changes
-# are purely additive (new InlineTextMessage trait, send_inline /
-# speak_pipeline methods) plus the StewardSigner→LocalSigner rename
-# node-core doesn't consume. `register_handler` signature unchanged.
-ciris-edge = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v0.2.5", version = "0" }
+# Edge v0.2.7 — carries persist v1.10.2 + verify v2.7.0, the live
+# CIRIS 3.0 cohabitation convergence point. Consumed surface
+# (`src/messages/`, `src/handler.rs`, `src/edge.rs`) byte-stable
+# v0.2.5 → v0.2.7.
+#
+# DEPLOYMENT NOTE: persist v1.10.0 (#87) enables ciris-keyring's
+# `tpm` feature per-target on Linux; cargo additive feature
+# unification forces it onto every co-resident crate. Linux builds +
+# any Linux host running the shared-engine cohabitation process need
+# system `libtss2` (`libtss2-dev` for builds). See CIRISEdge#12.
+ciris-edge = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v0.2.7", version = "0" }
 
 # Serde + canonicalization. Canonicalization itself routes through
 # persist's `Engine.canonicalize_envelope_for_signing` — see
