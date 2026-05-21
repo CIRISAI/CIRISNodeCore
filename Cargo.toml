@@ -19,7 +19,7 @@ crate-type = ["cdylib", "rlib"]
 # (trait + TrustType/TrustRelationship/TrustGrant/TrustRow/TrustFilter
 # types) absorbing our `src/trust.rs` placeholder per the M2 cut. The
 # `cirisnode::NodeCoreService` surface is unchanged from v0.9.1.
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v1.5.1", version = "1", features = ["cirisnode", "cirisaudit"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v1.7.4", version = "1", features = ["cirisnode", "cirisaudit"] }
 
 # Edge v0.1.4 — `src/messages/` + `src/handler.rs` API-stable since
 # v0.1.2 (CIRISEdge#6 closure with the 8 federation-consensus
