@@ -15,23 +15,25 @@ name = "ciris_node_core"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Substrate. Persist v1.3.0 adds `ciris_persist::federation::FederationDirectory`
-# (trait + TrustType/TrustRelationship/TrustGrant/TrustRow/TrustFilter
-# types) absorbing our `src/trust.rs` placeholder per the M2 cut. The
-# `cirisnode::NodeCoreService` surface is unchanged from v0.9.1.
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v1.10.2", version = "1", features = ["cirisnode", "cirisaudit"] }
+# Substrate. Persist v1.11.0 — the live CIRIS 3.0 cohabitation
+# convergence point (closes CIRISPersist#90: node_core_service() →
+# NodeCoreDispatch on Engine/PyEngine, the Phase 2-3 PyO3 unblock).
+# Pins CIRISVerify v2.8.0. Consumed surface (cirisnode track,
+# federation trust_grant, audit service/types) byte-stable since
+# v0.9.1 / v1.5.x respectively.
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v1.11.0", version = "1", features = ["cirisnode", "cirisaudit"] }
 
-# Edge v0.2.7 — carries persist v1.10.2 + verify v2.7.0, the live
-# CIRIS 3.0 cohabitation convergence point. Consumed surface
-# (`src/messages/`, `src/handler.rs`, `src/edge.rs`) byte-stable
-# v0.2.5 → v0.2.7.
+# Edge v0.2.8 — carries persist v1.11.0 + verify v2.8.0, single-
+# versioned with our direct persist pin (federation graph converged).
+# Consumed surface (`src/messages/`, `src/handler.rs`, `src/edge.rs`)
+# byte-stable v0.2.5 → v0.2.8.
 #
 # DEPLOYMENT NOTE: persist v1.10.0 (#87) enables ciris-keyring's
 # `tpm` feature per-target on Linux; cargo additive feature
 # unification forces it onto every co-resident crate. Linux builds +
 # any Linux host running the shared-engine cohabitation process need
 # system `libtss2` (`libtss2-dev` for builds). See CIRISEdge#12.
-ciris-edge = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v0.2.7", version = "0" }
+ciris-edge = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v0.2.8", version = "0" }
 
 # Serde + canonicalization. Canonicalization itself routes through
 # persist's `Engine.canonicalize_envelope_for_signing` — see
