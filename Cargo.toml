@@ -21,7 +21,13 @@ crate-type = ["cdylib", "rlib"]
 # Pins CIRISVerify v2.8.0. Consumed surface (cirisnode track,
 # federation trust_grant, audit service/types) byte-stable since
 # v0.9.1 / v1.5.x respectively.
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v1.11.0", version = "1", features = ["cirisnode", "cirisaudit"] }
+# `postgres` is explicit: v1.11.0 decoupled `cirisnode` from the
+# backend features (`cirisnode = []`), so the `postgres` feature is
+# needed for the `NodeCoreDispatch::Postgres` variant that
+# `crate::cohabitation::install_from_dispatch` matches. The
+# cohabitation target is a Postgres deployment; the agent process
+# already links the Postgres backend via persist's Engine.
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v1.11.0", version = "1", features = ["cirisnode", "cirisaudit", "postgres"] }
 
 # Edge v0.2.8 — carries persist v1.11.0 + verify v2.8.0, single-
 # versioned with our direct persist pin (federation graph converged).
