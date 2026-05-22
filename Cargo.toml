@@ -59,6 +59,13 @@ tracing = "0.1"
 thiserror = "1.0"
 async-trait = "0.1"
 
+# PyO3 — Phase 1 client-surface bindings (CIRISNodeCore#1). Optional;
+# gated behind the `python` feature. v0.28 + abi3-py311 matches
+# `ciris-persist` + `ciris-lens-core` exactly — required for CIRIS 3.0
+# in-process cohabitation (all co-resident cdylibs must link one
+# identical pyo3 ABI).
+pyo3 = { version = "0.28", features = ["extension-module", "abi3-py311"], optional = true }
+
 [dev-dependencies]
 proptest = "1.4"
 uuid = { version = "1", features = ["v4"] }
@@ -66,8 +73,11 @@ uuid = { version = "1", features = ["v4"] }
 [features]
 default = []
 
-# PyO3 cdylib for safety.ciris.ai pilot integration during the
-# Spec → Impl → Deployed-pilot window of MISSION.md §1.4.
-# Pulled in by deployments that consume via Python; defaults off for
-# the post-fold-into-agent trajectory.
-# python = ["dep:pyo3"]  # uncomment when pyo3 dep + bindings land
+# PyO3 cdylib bindings. Phase 1 = the client surface (envelope
+# construction + Ed25519 signing — pure, no engine). Per
+# CIRISNodeCore#4 the bindings NEVER construct a persist Engine or a
+# tokio runtime; Phase 1 has no engine to inject. Phases 2-3
+# (relay/node modes that host substrate) consume an injected persist
+# Engine handle — gated on a persist coordination item, not in this
+# feature yet.
+python = ["dep:pyo3"]

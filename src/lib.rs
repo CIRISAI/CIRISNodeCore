@@ -63,6 +63,12 @@ pub mod substrate;
 pub mod trust;
 pub mod wire;
 
+/// PyO3 bindings — Phase 1 client surface. Compiled only under the
+/// `python` feature; see the module docs for the engine-discipline
+/// rationale (CIRISNodeCore#4).
+#[cfg(feature = "python")]
+mod python;
+
 pub use service::NodeCore;
 pub use substrate::{
     Cell, ContributionEnvelope, ContributionListPage, ContributionType, ContributionsFilter,
