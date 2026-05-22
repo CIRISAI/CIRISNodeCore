@@ -1,0 +1,61 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "ciris-node-core"
+description = "Second-tier consensus runtime for the CIRIS federation: contributions, votes, expertise/credits ledgers, moderation, slashing, reconsideration, trust hierarchy"
+readme = "README.md"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "CIRIS AI", email = "hello@ciris.ai" }]
+requires-python = ">=3.11"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Topic :: System :: Distributed Computing",
+]
+# pip-install-time subsumption mirroring edge / lens-core: `pip
+# install ciris-node-core` pulls `ciris-persist` (which transitively
+# pulls `ciris-verify` + the build-sign / build-verify console
+# scripts). One install command for the whole node-core+persist+verify
+# stack.
+#
+# EXACT pin to v1.10.2 — the CIRIS 3.0 in-process cohabitation
+# convergence point (CIRISNodeCore#5). For agent + NodeCore + LensCore
+# co-resident in one process, every consumer must link ONE identical
+# ciris-persist: a single tokio runtime, a single process-singleton
+# Engine (persist v1.6.8 #75–#78). A version RANGE would let pip
+# resolve NodeCore to a different patch than LensCore/agent and break
+# the singleton — exact `==` is the contract. Matches CIRISLensCore's
+# pyproject pin + CIRISEdge v0.2.7's Cargo pin.
+#
+# DEPLOYMENT NOTE — libtss2: persist v1.10.0 (CIRISPersist#87)
+# auto-enables ciris-keyring's `tpm` feature for Linux targets;
+# cargo's additive feature unification forces it onto every
+# downstream Linux build. Building tss-esapi links system libtss2.
+# Any Linux host running the 3.0 shared-engine process needs
+# `libtss2` installed (`libtss2-dev` for builds) — a real deployment
+# dependency, not just CI. See CIRISEdge#12.
+dependencies = [
+    "ciris-persist==1.10.2",
+]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://ciris.ai"
+Repository = "https://github.com/CIRISAI/CIRISNodeCore"
+Issues = "https://github.com/CIRISAI/CIRISNodeCore/issues"
+
+[tool.maturin]
+features = ["python"]
+module-name = "ciris_node_core"
+# abi3-py311 — one wheel covers Python 3.11+ per the matrix
+# precedent persist + edge + lens-core use. Phase 1 ships the three
+# platform wheels the rest of the federation ships: linux-x86_64,
+# linux-aarch64, darwin-aarch64 (darwin-x86_64 omitted — matches
+# persist / edge / lens-core exactly).
+strip = true
