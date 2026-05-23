@@ -2,9 +2,9 @@
 
 **MISSION.md**. Second-tier consensus primitives for deferral routing, voting, expertise consensus, and moderation.
 
-**Status**: Draft v1.0 (pre-implementation; extraction-stage rust crate).
+**Status**: Draft v1.2 (pre-implementation; extraction-stage rust crate).
 **Crate identifier**: `ciris-node-core`.
-**Last updated**: 2026-05-10.
+**Last updated**: 2026-05-22.
 **Cross-references**: `CIRISVerify`, `CIRISRegistry`, `CIRISEdge`, `CIRISPersist` (substrate); `ciris-lens-core` (peer second-tier); `CIRISAgent` (eventual consumer); `CIRISBench` (HE-300 lives there); `RATCHET` (anti-Sybil evaluator reading the crate's audit chain); `FEDERATION_THREAT_MODEL.md` v1.0; `ACCORD.md` §M-1.
 
 **Implementation Status Legend**:
@@ -24,7 +24,7 @@ CIRISNodeCore serves M-1 ("Promote sustainable adaptive coherence: the living co
 
 ### 1.2 What CIRISNodeCore is
 
-A rust crate. Five functions over one shared primitive set:
+A rust crate. Six functions over one shared primitive set:
 
 1. **Deferral routing**. Runtime deferral from a CIRIS agent (or other consumer) to people with expertise in the relevant (domain, language) cell. Generalizes CIRISNode's existing function. [Spec]
 
@@ -35,6 +35,8 @@ A rust crate. Five functions over one shared primitive set:
 4. **Moderation**. Signed accusation with stake, witness aggregation, adjudication by Wise Authority quorum, slashing of proven-rogue actors, and reconsideration paths for reversing adjudication errors. [Spec]
 
 5. **RATCHET integration**. The crate emits a signed audit chain that RATCHET reads for anti-Sybil pattern detection; RATCHET returns flags as advisory inputs to moderation. [Spec]
+
+6. **Decision hierarchy**. Typed primitives for the federation's decision content — Goal, Approach, Method, Progress Measure — composing into an upward-only DAG with referential integrity at audit-chain ingest. Decision objects are typed Contributions (Path B, Contribution-kind extension); no new wire surface. Full specifications in `FSD/GOAL_PRIMITIVE.md`, `FSD/APPROACH_PRIMITIVE.md`, `FSD/METHOD_PRIMITIVE.md`, `FSD/PROGRESS_MEASURE_PRIMITIVE.md`, with the cross-cut at `FSD/DECISION_HIERARCHY.md`. [Spec]
 
 HE-300 ethical benchmarking is not in scope; it lives in `CIRISBench`. CIRISBench evaluations may flow into the crate as track-record evidence for expertise validation, but the benchmark execution itself remains in CIRISBench.
 
@@ -67,7 +69,7 @@ The crate operates under proportionate reflective ethical responsibility: we owe
 
 ### 1.6 Same primitives across applications
 
-The eleven primitives (§2) generalize across deferral routing, safety evaluation, WA promotion, governance votes. The differentiator across applications is the **subject** of the Contribution and the **truth-grounding signal** configured for that subject. Truth-grounding fidelity varies substantially across subjects (production hedge captures for safety are tight; long-term federation health metrics for governance are loose); the mechanism is uniform, the grounding is not.
+The fifteen primitives (§2) generalize across deferral routing, safety evaluation, WA promotion, governance votes. The differentiator across applications is the **subject** of the Contribution and the **truth-grounding signal** configured for that subject. Truth-grounding fidelity varies substantially across subjects (production hedge captures for safety are tight; long-term federation health metrics for governance are loose); the mechanism is uniform, the grounding is not.
 
 The application → primitive → grounding mapping made explicit:
 
@@ -84,9 +86,26 @@ The split between *tight* and *loose* grounding maps directly onto the §6.2 emp
 
 ---
 
-## 2. Primitives (the eleven)
+## 2. Primitives (the fifteen, in four tiers)
 
-The substrate (`FEDERATION_THREAT_MODEL.md` §2.2) provides twelve primitives at the substrate layer. CIRISNodeCore adds eleven at the consensus layer, operating over the substrate.
+The substrate (`FEDERATION_THREAT_MODEL.md` §2.2) provides twelve primitives at the substrate layer. CIRISNodeCore adds **fifteen** at the consensus layer, organized in four tiers — each tier framework-grounded by *Corridor Dynamics in Coordinated Systems* v2 (DOI [10.5281/zenodo.20300773](https://doi.org/10.5281/zenodo.20300773)):
+
+| Tier | What | Primitives | Framework grounding |
+|---|---|---|---|
+| **1. Agent state** | who can act, with what weight | Identity (P1), Credits (P2), Expertise (P3) | Piece 4's `P_G` needs a *whose* `P_G`; Credits + Expertise are the federation's per-axis weighting on top |
+| **2. Decision objects** | what we decide *about* | Goal (P12), Approach (P13), Method (P14), Progress Measure (P15) | §sec:tsvf-ubuntu (multi-scale belonging composite), Piece 10 (karma trail), Piece 2 (γM substrate-typed), framework-provided five-factor measures |
+| **3. Consensus mechanics** | how signed objects → outcomes | Contribution (P5, the universal envelope), Vote (P4), Truth-Grounding (P6), Weighted Aggregate (P7), Witness Diversity (P10) | ρ_goals computation; post-F-11 "no central scorer" architectural shape |
+| **4. Governance steering** | when consensus alone isn't enough | Moderation (P8), Slashing (P9), Reconsideration (P11) | Piece 3 (corridor-correction); Reconsideration as universal exit-from-lock-in; Slashing operational-only (decoupled from disagreement) |
+
+The shape is **layered, not parallel**: Tier 1 is per-agent state on the signing key; Tier 2 *reuses* Tier 3's Contribution envelope (each decision object is a typed `Contribution`); Tier 3 processes Contributions type-agnostically; Tier 4 is exception-handling that fires when Tier 3 produces persistent failure. Drop any tier and the structure collapses.
+
+The substrate-crate boundary maps onto the tiers: Tier 1 lives in edge + persist (Identity is the Ed25519 key; Credits + Expertise are persist ledgers); Tier 2 is node-core's new Contribution-kinds; Tier 3 spans edge (envelope, MessageType wire) + node-core (the 8 federation-consensus handlers); Tier 4 is node-core. The tiering is what makes the cohabitation merge into CIRISAgent tractable.
+
+Each primitive carries its `[Spec]` / `[Impl]` / `[Deployed]` tag inline. Primitive numbers (P1–P11) are unchanged from v1.1; the four new primitives (P12–P15) are added at the end of the numbering. The tier order is the *presentational* organizing principle; references throughout this document use the stable primitive numbers.
+
+---
+
+**Tier 1 — Agent state.** Who can act, with what weight. Lives on the signing key; doesn't change at federation runtime.
 
 ### Primitive 1: Identity (substrate inheritance)
 
@@ -99,6 +118,32 @@ A per-contributor ledger of Commons Credits indexed by (domain, language, subjec
 ### Primitive 3: Expertise ledger (consensus artifact on competence)
 
 A per-contributor ledger of expertise standing indexed by (domain, language). Expertise is the network's verdict on whether the contributor has substantive competence in the cell. Not a count; a derived state computed from peer attestations from existing experts in the cell, weighted by each attester's own expertise, validated by the contributor's track record on substantively challenging cases. Indexes at (domain, language) because competence is broader than any single subject. The recursion is grounded by F-AV-BOOT external anchoring: CIRIS L3C provides an externally-anchored seed of expertise-bearers per cell, whose relative weight decays as the cell matures. Standing decays slowly on inactivity. [Spec]
+
+---
+
+**Tier 2 — Decision objects.** What the federation decides *about*. Each is a typed Contribution under Path B (Contribution-kind extension); none adds new wire surface. Full specifications in the per-primitive FSDs. The cross-cutting structure (upward-only DAG, referential integrity at ingest, cross-level Reconsideration coordination, per-level corridor-occupation reading) lives in `FSD/DECISION_HIERARCHY.md`.
+
+### Primitive 12: Goal
+
+The agent's published multi-scale belonging-projector composite — the structural object Piece 4 of *Corridor Dynamics* v2 names as `P_G`, instantiated at the federation tier. Carries the agent's nested `⟨G_self|, ⟨G_family|, ⟨G_community|, ⟨G_affiliations|, ⟨G_species|` projectors plus the agent's declared belief-context tag. Scored by the multiplicative CIRIS Capacity Score `𝒞_CIRIS = C · I_int · R · I_inc · S` (unity-of-virtues structural anti-Goodhart — any near-zero factor collapses the composite). The `S` factor carries an explicit decay-and-refresh ODE for "gratitude as practice, not event." Computed per-peer, no central scorer (post-F-11). Federation-level ρ_goals(i, j) computed pairwise per belonging-scale; corridor membership is multi-scale (federation can be in corridor at one scale and out at another). Privacy-tiered per scale (defaults: self encrypted, family/community/affiliations federation-only, species public). Empirically anchored against the HuggingFace `CIRISAI/reasoning-traces` corpus. Corridor exit does not trigger Slashing — descriptive, not punitive. Full spec: `FSD/GOAL_PRIMITIVE.md`. [Spec]
+
+### Primitive 13: Approach
+
+A strategic pathway from current state toward Goals — Piece 10's *karma* (cumulative product of past goal-projections) at the federation tier. Carries `goal_refs[]` (≥ 1, referential integrity at admission), strategy (prose + structured), forward-reference `commits` (expected Method-level γM expenditure pattern), `mitigations[]`, and `previous_approach` chaining the karma trail. Evaluation is **derived from linked Progress Measures over time**, not a direct score — Approaches don't carry their own composite. Multiple Approaches per Goal supported (federated A/B); sub-federation branching for genuine strategic incompatibility (P7 + P10 thresholds). Amendment / supersession / retirement under P11 Reconsideration with distinct Method-rebinding semantics. Anti-strategy-monopoly: per-Goal Approach count + diversity is a federation health observable. Slashing-decoupled from approach-disagreement. Full spec: `FSD/APPROACH_PRIMITIVE.md`. [Spec]
+
+### Primitive 14: Method
+
+A concrete operational practice instantiating an Approach — Piece 2's γM at the federation tier, with substrate-typing as first-class. Required `substrate_rung` (Ph0/Ph1/Ph2/A0..A5); cross-rung portability requires explicit Contribution attestation (no quiet portability). Required `specification.execution_log_format` so the federation knows what audit signal to look for; `commits` enumerate resource expenditure (compute / funding / person-hours / duration). Truth-grounding is **execution verifiability**: signed work logs, capture+interpret artifacts (the `FSD/SAFETY_BATTERY_CI_LOOP.md` pattern generalized), substrate resource observation. P9 Slashing applies **only** on documented spoofing — claimed execution that audit shows did not happen — never on honest execution failure. Per-Method execution rate is a federation health observable; persistent vapor work is flagged. Full spec: `FSD/METHOD_PRIMITIVE.md`. [Spec]
+
+### Primitive 15: Progress Measure
+
+What counts as **evidence of progress** toward Goals under chosen Approaches via specific Methods. The federation's Goodhart-resistance discipline lives here. Required `tracks` (≥ 1 of goal_refs / approach_refs / method_refs — orphan measures schema-rejected), `computation` (sql / function / observation_protocol / human_judgment), `validity_window` with renewal policy (expire / reconsider / automatic_extend), and a required `goodhart_resistance` attestation (longitudinal_correlation / framework_provided / convergent_validation / new_measure_pending). The framework-provided five-factor decomposition (C, I_int, R, I_inc, S per `CIRISLens/FSD/ciris_scoring_specification.md`) is the v0.1 reference measure set inheriting v2's empirical record. Federation-defined measures extend the same Contribution surface and earn track record. P11 Reconsideration is load-bearing for measure retirement (expiration / decoupling / supersession). Per-substrate validity required; cross-substrate measure-portability requires explicit attestation. The meta-Goodhart problem (measures-of-measures drifting) is named and mitigated by Contribution-and-Reconsideration recursion — no permanent measures, no permanent measures-of-measures. Multiplicative composition at Goal level (𝒞_CIRIS) is the upstream structural anti-Goodhart protection. Full spec: `FSD/PROGRESS_MEASURE_PRIMITIVE.md`. [Spec]
+
+**Cross-cutting structure.** P12–P15 compose into an **upward-only DAG**: Goal ← Approach ← Method ← Progress Measure. Cycles are structurally impossible at the wire level (no downward references). Referential integrity at audit-chain ingest rejects orphans. Per-level substrate-typing coherence checked at admission. Cross-level Reconsideration cascade-candidate detection feeds P8 Moderation; v0.1 requires explicit escalation rather than automated cascade. Per-level corridor-occupation reading generalizes the framework's corridor structure (Piece 3) across the decision hierarchy: federation health is multi-corridor (Goal ρ_goals in band, Approach diversity in band, Method execution rate in band, Measure validity in band). Slashing decoupling enforced at every level: pluralism / disagreement / measure-decoupling never trigger P9; only documented Method-execution spoofing does. Full cross-cut spec: `FSD/DECISION_HIERARCHY.md`. [Spec]
+
+---
+
+**Tier 3 — Consensus mechanics.** How signed objects turn into federation outcomes. Type-agnostic with respect to Tier 2 — the consensus pipeline processes any Contribution uniformly. Contribution (P5) is the universal envelope; Vote / Truth-Grounding / Weighted-Aggregate / Witness-Diversity are the operations on it.
 
 ### Primitive 4: Vote
 
@@ -125,6 +170,21 @@ Per-subject configuration that anchors weighted aggregates and Credits accrual t
 
 Per-Contribution rolling tally of votes, weighted by Primitive 4's vote weight, anchored against the truth-grounding signal (Primitive 6) where available. The aggregate is the basis for downstream decisions (proposal adoption, WA promotion, deferral consensus). The aggregate function is policy-tunable (§6.2). [Spec]
 
+### Primitive 10: Witness-diversity requirement
+
+For high-stakes Contributions (ModerationEvents, WA candidacy proposals, policy proposals above a magnitude threshold, ExpertiseAttestations whose acceptance would jump the target's standing past a threshold), validity requires ≥ N independent witnesses meeting a diversity bar:
+
+- **Jurisdictional**: witnesses span ≥ 2 jurisdictions.
+- **Organizational**: no two witnesses operated by the same legal entity or entities with majority common ownership.
+- **Software-stack**: witnesses run distinct client implementations.
+- **Cell-expertise**: for cell-specific high-stakes Contributions, witnesses must hold non-zero Expertise standing in the (domain, language) of the Contribution. The cell here is the Expertise-granularity cell (domain, language), not the Credits-granularity cell (domain, language, subject), because witnesses evaluate substantive merit which is broader than any single subject.
+
+The witness role is not adjudication. Witnesses attest only that the Contribution warrants review and the evidence is well-formed. Adjudication is the WA quorum's task. The diversity bar prevents a single fault-domain from suppressing or manufacturing high-stakes events. N defaults to 3; the default is policy-tunable. P10 also applies as the admission discipline + execution-attestation discipline for Tier 2 primitives (P12–P15) per `FSD/DECISION_HIERARCHY.md`. [Spec]
+
+---
+
+**Tier 4 — Governance steering.** Fires when Tier 3 produces persistent failure. Coordinates cross-tier patterns (Moderation), provides universal appeal path (Reconsideration), backstops with punishment only for documented spoofing (Slashing — decoupled from disagreement at every Tier 2 level).
+
 ### Primitive 8: Moderation event
 
 A Contribution subtype targeting another Contribution or contributor, alleging rogue action. Allegation types:
@@ -144,18 +204,7 @@ A signed record reducing a target's Credits *or* Expertise standing in a specifi
 - **PROVEN_ROGUE**. Target's Credits reduced proportional to harm; if the rogue action involved expertise standing, Expertise reduced. Accuser's stake returned plus bounty from the slashed credits.
 - **NOT_PROVEN**. Target's standing restored. Accuser's stake disposition is discretionary to the WA quorum: full return for good-faith filings; partial retention for marginal cases; full retention plus possible counter-moderation for filings the quorum specifically flags as bad-faith.
 
-Slashing distinguishes proven rogue action (target acted against the protocol's terms) from miscalibration (target voted in good faith but their judgment differed from eventual ground truth). Miscalibration is not slashable. The Credits and Expertise ledgers both carry a non-negative invariant; slashing reduces toward but never below zero. [Spec]
-
-### Primitive 10: Witness-diversity requirement
-
-For high-stakes Contributions (ModerationEvents, WA candidacy proposals, policy proposals above a magnitude threshold, ExpertiseAttestations whose acceptance would jump the target's standing past a threshold), validity requires ≥ N independent witnesses meeting a diversity bar:
-
-- **Jurisdictional**: witnesses span ≥ 2 jurisdictions.
-- **Organizational**: no two witnesses operated by the same legal entity or entities with majority common ownership.
-- **Software-stack**: witnesses run distinct client implementations.
-- **Cell-expertise**: for cell-specific high-stakes Contributions, witnesses must hold non-zero Expertise standing in the (domain, language) of the Contribution. The cell here is the Expertise-granularity cell (domain, language), not the Credits-granularity cell (domain, language, subject), because witnesses evaluate substantive merit which is broader than any single subject.
-
-The witness role is not adjudication. Witnesses attest only that the Contribution warrants review and the evidence is well-formed. Adjudication is the WA quorum's task. The diversity bar prevents a single fault-domain from suppressing or manufacturing high-stakes events. N defaults to 3; the default is policy-tunable. [Spec]
+Slashing distinguishes proven rogue action (target acted against the protocol's terms) from miscalibration (target voted in good faith but their judgment differed from eventual ground truth). Miscalibration is not slashable. The Credits and Expertise ledgers both carry a non-negative invariant; slashing reduces toward but never below zero. **Slashing is decoupled from the decision hierarchy** (Tier 2): Goal-level disagreement, Approach-level disagreement, Progress-Measure decoupling, and honest Method-execution failure all flow to P11 Reconsideration rather than P9. Slashing applies only on documented Method-execution spoofing or the existing P8 allegation types. See `FSD/DECISION_HIERARCHY.md` §4.2. [Spec]
 
 ### Primitive 11: Reconsideration
 
@@ -178,7 +227,7 @@ Filing requires the requester to stake Commons Credits proportional to the alleg
 
 **Fresh-quorum selection**: members of the original adjudicating quorum are recused. In cells with enough WAs to draw a non-overlapping quorum, this is straightforward. In narrow cells where the WA pool is small, fresh-quorum selection draws from adjacent cells whose WAs hold cell-expertise in the contribution's (domain, language) per Primitive 10; if no adjacent-cell WAs are available, federation-wide WA pool is used with explicit rationale recorded. This is a structural gap in narrow cells; see §9. [Spec]
 
-### 2.12 RATCHET integration contract
+### 2.16 RATCHET integration contract
 
 CIRISNodeCore is not the anti-Sybil evaluator. RATCHET is, per `RATCHET/README.md` and `RATCHET/FSD.md`. The integration contract:
 
@@ -199,7 +248,11 @@ RATCHET's L-01 through L-08 limitations (`RATCHET/KNOWN_LIMITATIONS.md`) bind he
 
 **Seed-holder voting-alignment monitoring signal.** Externally-anchored seed Expertise per §7.2 (F-AV-BOOT) introduces a known asymmetry — seed-holders carry weight the cell has not yet attested. To make seed-bloc capture observable rather than implicit, the audit chain emits a `seed_holder_voting_alignment` event per cell per voting window: pairwise cosine of seed-holder vote vectors across all Contributions in the window. RATCHET (and eventual lens-core dashboards) read the event and surface alignment that exceeds a steward-set threshold for review. Not a slashing trigger; a transparency signal. Pre-`[Impl]` interim: emit the alignment statistic alongside the CI safety-battery artifacts so safety.ciris.ai can render it next to the canonical evidence.
 
-### 2.13 Boundary defense
+### 2.17 Boundary defense
+
+**Why Tier 2 reuses Tier 3's Contribution envelope (Path B).** Goal, Approach, Method, Progress Measure are typed `Contribution` variants — not parallel wire surfaces. The consensus pipeline (P4/P5/P6/P7/P10) processes them type-agnostically; the per-type semantics live in payload schemas and per-type derived statistics, not in new MessageType wire surfaces. Collapsing to a single Contribution kind would lose the typed-decision-content (the gap v1.0 left); promoting any of the four to a top-level primitive (Path A) would duplicate the consensus mechanics. Path B is the minimum addition that makes decision content typeable while preserving the uniform consensus pipeline. Promotion path stays open per `FSD/GOAL_PRIMITIVE.md` §4.1.
+
+**Why Slashing-decoupling is asserted at the decision hierarchy.** Without it, P9 becomes a weapon against legitimate pluralism: a faction dislikes another faction's Goal / Approach / Progress Measure → files for Slashing → suppresses the disagreement. The Tier 2 FSDs enforce that every level routes disagreement to P11 Reconsideration, not P9; P9 fires only on documented Method-execution spoofing or the original P8 allegation types. This is engineering policy, not framework derivation — the framework licenses pluralism (Piece 5's multi-agent consent), the specific protections are CIRISNodeCore's call.
 
 **Why Credits and Expertise are separate primitives.** Different signals, different time scales, different roles. Credits accrue per grounded vote at (domain, language, subject) granularity. Expertise accrues through peer attestation and hard-case track record at (domain, language) granularity. A contributor can accumulate high Credits through consistent voting on easy cases without demonstrating competence; a recognized expert who participates sparsely has high Expertise standing but low Credits. Collapsing forces a single signal that can't carry both.
 
@@ -215,12 +268,12 @@ RATCHET's L-01 through L-08 limitations (`RATCHET/KNOWN_LIMITATIONS.md`) bind he
 
 **Things considered but rejected as primitives:**
 - *Cross-domain spillover function*. Rejected. Earned per cell; correlated competence accumulates standing organically across cells through actual cell work, not via a transfer function.
-- *Behavioral-baseline detector*. Rejected as a crate primitive. RATCHET fills this role at the federation level; the crate's job is the integration contract (§2.12).
+- *Behavioral-baseline detector*. Rejected as a crate primitive. RATCHET fills this role at the federation level; the crate's job is the integration contract (§2.16).
 - *Deferral as its own primitive*. Rejected. Deferral is a Contribution subtype (DEFERRAL_REQUEST/RESPONSE), routed and aggregated like any other Contribution.
 - *WA selection as its own primitive*. Rejected. WA selection is an algorithm over Expertise and Credits state, not a separate primitive.
 - *Vote weighting function as its own primitive*. Rejected. The function is a policy parameter.
 
-### 2.14 What is NOT a primitive
+### 2.18 What is NOT a primitive
 
 The following are actor behaviors or applications over the primitives, not primitives:
 
@@ -228,6 +281,9 @@ The following are actor behaviors or applications over the primitives, not primi
 - **safety.ciris.ai**. Application. A deployment exposing the crate's primitives to public engagement around safety subjects.
 - **CIRISBench HE-300**. Adjacent crate. Benchmark execution lives there; its outputs flow into expertise validation as one track-record input.
 - **Specific scoring functions and subject definitions**. Policy.
+- **The decision-hierarchy DAG as a top-level primitive**. Rejected. The DAG is the *cross-cutting structure* of Tier 2 (P12–P15), enforced by referential integrity at audit-chain ingest (`FSD/DECISION_HIERARCHY.md` §2.2). It is not a separate primitive any more than "the Contribution audit chain" is a primitive separate from Contribution.
+- **𝒞_CIRIS as a separate primitive**. Rejected. 𝒞_CIRIS is the score function for Goal (P12); it lives in the Goal Primitive's scoring contract, not as its own primitive. Federation-defined Progress Measures that compose with it use the Progress Measure primitive (P15).
+- **Sub-federation branching as a separate primitive**. Rejected. Branching is a semantic outcome of P7 + P10 + P11 over Approach (P13) when two Approaches at the same Goal are genuinely incompatible. The branching mechanism (parent-child federation directory metadata, P10 thresholds) is engineering policy on top of existing primitives, not a new primitive.
 
 ---
 
@@ -602,7 +658,7 @@ struct ReconsiderationAttestation {
 
 ### 6.2 Policy-tunable posture
 
-Per `FEDERATION_THREAT_MODEL.md` §2.6, anti-Sybil resistance is not an emergent invariant of substrate composition; it is a continuously-tuned policy posture. The same is true of CIRISNodeCore. The eleven primitives do not by themselves guarantee resistance. Resistance is the product of primitives plus continuously-tuned policy parameters:
+Per `FEDERATION_THREAT_MODEL.md` §2.6, anti-Sybil resistance is not an emergent invariant of substrate composition; it is a continuously-tuned policy posture. The same is true of CIRISNodeCore. The fifteen primitives do not by themselves guarantee resistance. Resistance is the product of primitives plus continuously-tuned policy parameters:
 
 - Witness diversity thresholds and cell-expertise constraints (Primitive 10).
 - Active-tier boundary N (§3.8).
@@ -652,7 +708,7 @@ CIRISNodeCore sits in the second tier of CIRIS architecture, alongside `ciris-le
 safety.ciris.ai is the pilot deployment of CIRISNodeCore. The pilot exposes the crate's primitives to public engagement around safety subjects: the 14 mental-health batteries currently on `ciris.ai/safety`, the 22 prohibited capability categories from `ciris_engine/logic/buses/prohibitions.py`. Scope:
 
 - Engagement modes: evaluate existing, free-form proposal, new battery proposal, vote.
-- The full eleven-primitive consensus mechanism with subjects restricted to safety batteries and a small governance subject set for pilot operation itself.
+- The full fifteen-primitive consensus mechanism with subjects restricted to safety batteries and a small governance subject set for pilot operation itself.
 - Public hall of contributors (no pseudonymous track in initial pilot).
 - Bootstrap seed Expertise from CIRIS L3C's safety contributor set.
 - Liability isolation per §6.3.
@@ -721,4 +777,4 @@ While CIRISNodeCore is in the extraction phase, this document and the crate's AP
 
 ---
 
-*This document is iterative. v1.0 is the publishable version; v1.1 patches absorbed (2026-05-11) refine §1.6 mapping, §3.6 policy-not-adjudication framing, §5.4 independent grounding signal, §6.2 four-bet split, Primitive 11 evidence-package recursion, §2.12 CCA + seed-holder monitoring. Future versions report operational evidence from the safety.ciris.ai pilot, parameter calibrations, adversarial-review findings, and the eventual fold into CIRISAgent. Readers can challenge any claim by tracing it to its primitive in §2, pushing back on the empirical bets in §6.2, or filing a finding against the schemas in §4 or the logic flows in §5.*
+*This document is iterative. v1.0 is the publishable version; v1.1 patches absorbed (2026-05-11) refine §1.6 mapping, §3.6 policy-not-adjudication framing, §5.4 independent grounding signal, §6.2 four-bet split, Primitive 11 evidence-package recursion, §2.16 CCA + seed-holder monitoring. v1.2 patches absorbed (2026-05-22) land the four-tier reorganization of §2: Tier 1 (agent state — P1/P2/P3) / Tier 2 (decision objects — P12 Goal / P13 Approach / P14 Method / P15 Progress Measure, from the four sibling FSDs landed today) / Tier 3 (consensus mechanics — P4/P5/P6/P7/P10) / Tier 4 (governance steering — P8/P9/P11). Existing primitive numbers (P1–P11) are unchanged; the new four are appended at P12–P15. The §1.2 sixth function (decision hierarchy) is added; §2.17 (boundary defense) gains entries for Path-B reuse + Slashing-decoupling at the decision hierarchy; §2.18 (what is NOT a primitive) gains rejections for the DAG, 𝒞_CIRIS, and sub-federation branching as separate primitives. Future versions report operational evidence from the safety.ciris.ai pilot, parameter calibrations, adversarial-review findings, and the eventual fold into CIRISAgent. Readers can challenge any claim by tracing it to its primitive in §2, pushing back on the empirical bets in §6.2, or filing a finding against the schemas in §4 or the logic flows in §5.*
