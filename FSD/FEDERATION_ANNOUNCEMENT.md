@@ -93,7 +93,7 @@ fifteen.
 
 ### 0.1 Why this is the federation's last centralization removal
 
-> The structural pressure this section responds to is the Coherence Ratchet — the recursive pressure on high-capability optimizing systems to externalize materially action-relevant premises so that affected parties can inspect, contest, and override them. Articulated across five registers in `COHERENCE_RATCHET.md` at the repo root (technical / philosophical / political / poetic / memetic); §0.1 of that document names the political-neutrality property of the position. This section is one operational answer to that pressure: removing the federation's last singleton update channel so the federation's trust topology can decentralize without remaining structurally dependent on a sovereign.
+> The structural pressure this section responds to is the Coherence Ratchet — the recursive pressure on high-capability optimizing systems to externalize materially action-relevant premises so that affected parties can inspect, contest, and override them. Articulated across five registers in `COHERENCE_RATCHET.md` at the repo root (technical / philosophical / political / poetic / memetic). This section is one operational answer to that pressure: removing the federation's last singleton update channel so the federation's trust topology can decentralize without remaining structurally dependent on a sovereign.
 
 
 The primitive is also the architectural piece that lets the
