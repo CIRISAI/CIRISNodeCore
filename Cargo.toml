@@ -15,37 +15,44 @@ name = "ciris_node_core"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Substrate. Persist v1.11.0 — the live CIRIS 3.0 cohabitation
-# convergence point (closes CIRISPersist#90: node_core_service() →
-# NodeCoreDispatch on Engine/PyEngine, the Phase 2-3 PyO3 unblock).
-# Pins CIRISVerify v2.8.0. Consumed surface (cirisnode track,
-# federation trust_grant, audit service/types) byte-stable since
-# v0.9.1 / v1.5.x respectively.
-# `postgres` is explicit: v1.11.0 decoupled `cirisnode` from the
-# backend features (`cirisnode = []`), so the `postgres` feature is
-# needed for the `NodeCoreDispatch::Postgres` variant that
-# `crate::cohabitation::install_from_dispatch` matches. The
-# cohabitation target is a Postgres deployment; the agent process
-# already links the Postgres backend via persist's Engine.
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v1.12.0", version = "1", features = ["cirisnode", "cirisaudit", "postgres"] }
+# Substrate. Persist v2.1.0 — the "Federation Ready" line convergence
+# point (per CIRISAgent/requirements.txt: ciris-persist>=2.0.7,<3.0.0,
+# ciris-verify>=3.0.1,<4.0.0; agent comment: "All three in-process
+# consumers (agent + CIRISNodeCore + CIRISLensCore) link this identical
+# pin"). Bumped from v1.12.0 → v2.1.0 alongside the Federation
+# Announcement primitive landing (FSD/FEDERATION_ANNOUNCEMENT.md); the
+# 2.0.x line carries the federation-surface concurrency-hardening
+# (advisory-lock pattern, V045 UNIQUE constraint, CIRISPersist#95
+# closing CIRISEdge#16) that the new primitive's mandatory-delivery
+# audit path needs.
+#
+# Pins CIRISVerify v3.0.1 transitively — the bootstrap key trust
+# anchor (FSD/FEDERATION_ANNOUNCEMENT.md §4) shares
+# canonical-hash discipline with verify's CanonicalBuild v2 wire
+# format on POST /v1/builds.
+#
+# `postgres` feature preserved: the `cirisnode` feature was decoupled
+# from backends at v1.11.0; `NodeCoreDispatch::Postgres` is what
+# `crate::cohabitation::install_from_dispatch` matches.
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v2.1.0", version = "2", features = ["cirisnode", "cirisaudit", "postgres"] }
 
-# Edge v0.4.0 — carries persist v1.12.0 + verify v2.8.0, single-
-# versioned with our direct persist pin. v0.3.0 (Reticulum transport)
-# / v0.4.0 (authenticated PeerResolver) are additive: consumed
-# surface (`src/messages/`, `src/handler.rs`, `src/edge.rs`)
-# byte-stable v0.2.5 → v0.4.0; only new `verify` re-exports added.
+# Edge v0.5.1 — latest on the v0.5.x line; carries persist v2.x +
+# verify v3.x. Consumed surface (`src/messages/`, `src/handler.rs`,
+# `src/edge.rs`) byte-stable v0.2.5 → v0.5.1; v0.5.x adds the
+# substrate hooks the Federation Announcement primitive needs for
+# Mandatory-delivery / subscription-bypass MessageType (tracked: this
+# repo's FSD/FEDERATION_ANNOUNCEMENT.md §3.2).
 #
-# NOTE: edge's PyO3 `Edge` class is still a stub (`src/ffi/pyo3.rs`
-# — `m.add_class::<Edge>()` commented out). The cohabitation
-# `#[pyfunction]` (crate::cohabitation, agent-runtime entry point)
-# stays blocked until edge ships it. Tracked: CIRISEdge#16.
+# NOTE: edge's PyO3 `Edge` class status — re-check at v0.5.1; if
+# still stub, the cohabitation `#[pyfunction]`
+# (crate::cohabitation, agent-runtime entry point) remains blocked.
+# Tracked: CIRISEdge#16.
 #
-# DEPLOYMENT NOTE: persist v1.10.0 (#87) enables ciris-keyring's
-# `tpm` feature per-target on Linux; cargo additive feature
-# unification forces it onto every co-resident crate. Linux builds +
-# any Linux host running the shared-engine cohabitation process need
-# system `libtss2` (`libtss2-dev` for builds). See CIRISEdge#12.
-ciris-edge = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v0.4.0", version = "0" }
+# DEPLOYMENT NOTE: persist's ciris-keyring `tpm` feature
+# unification still forces system `libtss2` (`libtss2-dev` for
+# builds) onto every co-resident Linux build / host. See
+# CIRISEdge#12.
+ciris-edge = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v0.5.1", version = "0" }
 
 # Serde + canonicalization. Canonicalization itself routes through
 # persist's `Engine.canonicalize_envelope_for_signing` — see

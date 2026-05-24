@@ -67,6 +67,18 @@ Each lifecycle stage carries adversarial review proportional to its blast radius
 
 The crate operates under proportionate reflective ethical responsibility: we owe ourselves what we offer to others. The obligation runs both directions at every scale (contributor, contributor cluster, cell, deployment, federation, ecosystem). The constraint applies symmetrically to CIRIS L3C as steward, to the crate as infrastructure, and to every contributor as participant. No principal is exempt from the standard they impose on others. The Ubuntu relational frame ("I am because we are") translated into a consensus protocol: legitimacy is constituted by the mutual obligations of those it binds.
 
+**Where this bites operationally.** The principle is not aspirational; it is enforced at specific primitives, and a future reviewer should be able to grep from any sentence above to a concrete bite:
+
+- **Multi-party bootstrap (`FSD/FEDERATION_ANNOUNCEMENT.md` §4.2).** CIRIS L3C as steward cannot issue federation-wide directives unilaterally once `bootstrap_threshold > 1`. The M-of-N rotation arc that the steward imposes on the federation binds the steward. No exemption for the principal who set the policy.
+- **WA decay (§3.6).** Demotion rules apply to ROOT WAs the same as to any WA. A WA whose Credits + Expertise decay below threshold loses standing regardless of seniority or seed-holder status.
+- **Reconsideration (P11, §3.9).** A SlashingAttestation against a steward-aligned target is reviewable by a fresh quorum on the same grounds (NEW_EVIDENCE / PROCEDURAL_ERROR / QUORUM_COMPROMISE) as a SlashingAttestation against any other target.
+- **Bootstrap seed Expertise decay (§3.7, §7.2).** Seed weight diminishes per the same decay rate the cell uses for any contributor. The steward's anchoring privilege ages out by the rule the steward set.
+- **Truth-grounding loop (§5.4).** Steward-issued votes accrue Credits or fail to accrue Credits against the same truth-grounding signal as any other voter's. Steward miscalibration is observable on the same chain as anyone else's.
+
+If a principal would be exempt from a constraint at any of these primitives, the Golden Rule is violated at that primitive and the protocol is the wrong shape there. Fix the primitive, not the rule.
+
+**The deliberate asymmetry: humanity accord (`FSD/FEDERATION_ANNOUNCEMENT.md` §4.5).** The Golden Rule binds *participants in the federation* to each other. Humanity-as-such occupies a position outside the federation's participant set, by design: the named human key holders in §4.5 hold `AccordCarrier` authority that no federation-side authority class can grant itself, revoke, override, or decay. This is not a Golden-Rule exemption; it is the recognition that consent (M-1's load-bearing property) requires revocability, and revocability requires a halt-authority that lives outside the system being halted. The federation cannot deny humans the right to halt it, because no federation-internal protocol path to that signature exists. This is the *one* place where asymmetry is constitutional — and it is constitutional precisely so that every *other* primitive can be symmetric without collapsing M-1.
+
 ### 1.6 Same primitives across applications
 
 The fifteen primitives (§2) generalize across deferral routing, safety evaluation, WA promotion, governance votes. The differentiator across applications is the **subject** of the Contribution and the **truth-grounding signal** configured for that subject. Truth-grounding fidelity varies substantially across subjects (production hedge captures for safety are tight; long-term federation health metrics for governance are loose); the mechanism is uniform, the grounding is not.
@@ -713,7 +725,11 @@ safety.ciris.ai is the pilot deployment of CIRISNodeCore. The pilot exposes the 
 - Bootstrap seed Expertise from CIRIS L3C's safety contributor set.
 - Liability isolation per §6.3.
 
-Deferral routing from production CIRIS agents to the pilot's expertise pool is added in a later pilot phase once moderation and expertise consensus carry load. Pilot fold-into-CIRISAgent criteria are set at pilot launch in a separate document, not specified here.
+**Pilot phases** (the *Deployed (pilot)* lifecycle stage of §1.4 unpacks into):
+
+- **P0 — Safety + governance only.** Safety batteries and a small governance subject set for pilot operation itself. No deferral routing from production agents. Public hall of contributors. Bootstrap at `bootstrap_threshold = 1` permitted; raise to `2` is the first P0 milestone (`FSD/FEDERATION_ANNOUNCEMENT.md` §4.2).
+- **P1 — + production deferral routing.** Deferral routing from production CIRIS agents to the pilot's expertise pool, once moderation and expertise consensus carry P0 load. Bootstrap at `bootstrap_threshold ≥ 3` is the P1 entry condition — single-party AccordCarrier capability gone before production agents are routed against the pilot.
+- **P2 — Fold-into-CIRISAgent.** *Deployed (folded)* per §1.4. Pilot fold-into-CIRISAgent criteria are set at pilot launch in a separate document, not specified here (per §9 open question 16).
 
 [Spec]
 
@@ -774,6 +790,8 @@ While CIRISNodeCore is in the extraction phase, this document and the crate's AP
 15. **First-ModerationEvent stake floor for new contributors** (Primitive 8, §2.8). Without a stake *floor* (minimum), a new contributor with a low Credits balance can file ModerationEvents at near-zero cost — degenerates into an F-AV-ONBOARD-adjacent Sybil-fast-track via moderation gaming. The floor is a policy parameter: minimum stake for a contributor's first N ModerationEvents (default proposed: N=3) regardless of the contributor's actual Credits balance. Calibration pending pilot evidence on whether the floor's friction suppresses legitimate first-moderation appeals.
 
 16. **Pilot-to-fold criterion** (§7.3). Marked TBD per steward direction. Too many criteria to define ahead of pilot evidence; the criterion is "ready when the pilot demonstrates the primitives carry production load," with operator + steward judgment on which thresholds matter. Not a planning oversight — a lifecycle-stage gap correctly left open.
+
+17. **Bet D silent-failure detection** (§6.2, `FSD/JUDGE_MODEL.md` §7). Unlike Bets A / B-safety / B-governance / C, whose failure modes surface as observable patterns (cost-floor breach, miscalibration on production captures, governance reversal cadence, policy lag against attack patterns), Bet D's failure mode is *silent*: if Anthropic's effective-determinism for the judge-model verdicts shifts (model retirement, sampling parameter change, infrastructure-side non-determinism), the federation continues consuming verdicts that drift from what they would have been at T=0 baseline, and downstream Credits accrual + cell-behavior change detection both degrade without alarm. Mitigation candidates: (a) per-cycle judge-replay against a fixed reference set with drift-alarm threshold, (b) dual-judge cross-check at sampled cadence, (c) per-cycle judge-model build hash + sampling-parameter attestation pinned to the bundle. Calibration and selection deferred to pilot evidence; the question is which signal is cheapest to run continuously without burning the cost-floor that Bet A relies on.
 
 ---
 
