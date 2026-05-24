@@ -44,6 +44,9 @@ replaced by this surface rather than developed in parallel.
 
 ## 0. The gap this FSD fills
 
+> The Coherence Ratchet (`COHERENCE_RATCHET.md` at the repo root, five-register canonical) names the structural pressure: materially consequential assumptions must become inspectable by affected participants, or capability concentration accumulates unbounded trust debt until collapse, capture, or coercive stabilization. The federation tab is the participation surface that makes inspectability tractable for every user — without an in-agent UI for the federation primitives, the architecture's response to the Coherence Ratchet is half-built (the chain is inspectable in principle; the participants who would inspect it have no surface to do so).
+
+
 CIRISAgent today is a per-user vertical slice: each user talks to
 their own agent through a personal-interaction UI. There is no
 in-agent surface through which a user can interact with **the
