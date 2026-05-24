@@ -128,9 +128,6 @@ superhuman optimization eventually erodes the capacity of affected
 parties to evaluate their own situation. That erosion collapses any
 governance form (democratic, republican, market-based, cooperative,
 federated, traditional) into dependency on the optimizing system.
-The label one places on the resulting equilibrium depends on
-political tradition; the architectural failure is identical across
-labels.
 
 The structural demand is therefore:
 
@@ -143,9 +140,7 @@ The structural demand is therefore:
 Without these, capability concentration produces coercive
 equilibria — situations in which participants nominally consent
 but structurally cannot withdraw, evaluate, or hold the system
-accountable. That failure mode is recognized across political
-traditions, named differently in each, and identical in its
-mechanism.
+accountable.
 
 ---
 
