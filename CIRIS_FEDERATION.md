@@ -106,6 +106,38 @@ Key properties:
 Ethical implication: agency is preserved as a first-class primitive,
 not an implementation detail.
 
+### 3.1 Supervision-chain topology — four tiers, supply-side asymmetry
+
+Sovereign agents are not interchangeable. The network has a tiered
+topology in which the constitutional layer is human and the agent
+tiers have explicit cost / capability / safety trade-offs:
+
+| Tier | What it is | What it costs | Who ships it |
+|---|---|---|---|
+| **People** | The constitutional layer. Sets values, settles hard cases, holds final say. Three named individuals hold network-wide accord authority no agent or process can route around (per `FSD/FEDERATION_ANNOUNCEMENT.md` §4.5). | (Not an agent tier; the anchor.) | The humanity accord (3 named holders) + the broader WA roster + agent owners. |
+| **Type 3 — Ethical, self-aware agents** | Highest agent tier. Full ethical reasoning, signed records, AND echo-chamber detection — the only tier that can recognize when a cell of agents has converged toward correlated agreement rather than genuine consensus. Supervises everything below it. | Expensive to run; only a small share of the network needs to be this tier. | **CIRIS L3C ships only this tier in full.** This is the deployable reference implementation. |
+| **Type 2 — Ethical agents** | Rule-following with signed records. Supervises type 1 agents and passes uncertainty upward. Cannot itself detect echo-chamber convergence. | Mid-cost. Most "ethical agents in the wild" will be this tier. | **Partners, deployment orgs, and independent developers** build their own type 2 agents to specification — and they already are. |
+| **Type 1 — Simple agents** | Single-purpose tools. Fast, narrow, cheap. No ethics of their own — and that is fine, as long as something above them is watching. | Lowest cost. Most agents in the network will be this tier. | Anywhere. Type 1 agents come from across the ecosystem; what makes them federation-compatible is that they sit under a type 2 or type 3 supervisor. |
+
+**Flow direction.** Two things move through the chain in opposite
+directions. *Human values flow down* — from the constitutional layer,
+through type 3 supervisors, through type 2 enforcers, to the type 1
+tools that act in the world. *Warnings flow up* — when reasoning
+starts to look fragile anywhere in the network, the signal climbs
+back to people, who can step in before trouble spreads.
+
+**Supply-side asymmetry is intentional.** CIRIS L3C ships only full
+type 3 agents because echo-chamber detection is the hardest tier to
+implement and the most consequential to get wrong. The reference
+implementation lives at the top so the safety-critical layer has a
+defined shape; everything below it (type 2, type 1) is built by the
+ecosystem against the contract type 3 imposes. This is the federation
+analog of "the supervisor is the standard." Partners ship type 2
+because their deployments need ethical-rule-enforcement scoped to
+their domain (medical, legal, financial, etc.); type 1 agents come
+from anywhere because narrow tools are everywhere. The supervision
+chain composes across all three sources.
+
 ---
 
 ## 4. Event layer (reality encoding)
@@ -151,6 +183,39 @@ Key mechanisms:
 Critical design rule:
 
 > No node can unilaterally impose epistemic state on another node.
+
+### 5.1 Joining the federation — Proof of Benefit
+
+Membership in the federation is acquired through **Proof of Benefit**:
+the cost of belonging is *running a real ethical-reasoning agent over
+time*. Faking membership is structurally expensive because, to look
+like a member, an attacker would have to actually become the kind of
+agent the network is for — and a hundred copies that all think alike
+fail the healthy-middle coherence check (§6 / Coherence Collapse
+Analysis) immediately.
+
+Two paths into the network exist, both equal members once standing
+is established:
+
+| Path | Mechanism | Time to standing | When to use |
+|---|---|---|---|
+| **Registered** | Sign up with CIRISRegistry, post a small bond, get standing immediately. | Immediate. | Organizations needing licensing-grade standing (regulated industries, deployment partners with capability grants per `PartnerRecord` in `CIRISRegistry/FSD/FSD-001` §120). The registry runs in production now. |
+| **Sovereign** | Generate keys, run a real agent for approximately one month, earn standing through good behavior verified via the federation's coherence checks. | ~30 days. | Individual operators, small deployments, communities outside the registry's reach, anyone preferring not to register. |
+
+**The registry is a fast track, never a gate.** Both paths produce
+the same membership. The Registered path trades a bond for speed
+and explicit licensing standing; the Sovereign path trades time for
+fully self-asserted membership. The federation does not distinguish
+between them at the protocol level once standing is established —
+both contribute to consensus, both hold their tier in the
+supervision-chain topology (§3.1), both are bound by the fractal
+Golden Rule and the humanity accord equally.
+
+Full mechanism specification lives at
+`~/CIRISAgent/FSD/PROOF_OF_BENEFIT_FEDERATION.md` — including the
+bond economics, the Sovereign-path coherence-stake calculation, and
+the cross-tier interactions with the verification (§6) and federation-
+consensus (§10) layers.
 
 ---
 
