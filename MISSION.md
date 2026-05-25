@@ -43,17 +43,37 @@ HE-300 ethical benchmarking is not in scope; it lives in `CIRISBench`. CIRISBenc
 ### 1.3 Position in CIRIS architecture
 
 ```
-APPLICATION TIER          CIRISAgent (Python; eventually consumes ciris-node-core)
-                          safety.ciris.ai (pilot deployment of ciris-node-core)
+APPLICATION TIER          CIRISAgent (federation tab + accord page;
+                          eventually consumes ciris-node-core, cirislens-core,
+                          and ciris-registry-core as in-process substrate-
+                          conformant crates per the cohabitation trajectory)
                           ────────────────────────────────────────────────────
-SECOND TIER               ciris-lens-core           ciris-node-core (this)
+SECOND TIER               cirislens-core            ciris-node-core (this)
                           observability/compendium  deferrals/voting/expertise/moderation
                           ────────────────────────────────────────────────────
-SUBSTRATE TIER            ciris-verify   ciris-registry   ciris-edge   ciris-persist
-                          hardware/build trust/identity   transport     storage/audit
+SUBSTRATE-CONSUMING       ciris-registry-core (migrating in place from
+                          CIRISRegistry; consumes persist's FederationDirectory
+                          + verify's crypto + edge's transport; identity / build /
+                          license / partner source-of-truth as policy over substrate)
+                          ────────────────────────────────────────────────────
+SUBSTRATE TIER            ciris-verify   ciris-edge        ciris-persist
+                          identity +     transport         storage / audit +
+                          attestation                      federation directory
                           ────────────────────────────────────────────────────
 EVALUATOR                 RATCHET (reads chains across the federation)
 ```
+
+**Cohabitation trajectory.** All three "Core" crates (`ciris-node-core`,
+`cirislens-core`, `ciris-registry-core`) follow the same lifecycle: each
+becomes a substrate-conformant Rust crate, runs as a standalone deployed
+service in interim, and folds into CIRISAgent's in-process runtime at
+maturity. The singleton services (`safety.ciris.ai` / `portal.ciris.ai` /
+`*.registry.ciris-services-1.ai`) become CIRIS L3C's flagship deployments,
+not federation dependencies. CIRISLens has already promoted its
+`cirislens-core/` sub-crate; CIRISNodeCore is its own repo by extraction
+choice; CIRISRegistry's substrate-conformance migration is in flight
+(per `~/CIRISRegistry/docs/FEDERATION_CLIENT.md` and persist's
+`docs/FEDERATION_DIRECTORY.md`).
 
 The substrate provides identity, signed evidence, federated directory, audit log, transport, addressing. CIRISNodeCore reads these and runs the consensus logic above them. RATCHET reads CIRISNodeCore's audit chain (along with other federation chains) and produces flags. Applications consume CIRISNodeCore.
 
