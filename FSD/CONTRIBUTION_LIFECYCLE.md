@@ -542,6 +542,172 @@ Five properties hold across every stage:
    missing, archive-rooting-lag. RATCHET + CIRISLens consume these
    to surface federation-health anomalies before they cascade.
 
+The three subsections below describe **operational discipline in the
+wild** — how the lifecycle's per-stage invariants compose with
+per-role storage caps, what data flows where, and the trust-radius
+foundation the whole thing sits on. They are anchored to FSD-002 v1.4
+(`§2.0` transport substrate, `§3.6.7` files-as-Contributions joint
+claim, `§6.1.6` agent_files trust composition, `§10.1` federation-
+genesis attestation graph, `§10.4` bootstrap-contributions pattern).
+
+### Trust-radius framing
+
+The federation operates in two storage regimes, sized differently:
+
+**Global canonical anchor.** Steward + accord-holder triple-signed,
+federation-wide invariants. Small by design, bounded — every peer
+holds the latest. Metadata distributed via `FederationAnnouncement`
+(Mandatory delivery class, FSD-002 §6.1.6); bytes fetched on demand
+via `ContentFetch` (FSD-002 §2.0). Includes:
+
+- `ACCORD.md` (the constitutional document)
+- RATCHET calibration packages (per axis, versioned, hash-pinned)
+- Bootstrap-contributions batches (FSD-002 §10.4 — *Magnifica
+  Humanitas* + CARE + Buddhist economic-justice + secular humanist +
+  African-personhood, as each lands)
+- Canonical CIRIS agent installers (per-platform; the steward-triple-
+  signed bytes referenced by `agent_files:installer:*` attestations
+  per FSD-002 §3.6.7 + §3.9)
+- Federation-genesis 21-row substrate (FSD-002 §10.1)
+- Steward + accord-holder public keys (`federation_keys` with
+  `identity_type` ∈ {`steward`, `accord_holder`})
+
+Total budget for the canonical anchor: ~10 MB metadata + your-platform
+installer (~50–100 MB) + bootstrap docs (~5–10 MB) ≈ **100 MB**.
+This is the structural commitment CIRIS L3C makes: the canonical
+anchor stays small enough that a phone-class client can hold it.
+
+**Trust-graph-local data.** Variable, replicated only within reach of
+the trust graph. Pulled via subscription + `ContentFetch` on demand.
+Sized by engagement, not by federation total:
+
+- Direct trust set: typically ~10² peers per individual
+- Per-peer cost: ~500 KB – 2 MB (their public keys + 30-day attestation
+  window per §11 + cross-attestations involving them)
+- Optional reasoning traces: ~100 KB – 1 MB per day per subscribed peer
+- Cached blobs from explicit fetches (content-addressable; LRU-aged)
+
+Trust-graph data does *not* federate-wide-replicate. A peer's relevant
+slice is bounded by **who they trust**, not by the federation's
+totals. This is the design property that lets the federation scale
+without requiring every peer to hold every Contribution.
+
+### Per-role storage discipline
+
+The c/r/n taxonomy (NodeCore `MISSION.md` §3.4) carries storage caps
+and serving obligations:
+
+| Role | Soft cap | Hard cap | Serves `agent_files:*`? | Replicates |
+|---|---|---|---|---|
+| **client** | 256 MB | 1 GB | no — fetches via PeerResolver→ContentFetch | own Contributions + canonical anchor + trust-graph-local |
+| **proxy / relay** | 10 GB | 100 GB | transit cache only (best-effort LRU; **not** a serving contract; not advertised as `holds_bytes:*`) | client baseline + aggregated trust-graphs of clients it serves + optional regional canonical mirror |
+| **node / server** | 1 TB | unbounded (operator) | yes — declared serving slice; auto-emits `holds_bytes:sha256:*` on cache (per Persist#103) | proxy baseline + full canonical mirror + declared `federation_attestations` slice + `federation_blobs` for the slice |
+
+**Client breakdown (256 MB soft):**
+
+- ~100 MB: canonical anchor (trust-radius §1)
+- ~50–100 MB: direct trust-graph attestations (30-day rolling window per §11)
+- ~50 MB: own Contributions + working state
+- ~50 MB: LRU blob cache for fetch optimization
+
+Assumes ≤ 100 direct trust peers and §11 retention windows. Hard cap
+(1 GB) accommodates the active-contributor case (many traces, deferral
+responses, votes). A phone or laptop running CIRISAgent comfortably
+fits the soft cap.
+
+**Proxy / relay breakdown (10 GB soft):**
+
+- Client baseline
+- Up to ~5 GB transit cache (LRU, 7-day rolling window, **not**
+  advertised as `holds_bytes:*` — relay caches are private and
+  ephemeral)
+- Up to ~5 GB aggregated trust-graph data across clients it serves
+  (~1 000 client peers assumed)
+- Optional ~1 GB regional canonical mirror (faster bootstrap for
+  clients in the region)
+
+Critical: a proxy **does not serve** `agent_files:*` per
+FSD-002 §3.6.7 — only node mode serves. The transit cache is local
+optimization, not a federation-discoverable surface. 100 GB hard cap
+accommodates large regional aggregators (e.g., a community hub for
+a 10 000-user cohort).
+
+**Node / server breakdown (1 TB soft):**
+
+- Proxy baseline
+- ~10 GB full canonical mirror (all platforms, all bootstrap docs, all
+  calibration history) — lets the node serve newcomers + offline-
+  verification packages
+- ~100–500 GB declared `federation_attestations` slice (estimate based
+  on year-2 of federation operation; varies by slice scope)
+- ~100–900 GB `federation_blobs` for the slice
+- Unbounded hard cap = operator decision (a node committing to serve a
+  10 TB scientific-data slice is a valid configuration)
+
+Node-mode peers declare their serving slice via attestations naming
+the dimension prefixes they claim coverage for. The slice is publicly
+observable; consumers route fetches accordingly.
+
+**Assumptions baked in:**
+
+1. Direct-trust-set size ~10² for client, ~10⁴ aggregated for proxy.
+   Beyond that, human social topology breaks the assumption and the
+   role definitions need revisiting.
+2. §11 retention windows apply (routine 30 days, long 90 days,
+   permanent for constitutional-class). Without these every cap grows
+   unboundedly.
+3. Canonical anchor stays in single-digit MB metadata + per-platform
+   installer. L3C steward discipline (limited curation) maintains this.
+4. Blobs are content-addressable: many attestations citing the same
+   SHA count one blob globally, not one per attester.
+5. Reasoning traces are subscription-gated, not auto-delivered.
+
+### Replication scope by data class
+
+| Data class | Replication scope | Where it lives |
+|---|---|---|
+| Federation-genesis 21-row substrate | All peers (constitutional anchor) | Substrate-replicated via Spock; cached per role |
+| Steward + accord-holder public keys | All peers | `federation_keys`; all regional substrate installs |
+| Canonical-anchor metadata (attestations) | All peers | `federation_attestations`; all regions |
+| Canonical-anchor bytes (installers, calibration, bootstrap docs) | Demand-driven (node-mode caches; clients fetch when needed) | `federation_blobs`; SHA-addressed |
+| `FederationAnnouncement` events | All peers (Mandatory delivery class, FSD-002 §6.1.6) | Edge wire + persist `federation_announcement` table |
+| `delivery_attestation` rows (per CIRISPersist#101) | Receiving peer + announcement sender | Local persist + cross-region replication on the receiving install |
+| Trust-graph attestations (per-peer `scores`, etc.) | Subscription reach + trust-graph radius | Local persist; not federation-wide |
+| Reasoning traces | Subscribers only | Local persist + subscriber replication |
+| `holds_bytes:sha256:{prefix}` | Federation directory (Spock-replicated) | `federation_attestations`; PeerResolver consumes |
+| `agent_files:*` attestations | All-peers when canonical; subscriber-reach when open-channel | `federation_attestations` |
+| Blob bytes themselves | Wherever cached/served (node-mode peers on their slice) | `federation_blobs`; content-addressable; demand-driven replication |
+| `moderation:*` / `slashing:*` / `reconsideration:*` | Federation directory (Spock-replicated) | All regions per §11 retention |
+| `testimonial_witness:*` (FSD-002 v1.4 §3.6.3) | Federation directory; permanent; preservation-only, never aggregated | All regions |
+
+**Replication patterns:**
+
+- **PUSH** (Mandatory delivery, FSD-002 §6.1.6): steward / accord-
+  holder → all peers; bypasses subscription. Used for
+  `FederationAnnouncement` only.
+- **PULL by SUBSCRIPTION**: routine Contributions arrive via edge
+  gossip filtered by dimension prefix. Subscription defaults are
+  per-role (clients default-subscribe to canonical anchor + trust-
+  graph attestations; everything else is opt-in).
+- **PULL by HASH**: blobs fetched on demand via PeerResolver →
+  ContentFetch (FSD-002 §2.0). Demand-driven; replication follows
+  fetch traffic.
+- **GOSSIP**: federation-directory mutations stream via persist Spock
+  regional fan-out (US / EU / APAC) per FSD-002 §10.5.
+
+**What does NOT replicate to all peers:**
+
+- Reasoning traces (subscription-gated to prevent traffic blow-up)
+- Trust-graph-local attestations (private to the trust graph)
+- Relay transit caches (private and ephemeral; not advertised as
+  `holds_bytes:*`)
+- Local cache of routine traffic beyond §11 retention windows
+
+`federation_blobs` (per CIRISPersist#103) is the only storage
+component where content-addressable demand-driven replication
+operates — every other class has a defined replication scope. Blobs
+follow the SHA wherever it's cited.
+
 ---
 
 ## 13. Worked example — a routine `scores` attestation
