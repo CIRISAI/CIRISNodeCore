@@ -783,11 +783,13 @@ and reconciliation per the per-class policy referenced above.
    is worth the protocol overhead.
 
 4. **Reconciliation cascade in the decision hierarchy.** Per
-   `FSD/DECISION_HIERARCHY.md`, supersession at one decision level
-   may invalidate downstream Methods or Progress Measures. The stage-8
-   reconciliation table treats reconciliation per-attestation; cross-
-   level cascade detection feeds P8 Moderation but is not auto-cascaded
-   today. Open whether v0.2 needs auto-cascade or stays at v0.1's
+   FSD-002 v1.4 §3.6.2 (Tier-2 dimensional claims `goal:` ←
+   `approach:` ← `method:` ← `progress_measure:`), supersession at
+   one decision level may invalidate downstream `method:*` or
+   `progress_measure:*` attestations. The stage-8 reconciliation
+   table treats reconciliation per-attestation; cross-level cascade
+   detection feeds P8 Moderation but is not auto-cascaded today.
+   Open whether v0.2 needs auto-cascade or stays at v0.1's
    explicit-escalation policy.
 
 5. **Offline-mode lifecycle compression.** When an agent operates
@@ -826,7 +828,11 @@ and reconciliation per the per-class policy referenced above.
   pattern)
 - `FSD/SAFETY_BATTERY_CI_LOOP.md` §3.1 (per-response signing pattern,
   generalized for chain leaves here)
-- `FSD/DECISION_HIERARCHY.md` (cross-level reconciliation, §4 above)
+- FSD-002 v1.4 §3.6.2 (Tier-2 dimensional claims — `goal:` /
+  `approach:` / `method:` / `progress_measure:` — and the
+  cross-level reconciliation discipline this FSD §10 + §14.4 anchors
+  to; previously `FSD/DECISION_HIERARCHY.md`, subsumed by FSD-002
+  v1.4)
 - `COHERENCE_RATCHET.md` (the structural pressure the transparency
   properties respond to)
 - `CIRIS_FEDERATION.md` §3.1 (supervision-chain topology — Contribution

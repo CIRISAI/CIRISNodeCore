@@ -479,10 +479,18 @@ shape the work.
 - `FSD/FEDERATION_ANNOUNCEMENT.md` — federation-wide push primitive;
   HumanityAccord hierarchy; scoped accord; monthly AIS drill
 - `FSD/FEDERATION_TAB.md` — in-agent universal primitive interface
-- `FSD/GOAL_PRIMITIVE.md`, `FSD/APPROACH_PRIMITIVE.md`,
-  `FSD/METHOD_PRIMITIVE.md`, `FSD/PROGRESS_MEASURE_PRIMITIVE.md` —
-  the typed decision-content primitives (P12–P15)
-- `FSD/DECISION_HIERARCHY.md` — cross-cut for the decision hierarchy
+- `FSD/GOAL_PRIMITIVE.md` — the framework-grounded `P_G` agent
+  property (P12); the standalone NodeCore-side spec for the Goal
+  dimension
+- For Approach / Method / Progress Measure (P13–P15) and the
+  decision-hierarchy cross-cut: wire-format spec lives at
+  `CIRISRegistry/FSD/FSD-002_FEDERATION_SURFACE.md` v1.4 §3.6.2 +
+  §6.1.5 + §6.1.6 (the prior NodeCore-side `FSD/APPROACH_PRIMITIVE.md`,
+  `FSD/METHOD_PRIMITIVE.md`, `FSD/PROGRESS_MEASURE_PRIMITIVE.md`, and
+  `FSD/DECISION_HIERARCHY.md` were subsumed at v1.3 lockdown)
+- `FSD/CONTRIBUTION_LIFECYCLE.md` — nine-stage lifecycle +
+  operational discipline in the wild (per-role storage, replication
+  scope, trust-radius framing)
 - `FSD/TRUST_HIERARCHY.md` — trust grants and authority resolution
 - `FSD/MESSAGE_TAXONOMY.md` — three-tier taxonomy of subject kinds
 - `FSD/SUBSTRATE_INTEGRATION.md` — typed writes against persist

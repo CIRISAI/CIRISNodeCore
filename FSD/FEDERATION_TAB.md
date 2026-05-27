@@ -240,8 +240,9 @@ Each primitive view supports:
 
 ### 3.2 Decision-hierarchy view (P12–P15)
 
-The decision hierarchy DAG (per `FSD/DECISION_HIERARCHY.md`) gets
-its own composition view because the four primitives compose:
+The decision hierarchy DAG (wire-format-locked at FSD-002 v1.4
+§3.6.2) gets its own composition view because the four dimensional
+claims compose:
 
 ```
 Goal ─────────► Approach ─────────► Method ─────────► Progress Measure
@@ -698,7 +699,8 @@ tab and external read-only mirrors build against").
   hierarchy this tab consumes
 - `FSD/RUBRIC_CROWDSOURCING.md` — rule-making surface
 - `FSD/SAFETY_BATTERY_CI_LOOP.md` — verdict-reading surface
-- `FSD/DECISION_HIERARCHY.md` — DAG composition view
+- FSD-002 v1.4 §3.6.2 — DAG composition view (the prior
+  `FSD/DECISION_HIERARCHY.md` was subsumed at v1.3 lockdown)
 - `FSD/TRUST_HIERARCHY.md` — trust-grants surface
 - `SCHEMA.md` §12.1 — alignment-vs-censorship discipline
 - `PROGRAMMATIC_ACCESS.md` — API contract (reframed)
