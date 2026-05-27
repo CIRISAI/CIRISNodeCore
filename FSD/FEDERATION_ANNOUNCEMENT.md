@@ -387,6 +387,101 @@ alone. It splits across three tiers, each with a specific contract.
   (so a steward can verify reach post-hoc; missing attestations are
   observable as a delivery gap, possible adversarial suppression).
 
+#### 3.2.1 `delivery_attestation` wire shape (ratified contract — was open question #3 of §7, now closed)
+
+Field spec of the per-peer `delivery_attestation` event, jointly
+ratified between CIRISEdge#18 (producer-side `MessageType::DeliveryAttestation`)
+and CIRISPersist#101 (storage-side `federation_delivery_attestations` row
+schema, mirrors the wire one-to-one):
+
+```rust
+pub struct DeliveryAttestation {
+    /// The announcement this attestation acknowledges receipt of.
+    /// SAME shape as `Contribution::id` (the federation_announcement
+    /// is itself a Contribution; no separate ID space).
+    pub announcement_id: ContributionId,
+
+    /// SHA-256 of the full canonicalized Contribution envelope of
+    /// the announcement (INCLUDING its authority signature). Pins
+    /// the exact bytes the peer received; defeats in-flight
+    /// modification AND "received-a-different-signature" cases.
+    pub announcement_canonical_hash: [u8; 32],
+
+    /// The peer that is acknowledging receipt — federation_keys
+    /// `key_id` from persist's directory (NOT an opaque peer
+    /// address).
+    pub peer_key_id: KeyId,
+
+    /// Base64 of the peer's Ed25519 pubkey (denormalized for
+    /// offline verification convenience; MUST match
+    /// federation_keys[peer_key_id].pubkey_ed25519).
+    pub peer_pubkey_ed25519_base64: String,
+
+    /// When the peer's edge accepted the validated announcement
+    /// (authority-class verified + signature verified). NOT raw
+    /// wire receipt — the validation gate is the emission point
+    /// for v0.1. Tightening to "application-layer acceptance" is
+    /// a v0.2+ option per §7 open question #6.
+    pub received_at: DateTime<Utc>,
+
+    /// Transport medium the announcement arrived over. Medium tag
+    /// only — sub-path / interface intentionally NOT recorded for
+    /// v0.1 (topology-disclosure conservative default). Enum:
+    /// `reticulum` | `tcp_tls` | `http_over_tls` | `other`. Future
+    /// tags via the FSD-002 v1.4 §4.9.2 amendment process.
+    pub transport_id: TransportMedium,
+
+    /// MANDATORY classical signature over the canonical-bytes
+    /// encoding (see below). Ed25519 over the receiving peer's
+    /// federation key.
+    pub signature_classical: Ed25519Signature,
+
+    /// OPTIONAL PQC signature. ML-DSA-65 over
+    /// `canonical_bytes || signature_classical` per the persist
+    /// AV-33 bound-signature convention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature_pqc: Option<MlDsa65Signature>,
+}
+```
+
+**Canonical-bytes encoding**: domain string
+`ciris-edge-delivery-attestation-v1` + length-prefixed injective
+field encoding, mirroring CIRISEdge v0.4.0's `AnnounceAttestation`
+pattern (`src/transport/attestation.rs`). The hybrid-signature
+discipline matches persist's AV-33 bound-signature convention (PQC
+signs `canonical_bytes || classical_sig`).
+
+**Dispatch class**:
+
+| Field | Value | Rationale |
+|---|---|---|
+| `MessageType` | `DeliveryAttestation` | New edge variant per Edge#18 |
+| `Delivery` | `Durable { requires_ack: false }` | Durable retries defeat transient-network false delivery-gap signals; the attestation IS the ack — no second ack needed; subscription-respecting fan-out (only the announcement itself uses `Mandatory`) |
+
+**Persist row** (per CIRISPersist#101):
+
+- PK: `(announcement_id, peer_key_id)`
+- One-to-one with the wire struct above
+- Standard audit columns (insert timestamp, replication metadata) added per persist's existing federation-tier table convention
+
+**Verification path**: receiver-side or steward-side reach audit
+calls `verify_hybrid_via_directory(attestation, federation_keys[peer_key_id])`.
+A signature failure means the attestation is fraudulent (someone
+else signed it claiming to be the peer); a missing attestation
+remains a legitimate observable (the delivery gap → possible
+adversarial suppression).
+
+**What's NOT in the attestation** (intentional v0.1 omissions):
+
+- Sub-path / interface (topology disclosure; deferred to a separate
+  LensCore-owned `detection:delivery_path:*` primitive if/when
+  needed)
+- Application-layer-acceptance separate from validated-edge-receipt
+  (deferred per §7 open question #6 — pragmatic v0.1 emission gate
+  is post-validation-pre-application-layer)
+- Recipient ACK (deferred per §7 open question #6 — no separate
+  ACK; the attestation IS the observable)
+
 ### 3.3 Application tier (CIRISAgent — out of scope here, contract defined)
 
 - **Register the `on_federation_announcement` callback** at runtime
@@ -1151,10 +1246,15 @@ signal).
 2. **Rate-limit calibration.** Default 10/24h Informational+Advisory,
    3/24h Urgent+AccordCarrier per authority; pilot evidence needed.
 
-3. **Delivery attestation surface.** Substrate emits per-peer
+3. **Delivery attestation surface.** ~~Substrate emits per-peer
    `delivery_attestation` per §3.2 — the schema, persistence
    discipline, and steward-side visibility tooling are specified at
-   substrate-FSD time, not here.
+   substrate-FSD time, not here.~~ **CLOSED 2026-05-27** via §3.2.1
+   ratified wire shape (jointly with CIRISEdge#21/#18 producer-side
+   + CIRISPersist#101 storage-side). Steward-side visibility tooling
+   (dashboard surfacing missing-attestation gaps) remains downstream
+   work; per-attestation persistence discipline lives in
+   CIRISPersist#101's row schema.
 
 4. **Operator UI interruption semantics.** What "MUST interrupt"
    means concretely for `Urgent` priority in CIRISAgent's web UI,
