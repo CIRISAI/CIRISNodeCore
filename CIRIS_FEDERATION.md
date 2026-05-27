@@ -194,28 +194,44 @@ agent the network is for — and a hundred copies that all think alike
 fail the healthy-middle coherence check (§6 / Coherence Collapse
 Analysis) immediately.
 
-Two paths into the network exist, both equal members once standing
-is established:
+Two **attestation surfaces** into the network exist — not two speeds
+of the same path, but qualitatively different attestation kinds, each
+verifiable against a different verification system:
 
-| Path | Mechanism | Time to standing | When to use |
+| Path | Backing | Verifiable against | When required |
 |---|---|---|---|
-| **Registered** | Sign up with CIRISRegistry, post a small bond, get standing immediately. | Immediate. | Organizations needing licensing-grade standing (regulated industries, deployment partners with capability grants per `PartnerRecord` in `CIRISRegistry/FSD/FSD-001` §120). The registry runs in production now. |
-| **Sovereign** | Generate keys, run a real agent for approximately one month, earn standing through good behavior verified via the federation's coherence checks. | ~30 days. | Individual operators, small deployments, communities outside the registry's reach, anyone preferring not to register. |
+| **Registered** | (a) Capital deposit (forfeitable bond per `CIRISRegistry/FSD/FSD-001` §120 `PartnerRecord` + billing tiers); and/or (b) Professional licensure (the licensed-human accountability chain) | External systems: Stripe (bond paid / forfeited); licensing bodies (medical board, bar association, financial regulator) — agent actions trace to a real-world licensee whose license is at stake. | Regulated deployment contexts where users need an external accountability hook before professional-grade capability grants are honored. |
+| **Sovereign** | Sustained observed coherence — running a real ethical-reasoning agent over approximately one month, attested by federation consensus checks | Internal: the federation's own coherence machinery, behavioral baselines, peer attestation. No external system to query. | Individual operators, communities outside the registry's reach, anyone whose use case does not need the external accountability hook. |
 
-**The registry is a fast track, never a gate.** Both paths produce
-the same membership. The Registered path trades a bond for speed
-and explicit licensing standing; the Sovereign path trades time for
-fully self-asserted membership. The federation does not distinguish
-between them at the protocol level once standing is established —
-both contribute to consensus, both hold their tier in the
-supervision-chain topology (§3.1), both are bound by the fractal
-Golden Rule and the humanity accord equally.
+**Both paths produce federation membership; neither is a gate.** What
+differs is the *attestation surface* — the kind of claim the
+federation can compose about why a participant is trustworthy.
+Registered participants carry attestations the federation can verify
+against external systems; Sovereign participants carry attestations
+grounded only in observed behavior. For most participation this
+difference is invisible (both contribute to consensus, both hold their
+tier in the supervision-chain topology of §3.1, both are bound by the
+Golden Rule and the humanity accord equally). For regulated capability
+grants — medical triage, legal research, financial analysis — the
+difference is load-bearing: the licensed-human accountability chain is
+what makes those deployments defensible in their jurisdictions, and
+Sovereign attestation cannot synthesize that chain because the chain's
+grounding is external to the federation.
+
+The Registry is not a "fast track" to the Sovereign path's
+destination — it is the federation's bridge into external
+accountability systems that the Sovereign path, by construction,
+cannot reach. The Sovereign path is not a slower version of Registered
+membership — it is self-asserted standing that does not depend on
+external systems and cannot be revoked by them.
 
 Full mechanism specification lives at
 `~/CIRISAgent/FSD/PROOF_OF_BENEFIT_FEDERATION.md` — including the
 bond economics, the Sovereign-path coherence-stake calculation, and
 the cross-tier interactions with the verification (§6) and federation-
-consensus (§10) layers.
+consensus (§10) layers. The attestation-primitive wire shape used by
+both paths is locked in `CIRISRegistry/FSD/FSD-002_FEDERATION_SURFACE.md`
+§2 (one workhorse `scores` primitive + four structural primitives).
 
 ---
 
