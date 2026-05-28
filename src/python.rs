@@ -278,8 +278,57 @@ fn wa_state(engine: &Bound<'_, PyAny>, domain: String, language: String) -> PyRe
     .map_err(|e| json_err("compose_wa_state", e))
 }
 
+/// One-call surface for the **Local** section of the three-tier UI —
+/// the user's own self-scoped `external_content` Contributions.
+/// Calls `engine.list_contributions` (subject_kind=external_content,
+/// author=owner_key_id) then filters by `cohort_scope: self`.
+#[pyfunction]
+fn local_feed(engine: &Bound<'_, PyAny>, owner_key_id: String) -> PyResult<String> {
+    let filter = serde_json::json!({
+        "subject_kind": "external_content",
+        "author_id": owner_key_id,
+    })
+    .to_string();
+    let contributions_json: String = engine
+        .call_method1("list_contributions", (filter,))?
+        .extract()?;
+    crate::compose::compose_local_feed(&contributions_json, &owner_key_id)
+        .map_err(|e| json_err("compose_local_feed", e))
+}
+
+/// One-call surface for the **Community commons** section —
+/// `external_content` Contributions with cohort_scope ∈
+/// {family, community, affiliations}.
+///
+/// `filter_json` is forwarded to compose; may contain `sub_kind` to
+/// narrow by kind (encyclopedia_article / news_article / accord_data /
+/// local_data).
+#[pyfunction]
+fn community_feed(engine: &Bound<'_, PyAny>, filter_json: String) -> PyResult<String> {
+    let persist_filter = serde_json::json!({"subject_kind": "external_content"}).to_string();
+    let contributions_json: String = engine
+        .call_method1("list_contributions", (persist_filter,))?
+        .extract()?;
+    crate::compose::compose_community_feed(&contributions_json, &filter_json)
+        .map_err(|e| json_err("compose_community_feed", e))
+}
+
+/// One-call surface for the **Global commons** section —
+/// `external_content` Contributions with cohort_scope ∈
+/// {species, planet, federation}.
+#[pyfunction]
+fn global_feed(engine: &Bound<'_, PyAny>, filter_json: String) -> PyResult<String> {
+    let persist_filter = serde_json::json!({"subject_kind": "external_content"}).to_string();
+    let contributions_json: String = engine
+        .call_method1("list_contributions", (persist_filter,))?
+        .extract()?;
+    crate::compose::compose_global_feed(&contributions_json, &filter_json)
+        .map_err(|e| json_err("compose_global_feed", e))
+}
+
 /// The `ciris_node_core` Python module — Phase 1 client surface +
-/// Phase 2 read-composition (CIRISNodeCore#12).
+/// Phase 2 read-composition (CIRISNodeCore#12) + Phase 3 external-
+/// content feeds (CIRISNodeCore#19).
 #[pymodule]
 fn ciris_node_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Phase 1
@@ -292,5 +341,9 @@ fn ciris_node_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(contribution, m)?)?;
     m.add_function(wrap_pyfunction!(decision_hierarchy, m)?)?;
     m.add_function(wrap_pyfunction!(wa_state, m)?)?;
+    // External-content feeds (CIRISNodeCore#19 — three-tier UI)
+    m.add_function(wrap_pyfunction!(local_feed, m)?)?;
+    m.add_function(wrap_pyfunction!(community_feed, m)?)?;
+    m.add_function(wrap_pyfunction!(global_feed, m)?)?;
     Ok(())
 }

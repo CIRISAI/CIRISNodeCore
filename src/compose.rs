@@ -978,4 +978,289 @@ mod tests {
             "new_evidence"
         );
     }
+
+    // --- external_content feeds (local / community / global) -------------
+
+    #[test]
+    fn feeds_bucket_external_content_by_cohort_scope_tier() {
+        let contribs = att_json(serde_json::json!([
+            {
+                "contribution_id": "c-local-1",
+                "subject_kind": "external_content",
+                "author_id": "user-abc",
+                "payload": {"sub_kind": "local_data", "cohort_scope": "self",
+                            "entity_key_id": "local:abc:notes:1"}
+            },
+            {
+                "contribution_id": "c-community-1",
+                "subject_kind": "external_content",
+                "author_id": "user-bob",
+                "payload": {"sub_kind": "encyclopedia_article", "cohort_scope": "community",
+                            "entity_key_id": "community:wiki:einstein"}
+            },
+            {
+                "contribution_id": "c-global-1",
+                "subject_kind": "external_content",
+                "author_id": "wikipedia-steward",
+                "payload": {"sub_kind": "encyclopedia_article", "cohort_scope": "federation",
+                            "entity_key_id": "wikipedia:article:einstein"}
+            },
+            {
+                "contribution_id": "c-other",
+                "subject_kind": "trust_grant",  // wrong subject_kind — filtered out
+                "author_id": "x",
+                "payload": {"cohort_scope": "federation"}
+            }
+        ]));
+
+        // Local feed — only user-abc's self-scoped items
+        let local = compose_local_feed(&contribs, "user-abc").unwrap();
+        let local_parsed: serde_json::Value = serde_json::from_str(&local).unwrap();
+        assert_eq!(local_parsed["items"].as_array().unwrap().len(), 1);
+        assert_eq!(local_parsed["items"][0]["contribution_id"], "c-local-1");
+
+        // Community feed — community/family/affiliations
+        let community = compose_community_feed(&contribs, "{}").unwrap();
+        let community_parsed: serde_json::Value = serde_json::from_str(&community).unwrap();
+        assert_eq!(community_parsed["items"].as_array().unwrap().len(), 1);
+        assert_eq!(community_parsed["items"][0]["contribution_id"], "c-community-1");
+
+        // Global feed — federation/planet/species
+        let global = compose_global_feed(&contribs, "{}").unwrap();
+        let global_parsed: serde_json::Value = serde_json::from_str(&global).unwrap();
+        assert_eq!(global_parsed["items"].as_array().unwrap().len(), 1);
+        assert_eq!(global_parsed["items"][0]["contribution_id"], "c-global-1");
+    }
+
+    #[test]
+    fn local_feed_excludes_other_owners() {
+        let contribs = att_json(serde_json::json!([
+            { "contribution_id": "mine", "subject_kind": "external_content", "author_id": "me",
+              "payload": {"sub_kind": "local_data", "cohort_scope": "self"} },
+            { "contribution_id": "yours", "subject_kind": "external_content", "author_id": "you",
+              "payload": {"sub_kind": "local_data", "cohort_scope": "self"} }
+        ]));
+        let out = compose_local_feed(&contribs, "me").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["items"].as_array().unwrap().len(), 1);
+        assert_eq!(parsed["items"][0]["contribution_id"], "mine");
+    }
+
+    #[test]
+    fn global_feed_filters_by_sub_kind() {
+        let contribs = att_json(serde_json::json!([
+            { "contribution_id": "c-enc", "subject_kind": "external_content", "author_id": "a",
+              "payload": {"sub_kind": "encyclopedia_article", "cohort_scope": "federation"} },
+            { "contribution_id": "c-news", "subject_kind": "external_content", "author_id": "b",
+              "payload": {"sub_kind": "news_article", "cohort_scope": "federation"} },
+            { "contribution_id": "c-accord", "subject_kind": "external_content", "author_id": "c",
+              "payload": {"sub_kind": "accord_data", "cohort_scope": "species"} }
+        ]));
+
+        let filter = serde_json::json!({"sub_kind": "news_article"}).to_string();
+        let out = compose_global_feed(&contribs, &filter).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["items"].as_array().unwrap().len(), 1);
+        assert_eq!(parsed["items"][0]["contribution_id"], "c-news");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// External-content feeds — local / community commons / global commons
+// (CIRISNodeCore#19 Phase 3 UI surface)
+// ---------------------------------------------------------------------------
+
+/// Minimal projection of a Contribution row. Different shape from
+/// [`AttestationRow`] — Contributions go through NodeCoreService
+/// (cirisnode.contributions table), not federation_attestations.
+#[derive(serde::Deserialize)]
+pub(crate) struct ContributionRowProjection {
+    pub contribution_id: String,
+    pub subject_kind: String,
+    pub author_id: String,
+    pub payload: serde_json::Value,
+}
+
+/// One entry in an external_content feed (local / community / global).
+#[derive(Serialize)]
+pub(crate) struct ExternalContentEntry {
+    pub contribution_id: String,
+    pub author_id: String,
+    pub sub_kind: String,
+    pub cohort_scope: String,
+    pub entity_key_id: String,
+    pub content_sha256: Option<String>,
+    /// Title / headline / version_tag — sub_kind-dependent. Pulled from
+    /// `source.title` / `source.headline` / `source.version_tag`
+    /// depending on which is present.
+    pub display_label: Option<String>,
+}
+
+/// Composed feed output.
+#[derive(Serialize)]
+pub(crate) struct ExternalContentFeedOutput {
+    pub tier: &'static str, // "local" | "community" | "global"
+    pub items: Vec<ExternalContentEntry>,
+    pub computed_at: DateTime<Utc>,
+}
+
+/// Compose the Local feed — `external_content` Contributions authored
+/// by `owner_key_id` with `cohort_scope: self`.
+///
+/// **Input**: JSON-serialized `Vec<Contribution>` — typically the
+/// output of `engine.list_contributions(filter)` with `subject_kind =
+/// external_content`. Caller may pre-filter at persist for efficiency;
+/// the compose function applies the cohort_scope + owner filter
+/// regardless.
+pub fn compose_local_feed(
+    contributions_json: &str,
+    owner_key_id: &str,
+) -> Result<String, serde_json::Error> {
+    let rows: Vec<ContributionRowProjection> = serde_json::from_str(contributions_json)?;
+    let mut items = Vec::new();
+    for row in rows {
+        if row.subject_kind != "external_content" || row.author_id != owner_key_id {
+            continue;
+        }
+        let scope = row
+            .payload
+            .get("cohort_scope")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if scope != "self" {
+            continue;
+        }
+        if let Some(entry) = external_content_entry_from(&row) {
+            items.push(entry);
+        }
+    }
+    serde_json::to_string(&ExternalContentFeedOutput {
+        tier: "local",
+        items,
+        computed_at: Utc::now(),
+    })
+}
+
+/// Compose the Community-commons feed — `external_content`
+/// Contributions with `cohort_scope` ∈ {family, community, affiliations}.
+///
+/// Optional `filter_json` accepts:
+/// - `cohort`: narrow to a specific cohort (matched against the
+///   payload's optional `source.cohort` field if present)
+/// - `sub_kind`: narrow to one of encyclopedia_article / news_article /
+///   accord_data / local_data
+pub fn compose_community_feed(
+    contributions_json: &str,
+    filter_json: &str,
+) -> Result<String, serde_json::Error> {
+    compose_feed_for_tier(
+        contributions_json,
+        filter_json,
+        &["family", "community", "affiliations"],
+        "community",
+    )
+}
+
+/// Compose the Global-commons feed — `external_content` Contributions
+/// with `cohort_scope` ∈ {species, planet, federation}.
+pub fn compose_global_feed(
+    contributions_json: &str,
+    filter_json: &str,
+) -> Result<String, serde_json::Error> {
+    compose_feed_for_tier(
+        contributions_json,
+        filter_json,
+        &["species", "planet", "federation"],
+        "global",
+    )
+}
+
+fn compose_feed_for_tier(
+    contributions_json: &str,
+    filter_json: &str,
+    scope_set: &[&str],
+    tier: &'static str,
+) -> Result<String, serde_json::Error> {
+    let rows: Vec<ContributionRowProjection> = serde_json::from_str(contributions_json)?;
+    let filter: serde_json::Value = if filter_json.trim().is_empty() {
+        serde_json::Value::Object(Default::default())
+    } else {
+        serde_json::from_str(filter_json)?
+    };
+    let sub_kind_filter = filter.get("sub_kind").and_then(|v| v.as_str());
+
+    let mut items = Vec::new();
+    for row in rows {
+        if row.subject_kind != "external_content" {
+            continue;
+        }
+        let scope = row
+            .payload
+            .get("cohort_scope")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !scope_set.contains(&scope) {
+            continue;
+        }
+        if let Some(sk) = sub_kind_filter {
+            let row_sk = row
+                .payload
+                .get("sub_kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if row_sk != sk {
+                continue;
+            }
+        }
+        if let Some(entry) = external_content_entry_from(&row) {
+            items.push(entry);
+        }
+    }
+    serde_json::to_string(&ExternalContentFeedOutput {
+        tier,
+        items,
+        computed_at: Utc::now(),
+    })
+}
+
+fn external_content_entry_from(row: &ContributionRowProjection) -> Option<ExternalContentEntry> {
+    let sub_kind = row.payload.get("sub_kind")?.as_str()?.to_owned();
+    let cohort_scope = row
+        .payload
+        .get("cohort_scope")?
+        .as_str()?
+        .to_owned();
+    let entity_key_id = row
+        .payload
+        .get("entity_key_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let content_sha256 = row
+        .payload
+        .get("content_sha256")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let display_label = row
+        .payload
+        .get("source")
+        .and_then(|s| {
+            // headline (news) > title (local) > version_tag (accord) >
+            // entity_key_id fallback (encyclopedia uses entity slug)
+            s.get("headline")
+                .or_else(|| s.get("title"))
+                .or_else(|| s.get("version_tag"))
+        })
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+
+    Some(ExternalContentEntry {
+        contribution_id: row.contribution_id.clone(),
+        author_id: row.author_id.clone(),
+        sub_kind,
+        cohort_scope,
+        entity_key_id,
+        content_sha256,
+        display_label,
+    })
 }
