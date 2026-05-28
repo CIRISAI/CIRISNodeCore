@@ -415,6 +415,31 @@ The crate selects a fresh WA quorum: members of the original adjudicating quorum
 
 The fresh quorum reviews evidence and signs a ReconsiderationAttestation with one of three outcomes. The recursion bound (one Reconsideration per ground per SlashingAttestation; three Reconsiderations on a single SlashingAttestation triggers harassment review) prevents indefinite re-litigation. The time bound (default 180 days from SlashingAttestation) keeps the appeal window finite for most grounds; QUORUM_COMPROMISE grounds remain available beyond the window because compromise evidence may emerge years later. [Spec]
 
+### 3.10 Node-mode `agent_files` serving (c/r/n role discipline)
+
+The c/r/n taxonomy (§1.3) gives federation deployments three operational shapes. Per FSD-002 v1.4 §3.6.7 + §6.1.6 (joint `agent_files:*` namespace + trust-composition policy), **only `node` mode serves bytes**:
+
+- **client** — sends own Contributions; fetches blobs via `PeerResolver::resolve_holders` + `MessageType::ContentFetch`; **does not serve**, **does not advertise** `holds_bytes:sha256:*`.
+- **proxy / relay** — client behavior + transit cache (best-effort, LRU, private and ephemeral; **does not advertise** `holds_bytes:*` either — relay caches are not a federation-discoverable surface).
+- **node** — relay behavior + **serves** the declared `agent_files:*` slice. Registers a [`Handler<ContentFetch>`](https://docs.rs/ciris-edge/) via [`crate::serving::install_node_mode_serving`]; on `BlobStorage::put_blob` persist auto-emits `holds_bytes:sha256:{prefix}` attestations into the federation directory (per CIRISPersist#103), making the holder discoverable to peers via the standard PeerResolver path.
+
+**Discovery → fetch flow** (federation-internal):
+
+1. Peer A sees an attestation citing `evidence_refs:sha256:X`.
+2. A consults `PeerResolver::resolve_holders(X)` → set of node-mode peers holding the bytes.
+3. A sends `ContentFetch{sha256: X}` to peer B (node mode).
+4. B's installed handler queries `BlobStorage::get_blob(X)` and replies with `ContentBody{sha256: X, bytes, attestation_ref}` or `ContentMiss{sha256: X, reason}` per `crate::serving::compute_serving_response`.
+5. A verifies `sha256(bytes) == X` on receipt; trust rides the original `agent_files:*` attestation that named the SHA, not the bytes themselves.
+
+**Trust composition** (per FSD-002 v1.4 §6.1.6):
+- **Canonical**: attestation from a registry-steward-triple key with `score ≥ 0.7` constitutes CIRIS canonical default trust.
+- **Open**: any federation-key holder may emit `agent_files:*` attestations; consumer policy decides.
+- **Vote-then-trust**: NodeCore P4 votes accumulate on third-party agent_files; federation-policy threshold elevates trust class.
+
+**Storage discipline** is documented in [`FSD/CONTRIBUTION_LIFECYCLE.md` §12](FSD/CONTRIBUTION_LIFECYCLE.md) — per-role caps (client 256 MB soft / 1 GB hard; relay 10 GB / 100 GB; node 1 TB / unbounded), replication scope by data class, and the trust-radius framing.
+
+**HTTP-compat surface** is optional per FSD-002 v1.4 §3.6.7 — node-mode peers MAY expose `GET /v1/files/{sha256}` over their HTTP listener for newcomer install paths. Federation-internal fetch always uses `ContentFetch` directly; HTTP is the newcomer-friendly surface. v0.1 ships the federation-internal path; HTTP-compat is operator-config follow-up. [Spec]
+
 ---
 
 ## 4. Schemas (WHAT)
