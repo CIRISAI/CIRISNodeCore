@@ -72,17 +72,19 @@ where
 /// identically — the backend choice is the host's, transparent to
 /// node-core.
 ///
-/// Both `Postgres` and `Sqlite` variants are matched: node-core's
-/// dependency graph links persist's `postgres` feature (explicit, for
-/// `NodeCoreDispatch::Postgres`) and `sqlite` (feature-unified via
-/// `ciris-edge`). The match is exhaustive across whatever backend
-/// the host's `Engine` was constructed with.
+/// Both `Postgres` and `Sqlite` variants are matched, gated on the
+/// same feature flags persist v2.x uses to expose its variants
+/// (`CIRISPersist engine.rs:497-508` — `cirisnode` + at least one of
+/// `postgres` / `sqlite`). Node-core's default cohabitation target is
+/// Postgres (the safety.ciris.ai shape, MISSION §7.3); Sqlite is
+/// opt-in via node-core's parallel `sqlite` feature. NodeCore#6.
 pub async fn install_from_dispatch(
     dispatch: NodeCoreDispatch,
     edge: &Edge,
 ) -> Result<(), EdgeError> {
     match dispatch {
         NodeCoreDispatch::Postgres(backend) => install(backend, edge).await,
+        #[cfg(feature = "sqlite")]
         NodeCoreDispatch::Sqlite(backend) => install(backend, edge).await,
     }
 }

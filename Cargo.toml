@@ -102,3 +102,13 @@ default = []
 # Engine handle — gated on a persist coordination item, not in this
 # feature yet.
 python = ["dep:pyo3"]
+
+# Sqlite backend support for the cohabitation bootstrap. Persist v2.x
+# feature-gates `NodeCoreDispatch::Sqlite` behind its own `sqlite`
+# feature (CIRISPersist `engine.rs:497-508`); to keep the cohabitation
+# match arm exhaustive when the host's Engine is Sqlite-backed,
+# node-core forwards a parallel `sqlite` feature that activates
+# persist's. The default cohabitation target is Postgres (the
+# safety.ciris.ai shape per MISSION §7.3); Sqlite is opt-in for
+# embedded / Pi-class deployments. NodeCore#6.
+sqlite = ["ciris-persist/sqlite"]
