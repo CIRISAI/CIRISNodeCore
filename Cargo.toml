@@ -34,7 +34,7 @@ crate-type = ["cdylib", "rlib"]
 # `postgres` feature preserved: the `cirisnode` feature was decoupled
 # from backends at v1.11.0; `NodeCoreDispatch::Postgres` is what
 # `crate::cohabitation::install_from_dispatch` matches.
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v2.1.0", version = "2", features = ["cirisnode", "cirisaudit", "postgres"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v2.5.0", version = "2", features = ["cirisnode", "cirisaudit", "postgres"] }
 
 # Edge v0.5.1 — latest on the v0.5.x line; carries persist v2.x +
 # verify v3.x. Consumed surface (`src/messages/`, `src/handler.rs`,
@@ -52,7 +52,7 @@ ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v2.1.0
 # unification still forces system `libtss2` (`libtss2-dev` for
 # builds) onto every co-resident Linux build / host. See
 # CIRISEdge#12.
-ciris-edge = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v0.5.1", version = "0" }
+ciris-edge = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v0.9.1", version = "0" }
 
 # Serde + canonicalization. Canonicalization itself routes through
 # persist's `Engine.canonicalize_envelope_for_signing` — see

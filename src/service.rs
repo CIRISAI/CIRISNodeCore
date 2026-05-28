@@ -266,6 +266,14 @@ fn map_substrate_err(e: SubstrateError) -> HandlerError {
         SubstrateError::Backend(s) => HandlerError::Persist(s),
         SubstrateError::NotImplemented(s) => HandlerError::Persist(format!("not implemented: {s}")),
         SubstrateError::Internal(s) => HandlerError::Persist(s),
+        // Per persist v2.2.0+ (CIRISPersist#101): constitutional-asymmetry
+        // write-admission enforced at the substrate (only HumanityAccord
+        // may sign AccordCarrier-priority FederationAnnouncements). Bubble
+        // up as ApplicationRejected — wire format admits the attempt;
+        // policy rejects.
+        SubstrateError::FederationAnnouncementAuthorityMismatch(s) => {
+            HandlerError::ApplicationRejected(s)
+        }
     }
 }
 

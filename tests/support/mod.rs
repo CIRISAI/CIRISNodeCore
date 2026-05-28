@@ -470,6 +470,32 @@ impl NodeCoreService for MockEngine {
         }
     }
 
+    // FederationAnnouncement delivery_attestation surface (CIRISPersist v2.2.0+
+    // shipped per #101). Mock is empty / no-op; tests that exercise the
+    // delivery-audit path would populate via dedicated fixtures.
+    fn put_delivery_attestation(
+        &self,
+        _attestation: ciris_persist::cirisnode::federation_announcement::DeliveryAttestation,
+    ) -> impl Future<Output = Result<(), SubstrateError>> + Send {
+        async { Ok(()) }
+    }
+
+    fn list_delivery_attestations(
+        &self,
+        _announcement_id: &str,
+    ) -> impl Future<
+        Output = Result<Vec<ciris_persist::cirisnode::federation_announcement::DeliveryAttestation>, SubstrateError>,
+    > + Send {
+        async { Ok(Vec::new()) }
+    }
+
+    fn count_delivery_attestations(
+        &self,
+        _announcement_id: &str,
+    ) -> impl Future<Output = Result<u64, SubstrateError>> + Send {
+        async { Ok(0) }
+    }
+
     fn get_credits_ledger(
         &self,
         contributor_id: &str,

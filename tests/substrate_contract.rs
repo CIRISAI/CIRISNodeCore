@@ -230,6 +230,32 @@ impl NodeCoreService for SpikeMock {
     ) -> Result<Option<ExpertiseLedgerEntry>, SubstrateError> {
         Ok(None)
     }
+
+    // FederationAnnouncement delivery_attestation surface (CIRISPersist v2.2.0+
+    // shipped per #101). Spike does not exercise the delivery-audit path.
+    async fn put_delivery_attestation(
+        &self,
+        _attestation: ciris_persist::cirisnode::federation_announcement::DeliveryAttestation,
+    ) -> Result<(), SubstrateError> {
+        Ok(())
+    }
+
+    async fn list_delivery_attestations(
+        &self,
+        _announcement_id: &str,
+    ) -> Result<
+        Vec<ciris_persist::cirisnode::federation_announcement::DeliveryAttestation>,
+        SubstrateError,
+    > {
+        Ok(Vec::new())
+    }
+
+    async fn count_delivery_attestations(
+        &self,
+        _announcement_id: &str,
+    ) -> Result<u64, SubstrateError> {
+        Ok(0)
+    }
 }
 
 // ── Contract-fit tests ──────────────────────────────────────────────────

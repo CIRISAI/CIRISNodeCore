@@ -63,6 +63,15 @@ pub fn fed_err(e: ciris_persist::federation::Error) -> SubstrateError {
         } => SubstrateError::Backend(format!("rate limited: retry after {retry_after_seconds}s")),
         FE::Conflict(s) => SubstrateError::Conflict(s),
         FE::Backend(s) => SubstrateError::Backend(s),
+        // Persist v2.5.0+ added admission-discipline variants for the
+        // federation directory's reserved-prefix enforcement + envelope
+        // schema validation + hardware-attestation gates (FSD-002 v1.4
+        // §4.9 + §7.4). NodeCore's deprecated V020 trust-columns path
+        // shouldn't be exercising these in practice; catch-all maps to
+        // Backend with the formatted variant for diagnostics. Specific
+        // mappings can be added per-variant if any of these become
+        // load-bearing for trust-columns callers.
+        other => SubstrateError::Backend(format!("federation: {other:?}")),
     }
 }
 
