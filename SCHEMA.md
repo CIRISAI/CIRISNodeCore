@@ -217,6 +217,7 @@ shapes within `proposal`-type Contributions.
 | `assistance_response` | Peer's response to an `assistance_request`. Any peer may respond to any visible request; the requester applies its own acceptance policy (trust grants, reputation, etc.) to filter responses. | None |
 | `notification` | **Peer-to-peer fire-and-forget update** about the environment or the results of an action. Sender does not expect a response (responses are optional). Three load-bearing categories: `environment` (observed state of the world), `action_result` (sender completed an action and is reporting), `state_change` (sender's own state changed). Operators MAY add categories. | None (routine); `anomaly`-category notifications MAY require witness-set at consumer policy. |
 | `notification_response` | Peer's optional support / rebut / clarify response to a `notification`. The consensus-on-observations pattern — peers can concur with or dispute an observation without it being a formal §8 `moderation_event` accusation. | None (peer dialogue) |
+| `external_content` | An external encyclopedia or news article ingested into the federation as a first-class entity. `sub_kind` discriminator selects between `encyclopedia_article` (Wikipedia-shape: editor-consensus, revision chain via `supersedes`, indefinite `valid_until`) and `news_article` (publisher-attested: time-decaying via `valid_until`, corrections via `recants` + `topical_relation:corrects`, publisher source-quality as load-bearing trust signal). Body bytes live in `federation_blobs`; the envelope references via `evidence_refs[]`. Quality / accuracy / bias attestations are emitted separately as `scores` on the encyclopedia:* / news:* / topical_relation:* dimension families (NodeCore-owned namespace slice; FSD-002 §4.9.2 amendment pending). See NodeCore#19 for the full primitive class. | None for the existence-attestation; witness diversity per consumer policy on high-stakes quality / accuracy attestations (e.g., a published correction that `recants` a major factual claim). |
 
 ---
 
@@ -1008,6 +1009,119 @@ Not applicable to: completed transactions
 (`*_response`, `vote`, `slashing_attestation`, `promotion_attestation`)
 — those route through `reconsideration_request` (§4.12) or
 `moderation_event` (§4.11) instead.
+
+### 4.29 `external_content`
+
+External encyclopedia / news articles absorbed into the federation
+as first-class CEG Contributions (NodeCore#19). A `sub_kind`
+discriminator selects between two shape families on a shared
+envelope; the article body itself lives content-addressable in
+`federation_blobs` (per CIRISPersist#103) and is referenced via the
+`content_sha256` field — the envelope is small (KB scale) regardless
+of body size.
+
+Payload:
+
+```json
+{
+  "sub_kind": "encyclopedia_article",
+  "entity_key_id": "wikipedia:article:einstein",
+  "language": "en",
+  "content_sha256": "abc123...",
+  "content_media_type": "text/html",
+  "content_size_bytes": 50000,
+
+  "source": {
+    "kind": "encyclopedia",
+    "project": "wikipedia",
+    "revision_id": "1234567",
+    "edited_at": "2026-05-15T12:34:56Z"
+  },
+
+  "topical_relations": [
+    { "target_key_id": "wikipedia:article:relativity",
+      "relation": "references" },
+    { "target_key_id": "wikipedia:article:nobel_prize",
+      "relation": "see_also" }
+  ],
+
+  "citations": [
+    { "kind": "primary_source",
+      "ref": "doi:10.1103/PhysRevA.123.456" },
+    { "kind": "external_url",
+      "ref": "https://nobelprize.org/.../einstein" }
+  ]
+}
+```
+
+For `sub_kind = "news_article"`, the `source` shape carries
+publisher-specific fields:
+
+```json
+{
+  "sub_kind": "news_article",
+  "entity_key_id": "news:article:nyt:2026-05-15:climate-summit",
+  "language": "en",
+  "content_sha256": "def456...",
+  "content_media_type": "text/html",
+  "content_size_bytes": 30000,
+
+  "source": {
+    "kind": "news",
+    "publisher": "nyt",
+    "publisher_key_id": "publisher:nyt",
+    "published_at": "2026-05-15T08:00:00Z",
+    "byline": "Jane Doe",
+    "byline_key_id": "journalist:jane-doe",
+    "section": "world",
+    "headline": "Climate summit reaches framework agreement"
+  },
+
+  "topical_relations": [
+    { "target_key_id": "news:article:nyt:2026-05-14:climate-summit-day-1",
+      "relation": "see_also" }
+  ],
+
+  "citations": [
+    { "kind": "external_url",
+      "ref": "https://unfccc.int/.../press-release-2026-05-15" }
+  ]
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `sub_kind` | enum | yes | `encyclopedia_article` \| `news_article` (open; future kinds via §4.9.2 amendment). |
+| `entity_key_id` | string | yes | Stable federation key_id for the article entity. Pattern: `{kind_prefix}:article:{slug}` (encyclopedia) or `news:article:{publisher}:{date}:{slug}` (news). Cited by all subsequent quality / accuracy / link attestations. |
+| `language` | ISO 639-1 | yes | The article's natural language. |
+| `content_sha256` | hex string | yes | SHA-256 of the canonical article body bytes; resolves to a `federation_blobs` row. Bytes fetchable via `MessageType::ContentFetch` (CIRISEdge v0.8.0+) from any node-mode peer holding the SHA per `holds_bytes:sha256:*`. |
+| `content_media_type` | string | yes | RFC 6838 media type. Typical: `text/html`, `text/markdown`, `application/json` (for structured encyclopedic data). |
+| `content_size_bytes` | int | yes | Bytes — drives storage class (inline vs S3-pointer per `federation_blobs`) + lets the UI render staleness budget. |
+| `source` | object | yes | Sub-kind-specific source metadata (per the two examples above). |
+| `topical_relations` | array | no | Inter-article links. Each entry materializes as a separate `scores` attestation on `topical_relation:{relation}:{target_key_id}`. Common relations: `references`, `see_also`, `disambiguates`, `corrects` (news-style), `supersedes_article` (for revision chains, distinct from the structural-primitive `supersedes`). |
+| `citations` | array | no | External references (non-CIRIS sources). Each carries a `kind` (`primary_source` / `external_url` / `doi` / `isbn` / `arxiv`) and a `ref` string. Materialize separately as `cites_source:{kind}` attestations. |
+
+**Sub-kind specifics:**
+
+- `encyclopedia_article` — revision chain via the structural primitive `supersedes` (per FSD-002 §2.2.2). Quality attested via `encyclopedia:accuracy:{topic}` / `encyclopedia:completeness:{topic}` / `encyclopedia:NPOV_compliance` / `encyclopedia:citation_quality`. `valid_until` typically unset (encyclopedic content has indefinite validity unless retracted via `recants`).
+- `news_article` — corrections via the structural primitive `recants` on the false claim + `topical_relation:corrects:{original_article}` on the correction article. Quality attested via `news:accuracy:{topic}` (often by fact-checkers — Snopes / AP Fact Check / Reuters Fact Check — as separate attesters) / `news:bias:{spectrum_axis}` / `news:freshness`. `valid_until` typically set (news has time-decay; staleness contract).
+
+**Lifecycle via existing 4-primitive retraction family:**
+
+- Article revision (no claim change): structural `supersedes` chains new revision over prior
+- Article removed as irrelevant: structural `withdraws` on the prior existence-attestation
+- Article contained false claim: structural `recants` on the specific scores attestation that carried the false claim (NOT the whole article — recants is per-claim)
+- Editor / publisher delegated authority: structural `delegates_to` from organizational steward
+
+**Trust composition** (per FSD-002 v1.4 §6 + Wikipedia/news-specific):
+
+- Default trust = attester source. Wikipedia steward signatures, news publisher steward signatures, or fact-checker key signatures all flow through standard expertise-weighted aggregation.
+- Reader / editor / fact-checker attestations on quality dimensions compose into a consumer-side verdict via the existing §6.1 policy variants (Direct / Transitive / Weighted-graph).
+- Publisher source_quality is its own scored attestation; consumers may pre-filter news articles by a `news:source_quality:{publisher}` threshold.
+
+**No new structural primitives.** The 1+4 wire-format lockdown holds; this subject_kind extension uses only existing structural composers + new dimension-prefix vocabulary (NodeCore namespace slice, FSD-002 §4.9.2 amendment to land the prefix families).
+
+[Spec — Phase 1 of NodeCore#19. Phase 2 ships the import pipeline; Phase 3 ships consumer-side composition + UI surface.]
 
 ---
 
