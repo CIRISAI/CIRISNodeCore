@@ -149,15 +149,34 @@ fn build_vote_envelope(
 // ---------------------------------------------------------------------------
 // Phase 2 — read-composition surfaces (CIRISAgent#800 / CIRISNodeCore#12).
 //
-// Logic lives in [`crate::compose`] so unit tests link without the pyo3
-// `extension-module` feature. The pyfunctions below are thin marshallers:
-// JSON in → call into compose → JSON out.
+// **Engine discipline** (CIRISNodeCore#4): NodeCore NEVER constructs an
+// engine or runtime; it consumes an INJECTED `ciris_persist.Engine` handle.
+// These pyfunctions accept the engine as a Python object, call directly
+// into persist's PyO3 surface for the data, then aggregate via
+// [`crate::compose`] — one call per UI surface, no Python-side
+// orchestration required.
+//
+// Engine handle passed as `&Bound<'_, PyAny>` (duck-typed) rather than a
+// concrete `ciris_persist::PyEngine` import — avoids enabling persist's
+// `python` feature in node-core's build and keeps the contract loose
+// enough that test doubles + alternative engine implementations work.
+//
+// Pure aggregation logic lives in [`crate::compose`] so unit tests link
+// without the pyo3 `extension-module` feature.
 // ---------------------------------------------------------------------------
 
-/// Thin PyO3 wrapper over [`crate::compose::compose_agent_state`]. See
-/// that function's docs for input/output shape + semantics.
+/// Compose UI-ready agent state by calling persist directly. One-call
+/// surface for CIRISAgent#800's ProfileScorecard.
+///
+/// `engine` must expose `list_attestations_for(attested_key_id) -> str`
+/// (JSON-serialized `Vec<Attestation>`) — `ciris_persist.Engine` does.
+/// Aggregation rules + output shape are in
+/// [`crate::compose::compose_agent_state`].
 #[pyfunction]
-fn compose_agent_state(key_id: String, attestations_json: String) -> PyResult<String> {
+fn agent_state(engine: &Bound<'_, PyAny>, key_id: String) -> PyResult<String> {
+    let attestations_json: String = engine
+        .call_method1("list_attestations_for", (&key_id,))?
+        .extract()?;
     crate::compose::compose_agent_state(key_id, &attestations_json)
         .map_err(|e| json_err("compose_agent_state", e))
 }
@@ -171,6 +190,6 @@ fn ciris_node_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_contribution_envelope, m)?)?;
     m.add_function(wrap_pyfunction!(build_vote_envelope, m)?)?;
     // Phase 2 (CIRISNodeCore#12)
-    m.add_function(wrap_pyfunction!(compose_agent_state, m)?)?;
+    m.add_function(wrap_pyfunction!(agent_state, m)?)?;
     Ok(())
 }

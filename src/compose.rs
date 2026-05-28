@@ -1,15 +1,16 @@
 //! Phase 2 read-composition logic for the Epistemic Commons Framework UI
 //! (CIRISAgent#800 / CIRISNodeCore#12).
 //!
-//! **Engine discipline** (per CIRISNodeCore#4): these functions are pure
-//! transformers. Python orchestrates persist calls (`list_attestations_for`
-//! / `list_attestations_by` / `list_attestations`) and hands NodeCore the
-//! raw attestation rows; NodeCore applies its aggregation + scoring rules
-//! and returns UI-shaped data. No engine handle held here.
+//! **Pure aggregation** — these functions take raw attestation JSON and
+//! return UI-shaped JSON. They do not hold engine handles or perform I/O.
 //!
-//! Lives in its own module (not [`crate::python`]) so unit tests can link
-//! without the pyo3 `extension-module` feature. The PyO3 surface in
-//! [`crate::python`] thin-wraps these functions for the Python ABI.
+//! The [`crate::python`] PyO3 wrappers accept an injected persist Engine
+//! handle, call directly into persist's PyO3 surface for the data, then
+//! aggregate here. Engine discipline (CIRISNodeCore#4): NodeCore never
+//! *constructs* an engine; injected ones are the cohabitation pattern.
+//!
+//! Aggregation logic lives in this module (not [`crate::python`]) so unit
+//! tests link without the pyo3 `extension-module` feature.
 
 use std::collections::HashMap;
 
