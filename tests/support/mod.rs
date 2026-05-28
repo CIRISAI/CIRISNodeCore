@@ -571,240 +571,215 @@ fn fed_stub(method: &'static str) -> FedErr {
     FedErr::Backend(format!("MockEngine: {method} not implemented in node-core test fixtures"))
 }
 
+#[async_trait::async_trait]
 impl FederationDirectory for MockEngine {
     // ── Trust methods — real impls (mirror persist's MemoryBackend
     //    validate_trust_grant rules so tests exercise the same
-    //    contract) ────────────────────────────────────────────────────
+    //    contract). Per persist v2.6.0+, these are default-method
+    //    overrides; the impl stays here so node-core's trust tests
+    //    exercise the validation contract rather than fall through
+    //    to the trait's "not implemented" default. ────────────────
 
-    fn grant_trust(
-        &self,
-        grant: TrustGrant,
-    ) -> impl Future<Output = Result<(), FedErr>> + Send {
-        let g = grant;
-        async move {
-            // Mirror persist::store::memory::validate_trust_grant.
-            if g.key.is_empty() {
-                return Err(FedErr::InvalidArgument("grant.key must be non-empty".into()));
-            }
-            if g.trusted_by.is_empty() {
-                return Err(FedErr::InvalidArgument(
-                    "grant.trusted_by must be non-empty".into(),
-                ));
-            }
-            if g.trusted_by == g.key {
-                return Err(FedErr::InvalidArgument(format!(
-                    "grant.trusted_by must differ from grant.key (no self-trust); got {}",
-                    g.key
-                )));
-            }
-            match g.trust_relationship {
-                TrustRelationship::Registry => {
-                    let n = g.trust_domains.as_ref().map(|d| d.len()).unwrap_or(0);
-                    if n == 0 {
-                        return Err(FedErr::InvalidArgument(
-                            "Registry-relationship grants require a non-empty trust_domains list"
-                                .into(),
-                        ));
-                    }
-                }
-                TrustRelationship::Direct => {
-                    if g.trust_domains.is_some() {
-                        return Err(FedErr::InvalidArgument(
-                            "Direct-relationship grants must have trust_domains=None".into(),
-                        ));
-                    }
+    async fn grant_trust(&self, grant: TrustGrant) -> Result<(), FedErr> {
+        // Mirror persist::store::memory::validate_trust_grant.
+        if grant.key.is_empty() {
+            return Err(FedErr::InvalidArgument("grant.key must be non-empty".into()));
+        }
+        if grant.trusted_by.is_empty() {
+            return Err(FedErr::InvalidArgument(
+                "grant.trusted_by must be non-empty".into(),
+            ));
+        }
+        if grant.trusted_by == grant.key {
+            return Err(FedErr::InvalidArgument(format!(
+                "grant.trusted_by must differ from grant.key (no self-trust); got {}",
+                grant.key
+            )));
+        }
+        match grant.trust_relationship {
+            TrustRelationship::Registry => {
+                let n = grant.trust_domains.as_ref().map(|d| d.len()).unwrap_or(0);
+                if n == 0 {
+                    return Err(FedErr::InvalidArgument(
+                        "Registry-relationship grants require a non-empty trust_domains list"
+                            .into(),
+                    ));
                 }
             }
-            let row = TrustRow {
-                key: g.key.clone(),
-                trust_type: g.trust_type,
-                trust_relationship: g.trust_relationship,
-                trust_domains: g.trust_domains,
-                trusted_by: g.trusted_by,
-                trusted_at: Utc::now(),
-                expires_at: g.expires_at,
-            };
-            self.state.lock().unwrap().trust_rows.insert(g.key, row);
-            Ok(())
-        }
-    }
-
-    fn revoke_trust(
-        &self,
-        key: &str,
-        _revoked_by: &str,
-    ) -> impl Future<Output = Result<(), FedErr>> + Send {
-        let key = key.to_owned();
-        async move {
-            let mut st = self.state.lock().unwrap();
-            if let Some(row) = st.trust_rows.get_mut(&key) {
-                row.expires_at = Some(Utc::now());
+            TrustRelationship::Direct => {
+                if grant.trust_domains.is_some() {
+                    return Err(FedErr::InvalidArgument(
+                        "Direct-relationship grants must have trust_domains=None".into(),
+                    ));
+                }
             }
-            Ok(())
         }
+        let row = TrustRow {
+            key: grant.key.clone(),
+            trust_type: grant.trust_type,
+            trust_relationship: grant.trust_relationship,
+            trust_domains: grant.trust_domains,
+            trusted_by: grant.trusted_by,
+            trusted_at: Utc::now(),
+            expires_at: grant.expires_at,
+        };
+        self.state.lock().unwrap().trust_rows.insert(grant.key, row);
+        Ok(())
     }
 
-    fn lookup_trust(
-        &self,
-        key: &str,
-    ) -> impl Future<Output = Result<Option<TrustRow>, FedErr>> + Send {
-        let key = key.to_owned();
-        async move { Ok(self.state.lock().unwrap().trust_rows.get(&key).cloned()) }
-    }
-
-    fn list_trusted_keys(
-        &self,
-        filter: TrustFilter,
-    ) -> impl Future<Output = Result<Vec<TrustRow>, FedErr>> + Send {
-        async move {
-            let st = self.state.lock().unwrap();
-            let now = Utc::now();
-            let mut out: Vec<TrustRow> = st
-                .trust_rows
-                .values()
-                .filter(|row| {
-                    if !filter.include_expired {
-                        if let Some(t) = row.expires_at {
-                            if t <= now {
-                                return false;
-                            }
-                        }
-                    }
-                    if let Some(tt) = filter.trust_type {
-                        if row.trust_type != tt {
-                            return false;
-                        }
-                    }
-                    if let Some(tr) = filter.trust_relationship {
-                        if row.trust_relationship != tr {
-                            return false;
-                        }
-                    }
-                    if let Some(ref d) = filter.domain {
-                        let in_domain = row
-                            .trust_domains
-                            .as_ref()
-                            .map(|v| v.iter().any(|x| x == d))
-                            .unwrap_or(false);
-                        if !in_domain {
-                            return false;
-                        }
-                    }
-                    true
-                })
-                .cloned()
-                .collect();
-            // Deterministic ordering for tests.
-            out.sort_by(|a, b| a.key.cmp(&b.key));
-            Ok(out)
+    async fn revoke_trust(&self, key: &str, _revoked_by: &str) -> Result<(), FedErr> {
+        let mut st = self.state.lock().unwrap();
+        if let Some(row) = st.trust_rows.get_mut(key) {
+            row.expires_at = Some(Utc::now());
         }
+        Ok(())
     }
 
-    // ── 14 stubs for the rest of the FederationDirectory surface ────
-    //    Node-core's M1 tests don't exercise these paths. Anything
-    //    that does should use `ciris_persist::store::MemoryBackend`
-    //    directly.
-
-    fn put_public_key(
-        &self,
-        _record: SignedKeyRecord,
-    ) -> impl Future<Output = Result<(), FedErr>> + Send {
-        async { Err(fed_stub("put_public_key")) }
+    async fn lookup_trust(&self, key: &str) -> Result<Option<TrustRow>, FedErr> {
+        Ok(self.state.lock().unwrap().trust_rows.get(key).cloned())
     }
 
-    fn lookup_public_key(
-        &self,
-        _key_id: &str,
-    ) -> impl Future<Output = Result<Option<KeyRecord>, FedErr>> + Send {
-        async { Err(fed_stub("lookup_public_key")) }
+    async fn list_trusted_keys(&self, filter: TrustFilter) -> Result<Vec<TrustRow>, FedErr> {
+        let st = self.state.lock().unwrap();
+        let now = Utc::now();
+        let mut out: Vec<TrustRow> = st
+            .trust_rows
+            .values()
+            .filter(|row| {
+                if !filter.include_expired {
+                    if let Some(t) = row.expires_at {
+                        if t <= now {
+                            return false;
+                        }
+                    }
+                }
+                if let Some(tt) = filter.trust_type {
+                    if row.trust_type != tt {
+                        return false;
+                    }
+                }
+                if let Some(tr) = filter.trust_relationship {
+                    if row.trust_relationship != tr {
+                        return false;
+                    }
+                }
+                if let Some(ref d) = filter.domain {
+                    let in_domain = row
+                        .trust_domains
+                        .as_ref()
+                        .map(|v| v.iter().any(|x| x == d))
+                        .unwrap_or(false);
+                    if !in_domain {
+                        return false;
+                    }
+                }
+                true
+            })
+            .cloned()
+            .collect();
+        // Deterministic ordering for tests.
+        out.sort_by(|a, b| a.key.cmp(&b.key));
+        Ok(out)
     }
 
-    fn lookup_keys_for_identity(
+    // ── 15 stubs for the rest of the FederationDirectory surface ────
+    //    (14 v2.5.0 methods + list_keys_by_identity_type added per
+    //    CIRISPersist#105 in v2.6.0). Node-core's M1 tests don't
+    //    exercise these paths. Anything that does should use
+    //    `ciris_persist::store::MemoryBackend` directly.
+
+    async fn put_public_key(&self, _record: SignedKeyRecord) -> Result<(), FedErr> {
+        Err(fed_stub("put_public_key"))
+    }
+
+    async fn lookup_public_key(&self, _key_id: &str) -> Result<Option<KeyRecord>, FedErr> {
+        Err(fed_stub("lookup_public_key"))
+    }
+
+    async fn lookup_keys_for_identity(
         &self,
         _identity_ref: &str,
-    ) -> impl Future<Output = Result<Vec<KeyRecord>, FedErr>> + Send {
-        async { Err(fed_stub("lookup_keys_for_identity")) }
+    ) -> Result<Vec<KeyRecord>, FedErr> {
+        Err(fed_stub("lookup_keys_for_identity"))
     }
 
-    fn put_attestation(
+    async fn list_keys_by_identity_type(
         &self,
-        _attestation: SignedAttestation,
-    ) -> impl Future<Output = Result<(), FedErr>> + Send {
-        async { Err(fed_stub("put_attestation")) }
+        _identity_type: &str,
+    ) -> Result<Vec<KeyRecord>, FedErr> {
+        Err(fed_stub("list_keys_by_identity_type"))
     }
 
-    fn list_attestations_for(
+    async fn put_attestation(&self, _attestation: SignedAttestation) -> Result<(), FedErr> {
+        Err(fed_stub("put_attestation"))
+    }
+
+    async fn list_attestations_for(
         &self,
         _attested_key_id: &str,
-    ) -> impl Future<Output = Result<Vec<Attestation>, FedErr>> + Send {
-        async { Err(fed_stub("list_attestations_for")) }
+    ) -> Result<Vec<Attestation>, FedErr> {
+        Err(fed_stub("list_attestations_for"))
     }
 
-    fn list_attestations_by(
+    async fn list_attestations_by(
         &self,
         _attesting_key_id: &str,
-    ) -> impl Future<Output = Result<Vec<Attestation>, FedErr>> + Send {
-        async { Err(fed_stub("list_attestations_by")) }
+    ) -> Result<Vec<Attestation>, FedErr> {
+        Err(fed_stub("list_attestations_by"))
     }
 
-    fn put_revocation(
-        &self,
-        _revocation: SignedRevocation,
-    ) -> impl Future<Output = Result<(), FedErr>> + Send {
-        async { Err(fed_stub("put_revocation")) }
+    async fn put_revocation(&self, _revocation: SignedRevocation) -> Result<(), FedErr> {
+        Err(fed_stub("put_revocation"))
     }
 
-    fn revocations_for(
-        &self,
-        _revoked_key_id: &str,
-    ) -> impl Future<Output = Result<Vec<Revocation>, FedErr>> + Send {
-        async { Err(fed_stub("revocations_for")) }
+    async fn revocations_for(&self, _revoked_key_id: &str) -> Result<Vec<Revocation>, FedErr> {
+        Err(fed_stub("revocations_for"))
     }
 
-    fn attach_key_pqc_signature(
+    async fn attach_key_pqc_signature(
         &self,
         _key_id: &str,
         _pubkey_ml_dsa_65_base64: &str,
         _scrub_signature_pqc: &str,
-    ) -> impl Future<Output = Result<(), FedErr>> + Send {
-        async { Err(fed_stub("attach_key_pqc_signature")) }
+    ) -> Result<(), FedErr> {
+        Err(fed_stub("attach_key_pqc_signature"))
     }
 
-    fn attach_attestation_pqc_signature(
+    async fn attach_attestation_pqc_signature(
         &self,
         _attestation_id: &str,
         _pqc_signature_base64: &str,
-    ) -> impl Future<Output = Result<(), FedErr>> + Send {
-        async { Err(fed_stub("attach_attestation_pqc_signature")) }
+    ) -> Result<(), FedErr> {
+        Err(fed_stub("attach_attestation_pqc_signature"))
     }
 
-    fn attach_revocation_pqc_signature(
+    async fn attach_revocation_pqc_signature(
         &self,
         _revocation_id: &str,
         _pqc_signature_base64: &str,
-    ) -> impl Future<Output = Result<(), FedErr>> + Send {
-        async { Err(fed_stub("attach_revocation_pqc_signature")) }
+    ) -> Result<(), FedErr> {
+        Err(fed_stub("attach_revocation_pqc_signature"))
     }
 
-    fn list_hybrid_pending_keys(
+    async fn list_hybrid_pending_keys(
         &self,
         _limit: i64,
-    ) -> impl Future<Output = Result<Vec<HybridPendingRow>, FedErr>> + Send {
-        async { Err(fed_stub("list_hybrid_pending_keys")) }
+    ) -> Result<Vec<HybridPendingRow>, FedErr> {
+        Err(fed_stub("list_hybrid_pending_keys"))
     }
 
-    fn list_hybrid_pending_attestations(
+    async fn list_hybrid_pending_attestations(
         &self,
         _limit: i64,
-    ) -> impl Future<Output = Result<Vec<HybridPendingRow>, FedErr>> + Send {
-        async { Err(fed_stub("list_hybrid_pending_attestations")) }
+    ) -> Result<Vec<HybridPendingRow>, FedErr> {
+        Err(fed_stub("list_hybrid_pending_attestations"))
     }
 
-    fn list_hybrid_pending_revocations(
+    async fn list_hybrid_pending_revocations(
         &self,
         _limit: i64,
-    ) -> impl Future<Output = Result<Vec<HybridPendingRow>, FedErr>> + Send {
-        async { Err(fed_stub("list_hybrid_pending_revocations")) }
+    ) -> Result<Vec<HybridPendingRow>, FedErr> {
+        Err(fed_stub("list_hybrid_pending_revocations"))
     }
 }
 

@@ -34,7 +34,7 @@ crate-type = ["cdylib", "rlib"]
 # `postgres` feature preserved: the `cirisnode` feature was decoupled
 # from backends at v1.11.0; `NodeCoreDispatch::Postgres` is what
 # `crate::cohabitation::install_from_dispatch` matches.
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v2.5.0", version = "2", features = ["cirisnode", "cirisaudit", "postgres"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v2.8.0", version = "2", features = ["cirisnode", "cirisaudit", "postgres"] }
 
 # Edge v0.5.1 — latest on the v0.5.x line; carries persist v2.x +
 # verify v3.x. Consumed surface (`src/messages/`, `src/handler.rs`,

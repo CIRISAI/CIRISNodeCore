@@ -161,6 +161,29 @@ where
     edge.register_handler::<ContentFetch, _>(handler).await
 }
 
+/// Substrate adapter — wire node-mode serving in from persist's
+/// [`BackendDispatch`] enum (per CIRISPersist#106, shipped v2.6.0).
+///
+/// `Engine::federation_directory()` returns `BackendDispatch` rather
+/// than `Arc<dyn FederationDirectory>` because the trait isn't
+/// object-safe (RPITIT-style methods don't dispatch dynamically).
+/// Each variant carries a concrete backend implementing
+/// [`BlobStorage`]; both route into [`install_node_mode_serving`]
+/// identically — the backend choice is the host's, transparent to
+/// node-core. Parallel to
+/// [`crate::cohabitation::install_from_dispatch`] for the write side.
+pub async fn install_from_dispatch(
+    dispatch: ciris_persist::engine::BackendDispatch,
+    edge: Arc<Edge>,
+) -> Result<(), EdgeError> {
+    use ciris_persist::engine::BackendDispatch;
+    match dispatch {
+        BackendDispatch::Postgres(backend) => install_node_mode_serving(backend, edge).await,
+        #[cfg(feature = "sqlite")]
+        BackendDispatch::Sqlite(backend) => install_node_mode_serving(backend, edge).await,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
