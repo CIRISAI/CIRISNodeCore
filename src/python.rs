@@ -146,11 +146,31 @@ fn build_vote_envelope(
     serde_json::to_string(&env).map_err(|e| json_err("serialize envelope", e))
 }
 
-/// The `ciris_node_core` Python module — Phase 1 client surface.
+// ---------------------------------------------------------------------------
+// Phase 2 — read-composition surfaces (CIRISAgent#800 / CIRISNodeCore#12).
+//
+// Logic lives in [`crate::compose`] so unit tests link without the pyo3
+// `extension-module` feature. The pyfunctions below are thin marshallers:
+// JSON in → call into compose → JSON out.
+// ---------------------------------------------------------------------------
+
+/// Thin PyO3 wrapper over [`crate::compose::compose_agent_state`]. See
+/// that function's docs for input/output shape + semantics.
+#[pyfunction]
+fn compose_agent_state(key_id: String, attestations_json: String) -> PyResult<String> {
+    crate::compose::compose_agent_state(key_id, &attestations_json)
+        .map_err(|e| json_err("compose_agent_state", e))
+}
+
+/// The `ciris_node_core` Python module — Phase 1 client surface +
+/// Phase 2 read-composition (CIRISNodeCore#12).
 #[pymodule]
 fn ciris_node_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Phase 1
     m.add_class::<PyEd25519Signer>()?;
     m.add_function(wrap_pyfunction!(build_contribution_envelope, m)?)?;
     m.add_function(wrap_pyfunction!(build_vote_envelope, m)?)?;
+    // Phase 2 (CIRISNodeCore#12)
+    m.add_function(wrap_pyfunction!(compose_agent_state, m)?)?;
     Ok(())
 }

@@ -56,6 +56,7 @@
 
 pub mod aggregate;
 pub mod cohabitation;
+pub mod compose;
 pub mod payloads;
 pub mod routing;
 pub mod service;
