@@ -349,7 +349,7 @@ A consumer submits DEFERRAL_REQUEST specifying cell and query context. The crate
 3. Apply diversity preferences (jurisdictional, organizational) per policy.
 4. Bound the routed set at a policy-tunable maximum (default 5 to 9).
 
-Routed contributors submit DEFERRAL_RESPONSE Contributions. The crate aggregates per Primitive 7 and returns the aggregate plus individual responses to the requester. Audit chain records the full deferral cycle. [Spec]
+Routed contributors submit DEFERRAL_RESPONSE Contributions. The crate aggregates per Primitive 7 and returns the aggregate plus individual responses to the requester. The aggregate surfaces in the federation directory as a dimensional claim `deferral:aggregate:{cell}` where `{cell}` is the `(domain, language)` pair the deferral targeted; subscribers read the dimension to consume the federation's running deferral state per cell. Audit chain records the full deferral cycle. [Spec]
 
 ### 3.4 Voting and aggregation
 
