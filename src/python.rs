@@ -181,6 +181,103 @@ fn agent_state(engine: &Bound<'_, PyAny>, key_id: String) -> PyResult<String> {
         .map_err(|e| json_err("compose_agent_state", e))
 }
 
+/// One-call surface for the Participate screen — fetches active
+/// `need:{domain}:{kind}` attestations and shapes them for UI consumption.
+///
+/// `filter_json` is the same JSON shape persist's `list_attestations`
+/// accepts; pass `"{}"` for all needs. Recommended filter:
+/// `{"dimension_prefix": "need:"}` plus optional `{"domain", "kind"}` for
+/// further narrowing (the latter two also filter at the compose layer per
+/// [`crate::compose::compose_needs_feed`]).
+#[pyfunction]
+fn needs_feed(engine: &Bound<'_, PyAny>, filter_json: String) -> PyResult<String> {
+    let attestations_json: String = engine
+        .call_method1("list_attestations", (&filter_json,))?
+        .extract()?;
+    crate::compose::compose_needs_feed(&attestations_json, &filter_json)
+        .map_err(|e| json_err("compose_needs_feed", e))
+}
+
+/// One-call surface for The Commons contribution card — fetches every
+/// attestation referencing `contribution_id` and buckets by dimension
+/// prefix (votes / aggregate / witness-diversity / truth-grounding /
+/// testimonial-witness).
+///
+/// The persist call uses `list_attestations` with a filter that selects
+/// attestations whose dimension references the contribution_id; the
+/// concrete filter shape depends on persist's `list_attestations`
+/// capabilities. v0.1 default: filter for dimension-suffix match on
+/// `contribution_id`.
+#[pyfunction]
+fn contribution(engine: &Bound<'_, PyAny>, contribution_id: String) -> PyResult<String> {
+    // Filter pattern: ask persist for attestations whose dimension contains
+    // the contribution_id. Persist's filter semantics may evolve; for v0.1
+    // we pass a simple "dimension_substring" filter and rely on the
+    // compose layer to bucket precisely.
+    let filter_json = serde_json::json!({
+        "dimension_substring": contribution_id
+    })
+    .to_string();
+    let attestations_json: String = engine
+        .call_method1("list_attestations", (&filter_json,))?
+        .extract()?;
+    crate::compose::compose_contribution(contribution_id, &attestations_json)
+        .map_err(|e| json_err("compose_contribution", e))
+}
+
+/// One-call surface for the Constitutional / Accord screen — walks the
+/// upward-only DAG rooted at `goal_id` (Goal ← Approach ← Method ←
+/// Progress Measure) via four prefix-filtered `list_attestations` calls.
+#[pyfunction]
+fn decision_hierarchy(engine: &Bound<'_, PyAny>, goal_id: String) -> PyResult<String> {
+    fn list_with_prefix(engine: &Bound<'_, PyAny>, prefix: &str) -> PyResult<String> {
+        let filter = serde_json::json!({"dimension_prefix": prefix}).to_string();
+        engine
+            .call_method1("list_attestations", (filter,))?
+            .extract()
+    }
+
+    let goals_json = list_with_prefix(engine, "goal:")?;
+    let approaches_json = list_with_prefix(engine, "approach:")?;
+    let methods_json = list_with_prefix(engine, "method:")?;
+    let measures_json = list_with_prefix(engine, "progress_measure:")?;
+
+    crate::compose::compose_decision_hierarchy(
+        goal_id,
+        &goals_json,
+        &approaches_json,
+        &methods_json,
+        &measures_json,
+    )
+    .map_err(|e| json_err("compose_decision_hierarchy", e))
+}
+
+/// One-call surface for the Wise Authority screen — fetches the three
+/// governance-tier attestation families (moderation / slashing /
+/// reconsideration) scoped to the (`domain`, `language`) cell.
+#[pyfunction]
+fn wa_state(engine: &Bound<'_, PyAny>, domain: String, language: String) -> PyResult<String> {
+    fn list_with_prefix(engine: &Bound<'_, PyAny>, prefix: &str) -> PyResult<String> {
+        let filter = serde_json::json!({"dimension_prefix": prefix}).to_string();
+        engine
+            .call_method1("list_attestations", (filter,))?
+            .extract()
+    }
+
+    let moderation_json = list_with_prefix(engine, "moderation:")?;
+    let slashing_json = list_with_prefix(engine, "slashing:")?;
+    let reconsideration_json = list_with_prefix(engine, "reconsideration:")?;
+
+    crate::compose::compose_wa_state(
+        domain,
+        language,
+        &moderation_json,
+        &slashing_json,
+        &reconsideration_json,
+    )
+    .map_err(|e| json_err("compose_wa_state", e))
+}
+
 /// The `ciris_node_core` Python module — Phase 1 client surface +
 /// Phase 2 read-composition (CIRISNodeCore#12).
 #[pymodule]
@@ -191,5 +288,9 @@ fn ciris_node_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_vote_envelope, m)?)?;
     // Phase 2 (CIRISNodeCore#12)
     m.add_function(wrap_pyfunction!(agent_state, m)?)?;
+    m.add_function(wrap_pyfunction!(needs_feed, m)?)?;
+    m.add_function(wrap_pyfunction!(contribution, m)?)?;
+    m.add_function(wrap_pyfunction!(decision_hierarchy, m)?)?;
+    m.add_function(wrap_pyfunction!(wa_state, m)?)?;
     Ok(())
 }
