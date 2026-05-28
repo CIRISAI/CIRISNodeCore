@@ -57,6 +57,7 @@
 pub mod aggregate;
 pub mod cohabitation;
 pub mod compose;
+pub mod ingest;
 pub mod locality;
 pub mod payloads;
 pub mod routing;
