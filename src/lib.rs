@@ -60,6 +60,7 @@ pub mod compose;
 pub mod locality;
 pub mod payloads;
 pub mod routing;
+pub mod serving;
 pub mod service;
 pub mod sign;
 pub mod substrate;
