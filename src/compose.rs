@@ -32,15 +32,15 @@ pub(crate) struct AttestationRow {
 }
 
 impl AttestationRow {
-    fn dimension(&self) -> Option<&str> {
+    pub(crate) fn dimension(&self) -> Option<&str> {
         self.attestation_envelope.get("dimension")?.as_str()
     }
 
-    fn score(&self) -> Option<f64> {
+    pub(crate) fn score(&self) -> Option<f64> {
         self.attestation_envelope.get("score")?.as_f64()
     }
 
-    fn is_active_at(&self, now: DateTime<Utc>) -> bool {
+    pub(crate) fn is_active_at(&self, now: DateTime<Utc>) -> bool {
         self.expires_at.map_or(true, |exp| now <= exp)
     }
 }
