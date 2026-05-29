@@ -66,6 +66,7 @@ pub mod service;
 pub mod sign;
 pub mod substrate;
 pub mod trust;
+pub mod trust_depth;
 pub mod wire;
 
 /// PyO3 bindings — Phase 1 client surface. Compiled only under the

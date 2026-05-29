@@ -483,10 +483,135 @@ fn install_node_mode_serving(
     Ok(())
 }
 
+// ───────────────────────────────────────────────────────────────────────
+// Trust recursion depth — admission-decision pyfunctions (NodeCore#21).
+//
+// The CIRISConformance harness asserts the trust-recursion-depth knob
+// described in FEDERATION_SCALING_MODEL.md §1.4: each server walks the
+// delegates_to attestation graph to depth N when deciding admission.
+//
+// These pyfunctions expose the decision oracle without crossing into
+// the actual admission gate (which lives at persist's put_blob /
+// put_attestation / put_contribution per CIRISPersist#123).
+// ───────────────────────────────────────────────────────────────────────
+
+/// Return the set of key_ids admitted by `root_key_id` at the given
+/// trust recursion depth — the BFS over active `delegates_to` edges
+/// in the federation directory, with `withdraws` / `recants`
+/// retractions honored.
+///
+/// Returned as a JSON string for parsing-style symmetry with the
+/// other compose pyfunctions: `{"root": "...", "depth": N, "set":
+/// ["key_id", ...]}`. Order is insertion-order from the BFS.
+///
+/// The Conformance harness uses this to assert:
+/// * depth 0 admits only the root
+/// * depth 1 admits friend-of-friends (heavy small-world overlap)
+/// * depth N admits exactly the transitive closure within N hops
+#[pyfunction]
+fn effective_trust_set(
+    engine: &Bound<'_, PyEngine>,
+    root_key_id: String,
+    depth: usize,
+) -> PyResult<String> {
+    let py = engine.py();
+    let cap_obj = engine.call_method0("federation_directory_capsule")?;
+    let cap: &Bound<'_, PyCapsule> = cap_obj.cast::<PyCapsule>()?;
+    let name: &CStr =
+        CStr::from_bytes_with_nul(b"ciris_persist::federation_directory\0")
+            .expect("static tag has no interior NUL");
+    let raw: NonNull<std::ffi::c_void> = cap.pointer_checked(Some(name))?;
+    // SAFETY: pinned name tag matches the persist capsule contract
+    // (CIRISPersist#95). The pointer remains valid for the lifetime
+    // of the capsule; we clone the dispatch immediately into an
+    // owned `BackendDispatch` so the borrow lifetime ends before
+    // `py.detach` releases the GIL.
+    #[allow(unsafe_code)]
+    let dispatch: BackendDispatch =
+        unsafe { raw.cast::<BackendDispatch>().as_ref() }.clone();
+
+    let runtime = current_runtime_handle().ok_or_else(|| {
+        PyRuntimeError::new_err(
+            "ciris_persist runtime not initialized — \
+             construct an Engine before effective_trust_set",
+        )
+    })?;
+
+    let set = py
+        .detach(|| {
+            runtime.block_on(async move {
+                let directory: &dyn ciris_persist::federation::FederationDirectory =
+                    match &dispatch {
+                        BackendDispatch::Postgres(b) => b.as_ref(),
+                        BackendDispatch::Sqlite(b) => b.as_ref(),
+                    };
+                crate::trust_depth::effective_trust_set(directory, &root_key_id, depth).await
+            })
+        })
+        .map_err(|e| PyRuntimeError::new_err(format!("effective_trust_set: {e}")))?;
+
+    let mut sorted: Vec<String> = set.into_iter().collect();
+    sorted.sort();
+    Ok(serde_json::json!({
+        "root": root_key_id,
+        "depth": depth,
+        "set": sorted,
+    })
+    .to_string())
+}
+
+/// True iff `source_key_id` is in `root_key_id`'s effective trust
+/// set at the given depth. Sibling of [`effective_trust_set`];
+/// avoids parsing the JSON for the common "is X admitted" check.
+#[pyfunction]
+fn admits_at_depth(
+    engine: &Bound<'_, PyEngine>,
+    root_key_id: String,
+    source_key_id: String,
+    depth: usize,
+) -> PyResult<bool> {
+    let py = engine.py();
+    let cap_obj = engine.call_method0("federation_directory_capsule")?;
+    let cap: &Bound<'_, PyCapsule> = cap_obj.cast::<PyCapsule>()?;
+    let name: &CStr =
+        CStr::from_bytes_with_nul(b"ciris_persist::federation_directory\0")
+            .expect("static tag has no interior NUL");
+    let raw: NonNull<std::ffi::c_void> = cap.pointer_checked(Some(name))?;
+    #[allow(unsafe_code)]
+    let dispatch: BackendDispatch =
+        unsafe { raw.cast::<BackendDispatch>().as_ref() }.clone();
+
+    let runtime = current_runtime_handle().ok_or_else(|| {
+        PyRuntimeError::new_err(
+            "ciris_persist runtime not initialized — \
+             construct an Engine before admits_at_depth",
+        )
+    })?;
+
+    py.detach(|| {
+        runtime.block_on(async move {
+            let directory: &dyn ciris_persist::federation::FederationDirectory =
+                match &dispatch {
+                    BackendDispatch::Postgres(b) => b.as_ref(),
+                    BackendDispatch::Sqlite(b) => b.as_ref(),
+                };
+            crate::trust_depth::admits_at_depth(
+                directory,
+                &root_key_id,
+                &source_key_id,
+                depth,
+            )
+            .await
+        })
+    })
+    .map_err(|e| PyRuntimeError::new_err(format!("admits_at_depth: {e}")))
+}
+
 /// The `ciris_node_core` Python module — Phase 1 client surface +
 /// Phase 2 read-composition (CIRISNodeCore#12) + external-content
 /// feeds (CIRISNodeCore#19) + Phase 3 cohabitation install
-/// (CIRISNodeCore#11).
+/// (CIRISNodeCore#11) + trust-depth admission oracle
+/// (CIRISNodeCore#21).
 #[pymodule]
 fn ciris_node_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Phase 1
@@ -506,5 +631,8 @@ fn ciris_node_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Phase 3 (CIRISNodeCore#11 — cohabitation install + node-mode serving)
     m.add_function(wrap_pyfunction!(install_cohabitation, m)?)?;
     m.add_function(wrap_pyfunction!(install_node_mode_serving, m)?)?;
+    // Trust depth admission oracle (CIRISNodeCore#21 / Conformance)
+    m.add_function(wrap_pyfunction!(effective_trust_set, m)?)?;
+    m.add_function(wrap_pyfunction!(admits_at_depth, m)?)?;
     Ok(())
 }
