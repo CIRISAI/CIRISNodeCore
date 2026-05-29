@@ -179,7 +179,6 @@ pub async fn install_from_dispatch(
     use ciris_persist::engine::BackendDispatch;
     match dispatch {
         BackendDispatch::Postgres(backend) => install_node_mode_serving(backend, edge).await,
-        #[cfg(feature = "sqlite")]
         BackendDispatch::Sqlite(backend) => install_node_mode_serving(backend, edge).await,
     }
 }

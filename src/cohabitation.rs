@@ -84,7 +84,6 @@ pub async fn install_from_dispatch(
 ) -> Result<(), EdgeError> {
     match dispatch {
         NodeCoreDispatch::Postgres(backend) => install(backend, edge).await,
-        #[cfg(feature = "sqlite")]
         NodeCoreDispatch::Sqlite(backend) => install(backend, edge).await,
     }
 }
