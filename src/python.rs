@@ -326,9 +326,84 @@ fn global_feed(engine: &Bound<'_, PyAny>, filter_json: String) -> PyResult<Strin
         .map_err(|e| json_err("compose_global_feed", e))
 }
 
+// ---------------------------------------------------------------------------
+// Phase 3 — cohabitation install (CIRISNodeCore#11).
+//
+// This is the agent-runtime entry point: hand node-core a persist `PyEngine`
+// + edge `PyEdge` and it wires the 8 federation-consensus MessageType
+// handlers onto the host's `Edge`, addressable by the host's federation
+// signing key (edge is Reticulum-native — addressing IS identity).
+//
+// Crosses a Rust type boundary (PyRef extraction of persist's `PyEngine` +
+// edge's `PyEdge` to call the plain-pub-fn Option-B accessors
+// `node_core_service` / `edge_handle`). The `python` feature therefore
+// activates `ciris-persist/pyo3` + `ciris-edge/pyo3` so the concrete
+// pyclasses are importable on the Rust side.
+//
+// Per CIRISNodeCore#4 we still NEVER construct a runtime — we borrow
+// persist's via `ciris_persist::current_runtime_handle()`.
+// ---------------------------------------------------------------------------
+
+use ciris_edge::ffi::pyo3::PyEdge;
+use ciris_persist::ffi::pyo3::{current_runtime_handle, PyEngine};
+use pyo3::exceptions::PyRuntimeError;
+
+/// Wire node-core into the host's substrate — the cohabitation
+/// bootstrap, exposed to the agent's Python runtime.
+///
+/// Borrows a persist `Engine` handle (for the `NodeCoreDispatch` →
+/// `NodeCoreService` injection per CIRISNodeCore#4) and an edge
+/// `Edge` handle (for `MessageType` handler registration). After this
+/// call returns, the 8 federation-consensus message types
+/// (`ContributionSubmit`, `VoteCast`, `DeferralRequest`,
+/// `DeferralResponse`, `ExpertiseAttestationPublish`,
+/// `ModerationEventPublish`, `SlashingAttestationPublish`,
+/// `ReconsiderationRequest`) dispatch into node-core when addressed
+/// to the host's federation signing key.
+///
+/// Idiom:
+///
+/// ```python
+/// from ciris_persist import Engine
+/// from ciris_edge import init_edge_runtime
+/// from ciris_node_core import install_cohabitation
+///
+/// engine = Engine(...)              # persist constructs runtime
+/// edge   = init_edge_runtime(engine, ...)
+/// install_cohabitation(engine, edge)  # node-core wires its handlers
+/// ```
+///
+/// Returns `None` on success; raises `RuntimeError` if the persist
+/// runtime is not available (engine closed / not yet constructed) or
+/// the edge handler registration fails.
+#[pyfunction]
+fn install_cohabitation(engine: PyRef<'_, PyEngine>, edge: PyRef<'_, PyEdge>) -> PyResult<()> {
+    let dispatch = engine.node_core_service();
+    let edge_handle = edge.edge_handle();
+    let runtime = current_runtime_handle().ok_or_else(|| {
+        PyRuntimeError::new_err(
+            "ciris_persist runtime not initialized — \
+             construct an Engine before install_cohabitation",
+        )
+    })?;
+    // Drop the GIL across `block_on` — node-core's install path is
+    // pure-Rust async (no Python reentry); holding the GIL while
+    // blocking the OS thread risks deadlocking any other Python
+    // thread that wants to advance work.
+    let py = engine.py();
+    py.detach(|| {
+        runtime.block_on(async move {
+            crate::cohabitation::install_from_dispatch(dispatch, &edge_handle).await
+        })
+    })
+    .map_err(|e| PyRuntimeError::new_err(format!("install_cohabitation: {e}")))?;
+    Ok(())
+}
+
 /// The `ciris_node_core` Python module — Phase 1 client surface +
-/// Phase 2 read-composition (CIRISNodeCore#12) + Phase 3 external-
-/// content feeds (CIRISNodeCore#19).
+/// Phase 2 read-composition (CIRISNodeCore#12) + external-content
+/// feeds (CIRISNodeCore#19) + Phase 3 cohabitation install
+/// (CIRISNodeCore#11).
 #[pymodule]
 fn ciris_node_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Phase 1
@@ -345,5 +420,7 @@ fn ciris_node_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(local_feed, m)?)?;
     m.add_function(wrap_pyfunction!(community_feed, m)?)?;
     m.add_function(wrap_pyfunction!(global_feed, m)?)?;
+    // Phase 3 (CIRISNodeCore#11 — cohabitation install)
+    m.add_function(wrap_pyfunction!(install_cohabitation, m)?)?;
     Ok(())
 }

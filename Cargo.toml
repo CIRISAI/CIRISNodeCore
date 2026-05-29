@@ -74,12 +74,15 @@ tracing = "0.1"
 thiserror = "1.0"
 async-trait = "0.1"
 
-# PyO3 — Phase 1 client-surface bindings (CIRISNodeCore#1). Optional;
-# gated behind the `python` feature. v0.28 + abi3-py311 matches
-# `ciris-persist` + `ciris-lens-core` exactly — required for CIRIS 3.0
-# in-process cohabitation (all co-resident cdylibs must link one
-# identical pyo3 ABI).
-pyo3 = { version = "0.28", features = ["extension-module", "abi3-py311"], optional = true }
+# PyO3 — gates the Phase 1 client surface (CIRISNodeCore#1) +
+# the Phase 3 cohabitation install (CIRISNodeCore#11). Optional;
+# enabled by the `python` feature.
+#
+# `abi3-py310` aligns with the cohabitation triple — persist v3.1.1
+# and edge v0.13.1 both pin `abi3-py310`. All co-resident cdylibs MUST
+# link one identical pyo3 ABI for CIRIS 3.0 in-process cohabitation.
+# abi3 is forward-compatible: a py310-tagged wheel runs on 3.11/3.12+.
+pyo3 = { version = "0.28", features = ["extension-module", "abi3-py310"], optional = true }
 
 [dev-dependencies]
 proptest = "1.4"
@@ -88,14 +91,22 @@ uuid = { version = "1", features = ["v4"] }
 [features]
 default = []
 
-# PyO3 cdylib bindings. Phase 1 = the client surface (envelope
-# construction + Ed25519 signing — pure, no engine). Per
-# CIRISNodeCore#4 the bindings NEVER construct a persist Engine or a
-# tokio runtime; Phase 1 has no engine to inject. Phases 2-3
-# (relay/node modes that host substrate) consume an injected persist
-# Engine handle — gated on a persist coordination item, not in this
-# feature yet.
-python = ["dep:pyo3"]
+# PyO3 cdylib bindings.
+#
+# * Phase 1 — client surface (envelope construction + Ed25519
+#   signing — pure, no engine).
+# * Phase 2 — read-composition surfaces (CIRISNodeCore#12) +
+#   external-content feeds (CIRISNodeCore#19). Engine is a duck-typed
+#   Python object; persist's `pyo3` feature is NOT required.
+# * Phase 3 — cohabitation install (CIRISNodeCore#11). Crosses a Rust
+#   type boundary (`PyRef<PyEngine>` + `PyRef<PyEdge>` + plain `pub fn`
+#   accessors `node_core_service` / `edge_handle`) so persist's +
+#   edge's `pyo3` features are required.
+#
+# Per CIRISNodeCore#4 the bindings NEVER construct a persist Engine
+# or a tokio runtime — Phase 3 calls `current_runtime_handle()` to
+# borrow the persist-owned runtime for the install bridge.
+python = ["dep:pyo3", "ciris-persist/pyo3", "ciris-edge/pyo3"]
 
 # Sqlite backend support for the cohabitation bootstrap. Effectively
 # no-op at the v0.13.1 cohabitation triple — edge transitively enables
