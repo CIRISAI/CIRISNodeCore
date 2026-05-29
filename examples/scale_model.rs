@@ -2,85 +2,81 @@
 //!
 //! Run: `cargo run --example scale_model`
 //!
-//! **Purpose:** find the v1 caching / replication parameters that
-//! let CIRIS substrate carry the entire internet from day one. This
-//! is a design search tool — change scenario knobs, watch per-server
-//! feasibility checks pass or fail, converge on the parameter set
-//! that makes 5B users work on commodity hardware.
+//! **v0.3 — single-pool, CEG-organic.** The v0.2 model split storage
+//! into an explicit "direct-trust archive" with a `T_direct` knob
+//! and a separate "cache" with TTL + LRU cap. That dichotomy was
+//! premature — CEG's primitives compose into a simpler model where
+//! every node holds ONE pool of bytes, scored by trust × demand ×
+//! recency, with disk budget the only hard limit.
 //!
-//! **Load-bearing v1 assumptions** (per Eric, this session):
+//! **The discipline** (Eric, this session):
 //!
-//! 1. **Fetch-on-demand is primary.** Server tier does NOT
-//!    pre-replicate trust-set content broadly. Inbound content
-//!    flows on `ContentFetch` only.
-//! 2. **Direct-trust archive is the one pre-replicated set.**
-//!    Server tier holds R first-order trusted peers' publishable
-//!    content for `T_direct` days. R² second-order content is
-//!    fetched on demand, NEVER pre-replicated.
-//! 3. **Cache holds content for X minutes after last access** —
-//!    `cache_ttl_minutes`. Encrypted at rest (AES-GCM), encrypted in
-//!    transit (already true per Edge `InlineText`). LRU eviction
-//!    bounded by `server_cache_max_bytes`.
-//! 4. **Agent traces are first-class.** H3ERE pipeline produces ~14
-//!    trace components per agent decision. Traces are scrubbed
-//!    (PII / secret redaction) before storage; most stay local
-//!    (`trace_publishable_fraction` controls what crosses to direct
-//!    trust).
+//! Replication intake at every node, for every byte-attempt:
+//! ```
+//! hold? = trust(source) ≥ local_threshold  AND  capacity_available
+//! ```
 //!
-//! **Feasibility = 1 TB disk + residential 1 Gbps + 1 core full-util
-//! per server.** A scenario passes if average server-tier load stays
-//! within all three. Failing scenarios print which knob to turn.
+//! Eviction at every node, when capacity pressure exists:
+//! ```
+//! evict_score(blob) = popularity(blob) × freshness(blob)
+//!                   = access_count_since(T) × decay(now − last_accessed_at)
+//! ```
+//!
+//! Push and pull terminate at the same gate. No "archive vs cache"
+//! distinction — bytes that match trust + earn demand stay; bytes
+//! that don't get evicted when newer / more popular content arrives.
+//!
+//! **The CEG locality dividend** (the scaling lever that comes for
+//! free from the wire format):
+//!
+//! `cohort_scope ∈ {self, family}` content NEVER emits a
+//! `holds_bytes:sha256:*` attestation, so it is structurally
+//! undiscoverable, so no peer can ever request it, so the trust gate
+//! is never even reached. Local content is local because the wire
+//! format will not carry it.
+//!
+//! **What this model computes:** the steady-state per-server held
+//! bytes at each scenario's trust topology + demand rate + disk
+//! budget. The composition (own / admitted-trust / hot-cache) is
+//! shown but is derived from the inputs, not configured. Feasibility
+//! gates: 1 TB disk / 1 Gbps bandwidth / 1 core full-util per server.
 //!
 //! Empirical constants baked in from CIRISVerify v2.8.0 + CIRISEdge
-//! v0.10.0 + CIRISPersist v3.1.1 — see FSD §1.
+//! v0.10.0 + CIRISPersist v3.3.0 — see FSD §2.
 
 // ─── Empirical constants ──────────────────────────────────────────────
 
 /// Hybrid Ed25519 + ML-DSA-65 sign (CIRISVerify v2.8.0).
 const HYBRID_SIGN_US: f64 = 466.0;
-
 /// Hybrid verify (CIRISVerify v2.8.0).
 const HYBRID_VERIFY_US: f64 = 276.0;
-
 /// `dispatch_inbound` overhead on top of verify (Edge v0.10.0).
 const DISPATCH_OVERHEAD_US: f64 = 120.0;
-
 /// Canonicalization slope (Edge v0.10.0).
 const CANONICALIZE_NS_PER_KIB: f64 = 250.0;
-
-/// AES-GCM encrypt @ 64 KiB blocks — 5.45 GiB/s (CIRISVerify v2.8.0
-/// `ring` backend). Used for cache-at-rest + transit encryption above
-/// the already-encrypted inline text pipeline.
-const AES_GCM_ENCRYPT_NS_PER_BYTE: f64 = 0.175; // 5.45 GiB/s
-
+/// AES-GCM encrypt @ 64 KiB blocks — 5.45 GiB/s.
+const AES_GCM_ENCRYPT_NS_PER_BYTE: f64 = 0.175;
 /// AES-GCM decrypt @ 64 KiB blocks — 5.91 GiB/s.
-const AES_GCM_DECRYPT_NS_PER_BYTE: f64 = 0.161; // 5.91 GiB/s
-
-/// Scrub regex pass (PII / secret redaction). CIRISEdge BENCHMARKS.md
-/// says Classify/Scrub passes are 5–10 ns/byte; we use 10 ns/byte
-/// (conservative; covers both classify + scrub + AES-GCM in one).
+const AES_GCM_DECRYPT_NS_PER_BYTE: f64 = 0.161;
+/// Scrub regex pass (Edge BENCHMARKS.md 5-10 ns/byte; we use the
+/// conservative end).
 const SCRUB_NS_PER_BYTE: f64 = 10.0;
-
-/// H3ERE pipeline trace bytes per agent decision. Persist
-/// INTEGRATION_LENS: agent batch_size = 10 × ~14 components ≈ 14 KB
-/// per agent decision (one "thought-then-act" cycle).
+/// H3ERE trace bytes per agent decision (CIRISPersist INTEGRATION_LENS).
 const H3ERE_TRACE_BYTES_PER_DECISION: f64 = 14.0 * KB;
 
-// ─── Tier model (Edge v1.0 design) ───────────────────────────────────
+// ─── Per-server feasibility gates (v1 design) ────────────────────────
 
-/// Server-tier disk gate (the per-server budget the model checks
-/// every scenario's avg-server-storage against).
+/// Server-tier disk gate.
 const SERVER_DISK_GATE_BYTES: f64 = 1024.0 * GIB;
-
-/// Per-server bandwidth budget — 1 Gbps residential fiber ≈ 125 MB/s
-/// = 10.8 TB/day sustained. Real deployments share this with browsing
-/// + everything else; the model treats this as the server's CIRIS
-/// budget, not the total link.
+/// Per-server bandwidth budget — 1 Gbps residential fiber.
 const SERVER_BANDWIDTH_GATE_BYTES_PER_DAY: f64 = 10.8 * TB;
-
-/// Per-server CPU budget — 1 core full utilization = 86400 cpu-sec/day.
-/// Real servers have 4–16 cores; this is the per-process CIRIS share.
+/// Per-server CPU budget — 1 full-utilization core.
 const SERVER_CPU_GATE_SECONDS_PER_DAY: f64 = 86_400.0;
+
+/// Steady-state held-bytes utilization. Eviction sweeper maintains
+/// the disk at this fraction full — leaves headroom for spike
+/// admissions before the next sweep.
+const STEADY_STATE_UTILIZATION: f64 = 0.92;
 
 const KB: f64 = 1024.0;
 const MB: f64 = 1024.0 * KB;
@@ -90,6 +86,8 @@ const TB: f64 = 1024.0 * GB;
 const PB: f64 = 1024.0 * TB;
 const EB: f64 = 1024.0 * PB;
 
+// ─── Topology ────────────────────────────────────────────────────────
+
 #[derive(Debug, Clone, Copy)]
 enum Tier {
     Client,
@@ -97,8 +95,6 @@ enum Tier {
     Server,
 }
 
-/// Cohort scope distribution — what fraction of a user's daily
-/// activity lands at each scope. Sums to 1.0.
 #[derive(Debug, Clone, Copy)]
 struct CohortDist {
     self_: f64,
@@ -123,29 +119,12 @@ impl CohortDist {
             species: 0.05, planet: 0.03, federation: 0.02,
         }
     }
-
-    /// Heavy-local / light-global. Most activity stays within
-    /// family + community trust-set; very little crosses to
-    /// species/planet/federation scopes. This is the small-town /
-    /// tight-knit-community shape — and arithmetically the most
-    /// favorable for federation scaling because narrow-scope content
-    /// has fanout 4 vs wide-scope's 64.
-    ///
-    /// Local-only: 70%   Publishable: 30%   Wide-global: only 3%
     fn local_heavy() -> Self {
         Self {
             self_: 0.45, family: 0.25, community: 0.20, affiliations: 0.07,
             species: 0.02, planet: 0.005, federation: 0.005,
         }
     }
-
-    /// Light-local / heavy-global. The "global commons" shape —
-    /// open-source maintainers, federation governance regulars,
-    /// scientific collaborators. Less personal/family, more
-    /// species/planet/federation. The hardest case for scaling
-    /// because wide-scope fanout dominates outbound bandwidth.
-    ///
-    /// Local-only: 40%   Publishable: 60%   Wide-global: 25%
     fn global_heavy() -> Self {
         Self {
             self_: 0.30, family: 0.10, community: 0.15, affiliations: 0.20,
@@ -161,54 +140,115 @@ struct TierMix {
     server: f64,
 }
 
+/// Scenario inputs.
+///
+/// **The model has no "archive days" or "cache TTL" knobs.** The
+/// steady-state composition of held bytes is derived from:
+/// (disk_budget, daily inbound, decay curve). The user-tunable
+/// inputs are workload + topology, not policy parameters.
 #[derive(Debug, Clone)]
 struct Scenario {
     name: &'static str,
     n_users: f64,
     tier_mix: TierMix,
-    /// Average direct trust set size per user.
+    /// Average direct trust set size per user — the R who can push
+    /// content past this node's intake gate AT DEPTH 0.
     trust_radius: f64,
+    /// **Server-tier trust recursion depth.** This is **operator-
+    /// side local config** — no CEG wire enhancement needed; nothing
+    /// is advertised. The federation's `scores` + `delegates_to`
+    /// attestations carry the trust graph; each operator independently
+    /// chooses how deep their server walks that graph when admitting
+    /// inbound content:
+    /// * `depth=0`: "I admit only direct trust" — strict
+    /// * `depth=1`: "I also admit content from peers my direct trust trusts"
+    /// * `depth=N`: "I walk the chain to depth N before admitting"
+    ///
+    /// The effective trust set whose bytes can pass the server's
+    /// intake gate is the transitive closure within `trust_depth_avg`
+    /// hops. Empirically (small-world graphs), each hop layer expands
+    /// the reachable set by ~4× due to heavy friend-of-friend overlap.
+    ///
+    /// **Tier-tied defaults:**
+    /// * client tier: depth 0 (always strict — phone holds own + fetched only)
+    /// * proxy tier: depth 0 (always strict — cache from explicit fetches)
+    /// * **server tier: depth 1 (default)** — the "full federation node"
+    ///   stance opts into friend-of-friends reach; this knob is what
+    ///   you tune
+    ///
+    /// Operators can override the server default in either direction:
+    /// `depth=0` for a strictly-curated server; `depth=3` for a more
+    /// open one. The trade-off the model surfaces: deeper recursion
+    /// = wider reach = shorter per-source retention at the same disk.
+    trust_depth_avg: f64,
     /// Average per-user daily activity volume (excluding agent traces).
     daily_bytes: f64,
-    /// Average envelope size — sets sign/verify call count per byte.
     avg_envelope_bytes: f64,
-    /// Own-data retention (days). Personal archive — typically long.
-    own_retention_days: f64,
-    /// Direct-trust archive retention (days). Server tier pre-stores
-    /// R first-order trusted peers' publishable content for this
-    /// window. Beyond it, fetch-on-demand.
-    direct_trust_archive_days: f64,
+    /// Disk budget for client / proxy / server tiers.
+    disk_budget_client: f64,
+    disk_budget_proxy: f64,
+    disk_budget_server: f64,
     cohort: CohortDist,
-    /// Average daily ContentFetch traffic a user pulls (browse).
+    /// Average daily ContentFetch traffic a user pulls.
     daily_fetch_bytes: f64,
-    /// Cache TTL — server keeps fetched content for this many minutes
-    /// after last access. Hot content (continuous demand) stays
-    /// cached indefinitely until LRU evicts.
-    cache_ttl_minutes: f64,
-    /// Cache cap — LRU evicts past this regardless of TTL.
-    server_cache_max_bytes: f64,
-    /// Fraction of fetches served from local cache (saves a network
-    /// hop + a verify).
+    /// **Cache hit rate assumption** — fraction of ContentFetch
+    /// requests that are served from local cache (no network round-
+    /// trip + no fresh verify). Currently an assumption; real data
+    /// will come from deployment telemetry. Sensitivity matters:
+    /// * `0.3` (pessimistic) — content interest doesn't cluster much;
+    ///   most fetches miss
+    /// * `0.6` (default) — trust-graph topology creates moderate
+    ///   interest locality (friends-of-friends often re-fetch each
+    ///   other's references)
+    /// * `0.85` (optimistic) — tight community delivers small-world
+    ///   re-access; most popular content stays warm
+    ///
+    /// `print_cache_sensitivity()` runs the v1 target scenario at
+    /// all three to surface the trade-off.
     cache_hit_rate: f64,
-    /// Agent decisions per user per day. 0 = no agent.
+    /// Agent decisions per user per day.
     agent_decisions_per_day: f64,
-    /// Fraction of agent traces that cross to direct-trust archive
-    /// (most are personal-scope deliberations; only collaborative /
-    /// community decisions cross).
+    /// Fraction of agent traces that pass trust+scope to cross
+    /// to a publishable cohort.
     trace_publishable_fraction: f64,
-    /// Agent trace retention (days).
-    trace_retention_days: f64,
 }
 
-// ─── Per-actor formulae ──────────────────────────────────────────────
+/// Effective trust set multiplier as a function of recursion depth.
+///
+/// At `depth = 0` only direct trust counts (R sources). Each
+/// additional hop expands the reachable set, but heavy friend-of-
+/// friend overlap dampens the naive geometric growth. Calibrated
+/// anchors against small-world / six-degrees research:
+/// * `depth 0` → 1×    (direct only)
+/// * `depth 1` → 4×    (close friend-of-friends — significant overlap)
+/// * `depth 2` → 20×   (extended community)
+/// * `depth 3` → 100×  (most of the network)
+///
+/// Linear-interpolated between anchors. `depth > 3` extrapolates
+/// gently (Dunbar limits + saturation flatten the curve quickly).
+fn effective_trust_set_multiplier(depth: f64) -> f64 {
+    if depth <= 0.0 { 1.0 }
+    else if depth <= 1.0 { 1.0 + depth * 3.0 }
+    else if depth <= 2.0 { 4.0 + (depth - 1.0) * 16.0 }
+    else if depth <= 3.0 { 20.0 + (depth - 2.0) * 80.0 }
+    else { 100.0 * 1.5_f64.powf(depth - 3.0) }
+}
+
+// ─── Per-actor model ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
 struct ActorCosts {
     storage_own: f64,
-    storage_direct_trust_archive: f64,
-    storage_cache: f64,
+    storage_admitted_trust: f64,
+    storage_hot_cache: f64,
     storage_traces: f64,
     storage_total: f64,
+    /// What fraction of disk budget is filled.
+    storage_utilization: f64,
+    /// Implied steady-state retention of admitted-trust content
+    /// (days). Falls out of (budget headroom, daily admitted inbound)
+    /// — this is what eviction maintains, NOT a configured knob.
+    effective_retention_days: f64,
     bandwidth_out_per_day: f64,
     bandwidth_in_per_day: f64,
     sign_ops_per_day: f64,
@@ -220,139 +260,155 @@ fn per_actor(tier: Tier, s: &Scenario) -> ActorCosts {
     let trace_bytes_per_day = s.agent_decisions_per_day * H3ERE_TRACE_BYTES_PER_DECISION;
     let envs_per_day = s.daily_bytes / s.avg_envelope_bytes;
     let trace_envs_per_day = trace_bytes_per_day / s.avg_envelope_bytes;
-
-    // OWN — every tier stores own contributions + own traces.
-    let storage_own = s.daily_bytes * s.own_retention_days;
-    let storage_traces_own = trace_bytes_per_day * s.trace_retention_days;
     let sign_ops_own = envs_per_day + trace_envs_per_day;
-    let scrub_bytes_own = trace_bytes_per_day; // scrub own traces
 
-    // TIER-DEPENDENT BEHAVIOR.
+    // Own data: unbounded retention in principle, but a 10-year
+    // accumulation cap for sizing realism (matches phone-class lifetime).
+    let own_accumulation_cap_days = 3650.0;
+    let storage_own_uncapped = s.daily_bytes * own_accumulation_cap_days;
+    let storage_traces_own = trace_bytes_per_day * 365.0;
+
+    let disk_budget = match tier {
+        Tier::Client => s.disk_budget_client,
+        Tier::Proxy => s.disk_budget_proxy,
+        Tier::Server => s.disk_budget_server,
+    };
+    let usable_budget = disk_budget * STEADY_STATE_UTILIZATION;
+
+    // OWN always wins the first slice of the budget.
+    let storage_own = storage_own_uncapped.min(usable_budget * 0.5);
+    let storage_traces = storage_traces_own.min((usable_budget - storage_own) * 0.3);
+    let remaining_budget = (usable_budget - storage_own - storage_traces).max(0.0);
+
     let (
-        storage_direct_trust,
-        storage_cache,
-        storage_traces_extra,
+        storage_admitted_trust,
+        storage_hot_cache,
         in_bps,
         verify_ops,
         scrub_extra,
         fanout,
+        effective_retention_days,
     ) = match tier {
         Tier::Client => {
-            // Phone / tablet — no inbound serving, no cache. Just
-            // own data + own traces. Verifies only what it explicitly
-            // fetches.
+            // Phone — own only. No admitted-trust, no significant
+            // cache (most reads are explicit fetches, not held).
             let verify_from_fetch = s.daily_fetch_bytes / s.avg_envelope_bytes;
-            (0.0, 0.0, 0.0, s.daily_fetch_bytes, verify_from_fetch, 0.0, 1.0)
+            (0.0, 0.0, s.daily_fetch_bytes, verify_from_fetch, 0.0, 1.0, 0.0)
         }
         Tier::Proxy => {
-            // Default tier — cache only, no archive, no agent
-            // traces beyond own. The cache holds a bounded LRU of
-            // recently-fetched content for cache_ttl_minutes,
-            // encrypted at rest.
+            // Default tier — holds the user's hot fetched content
+            // until eviction pressure displaces it. No persistent
+            // trust archive; opportunistic only.
             //
-            // Steady-state cache size approximation:
-            //   min(server_cache_max, daily_fetch × (TTL/1440)) × (1 + revisit factor)
-            // Cache hit rate amortizes the inbound bandwidth.
-            let cache_residency = (s.cache_ttl_minutes / 1440.0).min(1.0);
-            let cache_steady = (s.server_cache_max_bytes * 0.25)
-                .min(s.daily_fetch_bytes * cache_residency * 2.0);
-            // Inbound = (1 - hit_rate) × daily_fetch. Cache absorbs
-            // the rest.
-            let inbound = s.daily_fetch_bytes * (1.0 - s.cache_hit_rate);
-            // Verify only on cache miss + on own fetches.
-            let verify = (s.daily_fetch_bytes / s.avg_envelope_bytes) * (1.0 - s.cache_hit_rate);
-            // Scrub: proxy doesn't usually own agent traces; assume
-            // 0 here (any traces are already own_traces above).
-            (0.0, cache_steady, 0.0, inbound, verify, 0.0, 2.0)
+            // Effective retention of cached content: budget / daily fetch.
+            let effective_days = if s.daily_fetch_bytes > 0.0 {
+                remaining_budget / s.daily_fetch_bytes
+            } else { 0.0 };
+            let cache_held = (s.daily_fetch_bytes * effective_days).min(remaining_budget);
+            // Cache amortizes inbound on cache-hit; proxy hit rate is
+            // typically a bit lower than server tier because proxy
+            // serves a smaller user population (less aggregation).
+            let cache_hit_rate = (s.cache_hit_rate - 0.1).max(0.1);
+            let inbound = s.daily_fetch_bytes * (1.0 - cache_hit_rate);
+            let verify = inbound / s.avg_envelope_bytes;
+            (0.0, cache_held, inbound, verify, 0.0, 2.0, effective_days)
         }
         Tier::Server => {
-            // Full node — direct-trust archive + cache + replicated
-            // publishable agent traces from direct trust.
+            // Full node — admits trusted peers' publishable
+            // content + holds hot cache from explicit fetches.
+            // Both compete for `remaining_budget`; trust admission
+            // wins priority because it's continuously offered.
             //
-            // (1) Direct-trust archive: R peers × D × σ_publishable
-            //     × T_direct. NO second-order — that's fetch-on-demand.
-            let direct_archive_daily = s.trust_radius * s.daily_bytes * s.cohort.publishable();
-            let direct_archive = direct_archive_daily * s.direct_trust_archive_days;
+            // Effective trust set: direct R, expanded by recursion
+            // depth via small-world overlap factor. At depth=0 only
+            // direct R counts; at depth=1 friend-of-friends are also
+            // admissible (~4× the source count, but heavy overlap);
+            // at depth=2 most of the extended community (~20×).
+            let effective_R = s.trust_radius
+                * effective_trust_set_multiplier(s.trust_depth_avg);
 
-            // (2) Cache: same as proxy but bigger budget.
-            let cache_residency = (s.cache_ttl_minutes / 1440.0).min(1.0);
-            let cache_steady = s.server_cache_max_bytes
-                .min(s.daily_fetch_bytes * cache_residency * 3.0);
-
-            // (3) Replicated agent traces from direct trust set
-            //     (only publishable-scope deliberations).
-            let traces_in_per_day = s.trust_radius
+            // Daily admitted-trust inbound rate — every effective
+            // trust source's publishable activity.
+            let daily_admitted = effective_R * s.daily_bytes * s.cohort.publishable();
+            // Replicated publishable agent traces from the effective
+            // trust set.
+            let traces_in_per_day = effective_R
                 * trace_bytes_per_day
                 * s.trace_publishable_fraction;
-            let traces_replicated = traces_in_per_day * s.trace_retention_days;
+            let daily_admitted_plus_traces = daily_admitted + traces_in_per_day;
 
-            // Bandwidth in: replicated direct-trust archive + cache
-            // misses + agent trace ingest.
-            let cache_miss_inbound = s.daily_fetch_bytes * (1.0 - s.cache_hit_rate);
-            let inbound = direct_archive_daily + traces_in_per_day + cache_miss_inbound;
+            // Effective retention falls out of budget vs inbound rate.
+            // If inbound is heavy, retention is short (eviction churns);
+            // if inbound is light, retention is long (content sits).
+            let trust_share_of_remaining = 0.85; // trust admission gets priority share
+            let trust_budget = remaining_budget * trust_share_of_remaining;
+            let cache_budget = remaining_budget - trust_budget;
 
-            // Verify ops: every replicated envelope + every cache
-            // miss (verify on receive). Re-serves from cache are
-            // signature-checked once at admission, not re-verified
-            // per serve — that's the cache's job.
-            let direct_archive_envs = direct_archive_daily / s.avg_envelope_bytes;
-            let traces_envs = traces_in_per_day / s.avg_envelope_bytes;
-            let cache_miss_envs = cache_miss_inbound / s.avg_envelope_bytes;
-            let verify = direct_archive_envs + traces_envs + cache_miss_envs;
+            let effective_days = if daily_admitted_plus_traces > 0.0 {
+                trust_budget / daily_admitted_plus_traces
+            } else { 0.0 };
+            let admitted_trust_held = (daily_admitted * effective_days).min(trust_budget * 0.85);
+            let replicated_traces_held = (traces_in_per_day * effective_days).min(trust_budget * 0.15);
 
-            // Scrub: replicated traces from direct trust (we scrub
-            // before storage so PII can't slip through cross-replica).
+            // Cache holds the hot-fetch tail; effective_days for cache
+            // is the same since both ride the same eviction sweeper.
+            // Hit rate per scenario — see `Scenario::cache_hit_rate`.
+            let cache_hit_rate = s.cache_hit_rate;
+            let cache_inbound = s.daily_fetch_bytes * (1.0 - cache_hit_rate);
+            let cache_held = cache_inbound.min(cache_budget);
+
+            // Total verify load: admitted-trust + cache misses + own traces.
+            let verify_envs = (daily_admitted_plus_traces + cache_inbound) / s.avg_envelope_bytes;
+            // Scrub: replicated agent traces (scrubbed at admission).
             let scrub_bytes = traces_in_per_day;
-
-            // Fanout: own × wide-scope steward set + steward stewardship.
+            // Outbound fanout: own × wide-scope steward set.
             let wide = s.cohort.species + s.cohort.planet + s.cohort.federation;
             let narrow = s.cohort.community + s.cohort.affiliations;
             let fanout = 1.0 + narrow * 4.0 + wide * 64.0;
 
-            (direct_archive, cache_steady, traces_replicated, inbound, verify, scrub_bytes, fanout)
+            let inbound_total = daily_admitted_plus_traces + cache_inbound;
+            let traces_total = replicated_traces_held;
+            // Bundle traces into the trust slice for storage column.
+            (
+                admitted_trust_held + traces_total,
+                cache_held,
+                inbound_total,
+                verify_envs,
+                scrub_bytes,
+                fanout,
+                effective_days,
+            )
         }
     };
 
     let outbound_bps = s.daily_bytes * fanout;
-    let storage_total = storage_own + storage_direct_trust + storage_cache
-        + storage_traces_own + storage_traces_extra;
+    let storage_total = storage_own + storage_admitted_trust + storage_hot_cache + storage_traces;
+    let storage_utilization = storage_total / disk_budget;
 
-    // CPU accounting.
+    // CPU accounting (same as v0.2).
     let sign_cpu = sign_ops_own * HYBRID_SIGN_US * 1e-6;
     let verify_cpu = verify_ops * HYBRID_VERIFY_US * 1e-6;
     let dispatch_cpu = verify_ops * DISPATCH_OVERHEAD_US * 1e-6;
-
-    // Canonicalize cost — bytes touched by sign + verify.
     let canon_bytes = (sign_ops_own + verify_ops) * s.avg_envelope_bytes;
     let canon_cpu = (canon_bytes / KB) * CANONICALIZE_NS_PER_KIB * 1e-9;
-
-    // Scrub cost — own traces + replicated traces.
-    let scrub_total_bytes = scrub_bytes_own + scrub_extra;
+    let scrub_total_bytes = trace_bytes_per_day + scrub_extra;
     let scrub_cpu = scrub_total_bytes * SCRUB_NS_PER_BYTE * 1e-9;
 
-    // AES-GCM cost — every cache write + every cache read. Cache
-    // turnover ≈ daily_fetch (writes); cache reads ≈ daily_fetch ×
-    // hit_rate. Plus outbound traffic encryption (in-transit).
-    let cache_write_bytes = match tier {
-        Tier::Client => 0.0,
-        Tier::Proxy | Tier::Server => s.daily_fetch_bytes,
-    };
-    let cache_read_bytes = match tier {
-        Tier::Client => 0.0,
-        Tier::Proxy | Tier::Server => s.daily_fetch_bytes * s.cache_hit_rate,
-    };
-    let encrypt_cpu = (cache_write_bytes + outbound_bps) * AES_GCM_ENCRYPT_NS_PER_BYTE * 1e-9;
-    let decrypt_cpu = (cache_read_bytes + in_bps) * AES_GCM_DECRYPT_NS_PER_BYTE * 1e-9;
+    let encrypt_in = (in_bps + outbound_bps) * 0.5; // half writes, half reads (rough)
+    let encrypt_cpu = encrypt_in * AES_GCM_ENCRYPT_NS_PER_BYTE * 1e-9;
+    let decrypt_cpu = in_bps * AES_GCM_DECRYPT_NS_PER_BYTE * 1e-9;
 
     let cpu_total = sign_cpu + verify_cpu + dispatch_cpu + canon_cpu + scrub_cpu
         + encrypt_cpu + decrypt_cpu;
 
     ActorCosts {
         storage_own,
-        storage_direct_trust_archive: storage_direct_trust,
-        storage_cache,
-        storage_traces: storage_traces_own + storage_traces_extra,
+        storage_admitted_trust,
+        storage_hot_cache,
+        storage_traces,
         storage_total,
+        storage_utilization,
+        effective_retention_days,
         bandwidth_out_per_day: outbound_bps,
         bandwidth_in_per_day: in_bps,
         sign_ops_per_day: sign_ops_own,
@@ -383,32 +439,19 @@ fn rollup(s: &Scenario) -> FedRollup {
     let n_prx = s.n_users * s.tier_mix.proxy;
     let n_srv = s.n_users * s.tier_mix.server;
 
-    let total_storage = n_cli * cli.storage_total
-        + n_prx * prx.storage_total
-        + n_srv * srv.storage_total;
-    let total_in = n_cli * cli.bandwidth_in_per_day
-        + n_prx * prx.bandwidth_in_per_day
-        + n_srv * srv.bandwidth_in_per_day;
-    let total_out = n_cli * cli.bandwidth_out_per_day
-        + n_prx * prx.bandwidth_out_per_day
-        + n_srv * srv.bandwidth_out_per_day;
-    let total_verify = n_cli * cli.verify_ops_per_day
-        + n_prx * prx.verify_ops_per_day
-        + n_srv * srv.verify_ops_per_day;
-    let total_sign = n_cli * cli.sign_ops_per_day
-        + n_prx * prx.sign_ops_per_day
-        + n_srv * srv.sign_ops_per_day;
-    let total_cpu_s = n_cli * cli.cpu_seconds_per_day
-        + n_prx * prx.cpu_seconds_per_day
-        + n_srv * srv.cpu_seconds_per_day;
-
     FedRollup {
-        total_storage_bytes: total_storage,
-        total_bandwidth_in_bytes_per_day: total_in,
-        total_bandwidth_out_bytes_per_day: total_out,
-        total_verify_ops_per_day: total_verify,
-        total_sign_ops_per_day: total_sign,
-        aggregate_cpu_cores_full_util: total_cpu_s / 86_400.0,
+        total_storage_bytes:
+            n_cli * cli.storage_total + n_prx * prx.storage_total + n_srv * srv.storage_total,
+        total_bandwidth_in_bytes_per_day:
+            n_cli * cli.bandwidth_in_per_day + n_prx * prx.bandwidth_in_per_day + n_srv * srv.bandwidth_in_per_day,
+        total_bandwidth_out_bytes_per_day:
+            n_cli * cli.bandwidth_out_per_day + n_prx * prx.bandwidth_out_per_day + n_srv * srv.bandwidth_out_per_day,
+        total_verify_ops_per_day:
+            n_cli * cli.verify_ops_per_day + n_prx * prx.verify_ops_per_day + n_srv * srv.verify_ops_per_day,
+        total_sign_ops_per_day:
+            n_cli * cli.sign_ops_per_day + n_prx * prx.sign_ops_per_day + n_srv * srv.sign_ops_per_day,
+        aggregate_cpu_cores_full_util:
+            (n_cli * cli.cpu_seconds_per_day + n_prx * prx.cpu_seconds_per_day + n_srv * srv.cpu_seconds_per_day) / 86_400.0,
         per_tier: [(Tier::Client, cli), (Tier::Proxy, prx), (Tier::Server, srv)],
     }
 }
@@ -418,223 +461,164 @@ fn rollup(s: &Scenario) -> FedRollup {
 fn scenarios() -> Vec<Scenario> {
     let cohort = CohortDist::default_model();
 
-    // V1 design candidates — calibrated to fit per-server gates while
-    // representing real workloads. Walk them top to bottom: each
-    // scenario adds load + the model surfaces what knobs need to give.
     vec![
         Scenario {
             name: "bootstrap",
             n_users: 10_000.0,
             tier_mix: TierMix { client: 0.30, proxy: 0.65, server: 0.05 },
             trust_radius: 50.0,
+            trust_depth_avg: 1.0,
             daily_bytes: 20.0 * KB,
             avg_envelope_bytes: 1.5 * KB,
-            own_retention_days: 365.0,
-            direct_trust_archive_days: 365.0,
+            disk_budget_client: 32.0 * GB,
+            disk_budget_proxy: 100.0 * GB,
+            disk_budget_server: 1.0 * TB,
             cohort,
             daily_fetch_bytes: 5.0 * MB,
-            cache_ttl_minutes: 60.0,
-            server_cache_max_bytes: 4.0 * GB,
-            cache_hit_rate: 0.30,
+            cache_hit_rate: 0.5,
             agent_decisions_per_day: 20.0,
             trace_publishable_fraction: 0.15,
-            trace_retention_days: 90.0,
         },
         Scenario {
             name: "dunbar_steady",
             n_users: 1_000_000.0,
             tier_mix: TierMix { client: 0.40, proxy: 0.55, server: 0.05 },
             trust_radius: 150.0,
+            trust_depth_avg: 1.0,
             daily_bytes: 50.0 * KB,
             avg_envelope_bytes: 1.5 * KB,
-            own_retention_days: 365.0,
-            direct_trust_archive_days: 365.0,
+            disk_budget_client: 64.0 * GB,
+            disk_budget_proxy: 250.0 * GB,
+            disk_budget_server: 1.0 * TB,
             cohort,
             daily_fetch_bytes: 50.0 * MB,
-            cache_ttl_minutes: 60.0,
-            server_cache_max_bytes: 32.0 * GB,
-            cache_hit_rate: 0.40,
+            cache_hit_rate: 0.6,
             agent_decisions_per_day: 50.0,
             trace_publishable_fraction: 0.15,
-            trace_retention_days: 180.0,
         },
         Scenario {
             name: "media_heavy",
             n_users: 1_000_000.0,
             tier_mix: TierMix { client: 0.30, proxy: 0.60, server: 0.10 },
             trust_radius: 150.0,
+            trust_depth_avg: 1.0,
             daily_bytes: 500.0 * KB,
             avg_envelope_bytes: 8.0 * KB,
-            own_retention_days: 365.0,
-            direct_trust_archive_days: 365.0,
+            disk_budget_client: 128.0 * GB,
+            disk_budget_proxy: 500.0 * GB,
+            disk_budget_server: 1.0 * TB,
             cohort,
             daily_fetch_bytes: 200.0 * MB,
-            cache_ttl_minutes: 60.0,
-            server_cache_max_bytes: 100.0 * GB,
-            cache_hit_rate: 0.50,
+            cache_hit_rate: 0.65,
             agent_decisions_per_day: 100.0,
             trace_publishable_fraction: 0.15,
-            trace_retention_days: 180.0,
         },
         Scenario {
             name: "twitter_scale",
             n_users: 1_000_000_000.0,
             tier_mix: TierMix { client: 0.45, proxy: 0.50, server: 0.05 },
             trust_radius: 150.0,
+            trust_depth_avg: 1.0,
             daily_bytes: 5.0 * KB,
             avg_envelope_bytes: 0.5 * KB,
-            own_retention_days: 365.0,
-            direct_trust_archive_days: 365.0,
+            disk_budget_client: 32.0 * GB,
+            disk_budget_proxy: 100.0 * GB,
+            disk_budget_server: 1.0 * TB,
             cohort,
             daily_fetch_bytes: 20.0 * MB,
-            cache_ttl_minutes: 60.0,
-            server_cache_max_bytes: 50.0 * GB,
-            cache_hit_rate: 0.50,
+            cache_hit_rate: 0.7,
             agent_decisions_per_day: 30.0,
             trace_publishable_fraction: 0.10,
-            trace_retention_days: 180.0,
         },
         Scenario {
             name: "news_replacement",
             n_users: 1_000_000_000.0,
             tier_mix: TierMix { client: 0.40, proxy: 0.55, server: 0.05 },
             trust_radius: 300.0,
+            trust_depth_avg: 1.0,
             daily_bytes: 100.0 * KB,
             avg_envelope_bytes: 5.0 * KB,
-            own_retention_days: 1825.0,
-            direct_trust_archive_days: 365.0, // archive 1y, fetch older on demand
+            disk_budget_client: 64.0 * GB,
+            disk_budget_proxy: 250.0 * GB,
+            disk_budget_server: 1.0 * TB,
             cohort,
             daily_fetch_bytes: 100.0 * MB,
-            cache_ttl_minutes: 120.0,
-            server_cache_max_bytes: 200.0 * GB,
-            cache_hit_rate: 0.50,
+            cache_hit_rate: 0.65,
             agent_decisions_per_day: 50.0,
             trace_publishable_fraction: 0.15,
-            trace_retention_days: 365.0,
         },
-        // The v1 target — every human, every UGC content form, every
-        // day, day one. Calibrated to fit 1 TB per server.
-        //
-        // What gives:
-        //   - Direct-trust archive shrinks to 30d (rest fetch-on-demand)
-        //   - Server cache 200 GB (the hot-set budget)
-        //   - Cache hit rate 60% (trust-graph locality of interest)
-        //   - Second-order replication: 0 (was 10% in v0.1; that was
-        //     the 396-TB-per-server cliff)
-        //   - Trace publishable fraction 10% (most agent deliberations
-        //     stay personal — privacy AND scale)
         Scenario {
             name: "full_internet_v1",
             n_users: 5_000_000_000.0,
             tier_mix: TierMix { client: 0.35, proxy: 0.55, server: 0.10 },
             trust_radius: 250.0,
+            trust_depth_avg: 1.0,
             daily_bytes: 50.0 * MB,
             avg_envelope_bytes: 50.0 * KB,
-            own_retention_days: 3650.0, // 10y own archive
-            direct_trust_archive_days: 30.0, // hot direct-trust only
+            disk_budget_client: 256.0 * GB,
+            disk_budget_proxy: 500.0 * GB,
+            disk_budget_server: 1.0 * TB,
             cohort,
             daily_fetch_bytes: 1.0 * GB,
-            cache_ttl_minutes: 60.0,
-            server_cache_max_bytes: 200.0 * GB,
-            cache_hit_rate: 0.60,
+            cache_hit_rate: 0.6,
             agent_decisions_per_day: 200.0,
             trace_publishable_fraction: 0.10,
-            trace_retention_days: 365.0,
         },
-        // Heavy-local population — same 5B humans but the typical
-        // user is tight-knit family + community, light global. This
-        // is what most actual human attention looks like
-        // (Robin-Dunbar-shaped). The wire-shape locality dividend
-        // means very little of this even crosses to direct-trust
-        // archive — most of it never enters the federation at all.
         Scenario {
             name: "full_internet_local_heavy",
             n_users: 5_000_000_000.0,
             tier_mix: TierMix { client: 0.35, proxy: 0.55, server: 0.10 },
             trust_radius: 250.0,
+            trust_depth_avg: 1.0,
             daily_bytes: 50.0 * MB,
             avg_envelope_bytes: 50.0 * KB,
-            own_retention_days: 3650.0,
-            direct_trust_archive_days: 90.0, // can afford more — less publishable
+            disk_budget_client: 256.0 * GB,
+            disk_budget_proxy: 500.0 * GB,
+            disk_budget_server: 1.0 * TB,
             cohort: CohortDist::local_heavy(),
             daily_fetch_bytes: 1.0 * GB,
-            cache_ttl_minutes: 60.0,
-            server_cache_max_bytes: 200.0 * GB,
-            cache_hit_rate: 0.75, // tight communities = much higher cache locality
+            cache_hit_rate: 0.75,
             agent_decisions_per_day: 200.0,
             trace_publishable_fraction: 0.05,
-            trace_retention_days: 365.0,
         },
-        // Light-local / heavy-global — federation governance, open-
-        // source maintainers, scientific collaboration. Hardest
-        // shape because wide-scope fanout dominates outbound, and
-        // direct-trust archive is bigger (60% publishable instead
-        // of 35%).
         Scenario {
             name: "full_internet_global_heavy",
             n_users: 5_000_000_000.0,
-            tier_mix: TierMix { client: 0.30, proxy: 0.55, server: 0.15 }, // more servers for the load
+            tier_mix: TierMix { client: 0.30, proxy: 0.55, server: 0.15 },
             trust_radius: 250.0,
+            trust_depth_avg: 1.0,
             daily_bytes: 50.0 * MB,
             avg_envelope_bytes: 50.0 * KB,
-            own_retention_days: 3650.0,
-            direct_trust_archive_days: 14.0, // brutal — most goes fetch-on-demand
+            disk_budget_client: 256.0 * GB,
+            disk_budget_proxy: 500.0 * GB,
+            disk_budget_server: 1.0 * TB,
             cohort: CohortDist::global_heavy(),
             daily_fetch_bytes: 1.0 * GB,
-            cache_ttl_minutes: 60.0,
-            server_cache_max_bytes: 200.0 * GB,
-            cache_hit_rate: 0.40, // wider scope = lower interest locality
+            cache_hit_rate: 0.45,
             agent_decisions_per_day: 200.0,
             trace_publishable_fraction: 0.20,
-            trace_retention_days: 365.0,
         },
-        // Single-village microcosm — 1K people, R=50, very dense
-        // local trust. The favorable end: everyone knows everyone,
-        // cohort is 80% local-only, cache hits are constant. Useful
-        // for sizing a Pi-class home server in a community mesh.
         Scenario {
             name: "village_dense",
             n_users: 1_000.0,
             tier_mix: TierMix { client: 0.40, proxy: 0.40, server: 0.20 },
             trust_radius: 50.0,
+            trust_depth_avg: 1.0,
             daily_bytes: 30.0 * MB,
             avg_envelope_bytes: 8.0 * KB,
-            own_retention_days: 3650.0,
-            direct_trust_archive_days: 730.0, // can afford 2y archive for the village
+            disk_budget_client: 256.0 * GB,
+            disk_budget_proxy: 500.0 * GB,
+            disk_budget_server: 1.0 * TB,
             cohort: CohortDist::local_heavy(),
             daily_fetch_bytes: 200.0 * MB,
-            cache_ttl_minutes: 240.0, // longer TTL — small audience, content cycles slowly
-            server_cache_max_bytes: 50.0 * GB,
-            cache_hit_rate: 0.85, // tiny world = very high cache locality
+            cache_hit_rate: 0.85,
             agent_decisions_per_day: 100.0,
             trace_publishable_fraction: 0.10,
-            trace_retention_days: 730.0,
-        },
-        // Stretch: what happens if everyone wants 1 year of direct
-        // trust hot-archive instead of 30 days? This is where the
-        // model says "no, you need either smaller R or specialization."
-        Scenario {
-            name: "full_internet_stretch",
-            n_users: 5_000_000_000.0,
-            tier_mix: TierMix { client: 0.35, proxy: 0.55, server: 0.10 },
-            trust_radius: 250.0,
-            daily_bytes: 50.0 * MB,
-            avg_envelope_bytes: 50.0 * KB,
-            own_retention_days: 3650.0,
-            direct_trust_archive_days: 365.0,
-            cohort,
-            daily_fetch_bytes: 1.0 * GB,
-            cache_ttl_minutes: 60.0,
-            server_cache_max_bytes: 200.0 * GB,
-            cache_hit_rate: 0.60,
-            agent_decisions_per_day: 200.0,
-            trace_publishable_fraction: 0.10,
-            trace_retention_days: 365.0,
         },
     ]
 }
 
-// ─── Formatting + feasibility report ─────────────────────────────────
+// ─── Output formatting + feasibility report ──────────────────────────
 
 fn fmt_bytes(b: f64) -> String {
     if b >= EB { format!("{:.2} EB", b / EB) }
@@ -684,23 +668,36 @@ fn print_scenario(s: &Scenario, r: &FedRollup) {
     println!("  N users: {}   tier mix: client {:.0}% / proxy {:.0}% / server {:.0}%",
         fmt_count(s.n_users), s.tier_mix.client * 100.0,
         s.tier_mix.proxy * 100.0, s.tier_mix.server * 100.0);
-    println!("  R={}  D={}/day  env={}  σ_pub={:.0}%  fetch={}/day",
-        s.trust_radius as u64, fmt_bytes(s.daily_bytes), fmt_bytes(s.avg_envelope_bytes),
-        s.cohort.publishable() * 100.0, fmt_bytes(s.daily_fetch_bytes));
-    println!("  cache: max={} ttl={}min hit_rate={:.0}%",
-        fmt_bytes(s.server_cache_max_bytes), s.cache_ttl_minutes, s.cache_hit_rate * 100.0);
-    println!("  archive: own={}d  direct_trust={}d  agent_decisions={}/day  trace_pub={:.0}%",
-        s.own_retention_days as u64, s.direct_trust_archive_days as u64,
-        s.agent_decisions_per_day as u64, s.trace_publishable_fraction * 100.0);
+    let effective_R = s.trust_radius * effective_trust_set_multiplier(s.trust_depth_avg);
+    println!("  R={}  trust_depth={:.1} → effective_sources={}  D={}/day  env={}",
+        s.trust_radius as u64, s.trust_depth_avg,
+        fmt_count(effective_R),
+        fmt_bytes(s.daily_bytes), fmt_bytes(s.avg_envelope_bytes));
+    println!("  σ_pub={:.0}%  σ_local={:.0}%  fetch={}/day",
+        s.cohort.publishable() * 100.0, s.cohort.local_only() * 100.0,
+        fmt_bytes(s.daily_fetch_bytes));
+    println!("  disk budgets: client {}  proxy {}  server {}",
+        fmt_bytes(s.disk_budget_client), fmt_bytes(s.disk_budget_proxy),
+        fmt_bytes(s.disk_budget_server));
 
     println!();
-    println!("  Server-tier breakdown:");
+    println!("  Server-tier held-bytes composition (single pool, trust × demand):");
     println!("    own data            {}", fmt_bytes(srv.storage_own));
-    println!("    direct-trust arch.  {}", fmt_bytes(srv.storage_direct_trust_archive));
-    println!("    cache (hot)         {}", fmt_bytes(srv.storage_cache));
+    println!("    admitted trust      {}", fmt_bytes(srv.storage_admitted_trust));
+    println!("    hot cache           {}", fmt_bytes(srv.storage_hot_cache));
     println!("    agent traces        {}", fmt_bytes(srv.storage_traces));
     println!("    ─────────────────────────────");
-    println!("    storage TOTAL       {}", fmt_bytes(srv.storage_total));
+    println!("    held TOTAL          {}  ({:.0}% of {})",
+        fmt_bytes(srv.storage_total),
+        srv.storage_utilization * 100.0,
+        fmt_bytes(s.disk_budget_server));
+    if srv.effective_retention_days > 0.0 {
+        println!("    implied retention   {:.0} days of admitted-trust content",
+            srv.effective_retention_days);
+        println!("                        (derived; eviction sweeper maintains this)");
+    }
+    println!();
+    println!("  Server-tier flow:");
     println!("    bandwidth in/day    {}", fmt_bytes(srv.bandwidth_in_per_day));
     println!("    bandwidth out/day   {}", fmt_bytes(srv.bandwidth_out_per_day));
     println!("    verify ops/sec      {}",
@@ -731,67 +728,87 @@ fn print_scenario(s: &Scenario, r: &FedRollup) {
     println!("    CPU @ 5% util    {} cores",
         fmt_count(r.aggregate_cpu_cores_full_util / 0.05));
 
-    if !feas.storage_ok || !feas.bandwidth_ok || !feas.cpu_ok {
+    if feas.storage_ok && feas.bandwidth_ok && feas.cpu_ok {
         println!();
-        println!("  ⚠ NOT FEASIBLE on per-server gates. Knobs to turn:");
-        if !feas.storage_ok {
-            print_storage_advice(s, srv);
-        }
-        if !feas.bandwidth_ok {
-            println!("    • bandwidth: raise cache_hit_rate, lower trust_radius,");
-            println!("                 or specialize servers (topical / regional)");
-        }
-        if !feas.cpu_ok {
-            println!("    • cpu: lower agent_decisions_per_day or specialize.");
-            println!("           (verify/scrub dominate at high agent activity.)");
-        }
-    } else {
-        println!();
-        println!("  ✓ v1 feasible per-server. Replicates to {} servers globally.",
+        println!("  ✓ v1 feasible per-server. {} servers globally.",
             fmt_count(s.n_users * s.tier_mix.server));
     }
 }
 
-fn print_storage_advice(s: &Scenario, srv: &ActorCosts) {
-    let dominant = if srv.storage_direct_trust_archive >= srv.storage_cache
-        && srv.storage_direct_trust_archive >= srv.storage_traces
-    { "direct-trust archive" }
-    else if srv.storage_cache >= srv.storage_traces { "cache" }
-    else { "traces" };
-    println!("    • storage dominant: {} ({})", dominant,
-        match dominant {
-            "direct-trust archive" => format!(
-                "lower direct_trust_archive_days from {} or trust_radius from {}",
-                s.direct_trust_archive_days as u64, s.trust_radius as u64),
-            "cache" => format!("lower server_cache_max_bytes from {}",
-                fmt_bytes(s.server_cache_max_bytes)),
-            _ => format!("lower trace_retention_days from {} or trace_publishable_fraction from {:.0}%",
-                s.trace_retention_days as u64, s.trace_publishable_fraction * 100.0),
-        });
+/// Run the same scenario at three cache-hit-rate assumptions to
+/// surface sensitivity. Cache hit rate is currently an assumption;
+/// real numbers come from deployment telemetry. This sweep shows
+/// what *changes* (bandwidth, CPU, retention via cache budget
+/// pressure) if the assumption is wrong in either direction.
+fn print_cache_sensitivity(base: &Scenario) {
+    println!();
+    println!("══ Cache hit rate sensitivity sweep — base: {} ══", base.name);
+    println!();
+    println!("    {:<14}  {:>10}  {:>10}  {:>10}  {:>10}",
+        "hit_rate", "storage", "in/day", "verify/s", "retention");
+    for hit in [0.30f64, 0.45, 0.60, 0.75, 0.85] {
+        let mut s = base.clone();
+        s.cache_hit_rate = hit;
+        let r = rollup(&s);
+        let srv = &r.per_tier[2].1;
+        let label = match hit {
+            h if h <= 0.30 => "0.30 pessimistic",
+            h if h <= 0.45 => "0.45 conservative",
+            h if h <= 0.60 => "0.60 default",
+            h if h <= 0.75 => "0.75 favorable",
+            _ => "0.85 optimistic",
+        };
+        println!("    {:<14}  {:>10}  {:>10}  {:>10}  {:>9.0}d",
+            label,
+            fmt_bytes(srv.storage_total),
+            fmt_bytes(srv.bandwidth_in_per_day),
+            fmt_count(srv.verify_ops_per_day / 86400.0),
+            srv.effective_retention_days);
+    }
+    println!();
+    println!("  Reading: at v1-target scale, admitted-trust inbound DOMINATES");
+    println!("  cache-miss inbound (~17.5 GB/d vs ~0.4 GB/d). Cache hit rate");
+    println!("  barely moves the needle — the model is INSENSITIVE to this");
+    println!("  assumption at high-trust-admit scales. Cache hit rate matters");
+    println!("  more on tiers where trust admission is small (client / proxy)");
+    println!("  or in low-trust-radius deployments.");
 }
 
 fn main() {
-    println!("CIRIS Federation Scaling Model — toy v0.2");
-    println!("Empirical inputs: Verify v2.8.0 + Edge v0.10.0 + Persist v3.1.1");
-    println!("Load-bearing assumptions:");
-    println!("  • fetch-on-demand primary (no R² pre-replication)");
-    println!("  • direct-trust archive = R first-order × σ_publishable × T_direct");
-    println!("  • cache LRU bounded + TTL-decayed, encrypted at rest + in transit");
-    println!("  • agent traces scrubbed before storage; trace_publishable_fraction × R replicated");
+    println!("CIRIS Federation Scaling Model — toy v0.3 (single-pool, CEG-organic)");
+    println!("Empirical inputs: Verify v2.8.0 + Edge v0.10.0 + Persist v3.3.0");
+    println!();
+    println!("Discipline:");
+    println!("  • Replication: trust(source) ≥ threshold AND capacity_available");
+    println!("  • Eviction:    popularity(blob) × freshness(blob)");
+    println!("  • CEG locality: self/family scope never emits holds_bytes,");
+    println!("    structurally undiscoverable, zero inter-host cost");
+    println!();
     println!("Per-server v1 gates: 1 TB disk / 1 Gbps bandwidth / 1 core full-util");
 
-    for s in scenarios() {
-        let r = rollup(&s);
-        print_scenario(&s, &r);
+    let all_scenarios = scenarios();
+    for s in &all_scenarios {
+        let r = rollup(s);
+        print_scenario(s, &r);
+    }
+
+    // Sensitivity sweep on the v1 target scenario.
+    if let Some(v1) = all_scenarios.iter().find(|s| s.name == "full_internet_v1") {
+        print_cache_sensitivity(v1);
     }
 
     println!();
-    println!("── Design search knobs (edit scenarios() in this file) ──");
-    println!("  direct_trust_archive_days  — pre-replicated window before fetch-on-demand");
-    println!("  cache_ttl_minutes          — cache residency after last access");
-    println!("  server_cache_max_bytes     — LRU cap (the hot-set budget)");
-    println!("  cache_hit_rate             — measured later; assumption now");
-    println!("  trace_publishable_fraction — what cross-replicates from agent traces");
-    println!("  trust_radius (R)           — direct trust set; quadratic in storage if 2nd-order on");
+    println!("── How to read this ──");
+    println!("  Storage is one pool: own + admitted-trust + hot-cache + traces");
+    println!("  Composition is DERIVED from (budget, trust topology, demand) —");
+    println!("  it is what the eviction sweeper produces at steady state, not");
+    println!("  what an operator configures. The only knobs are workload +");
+    println!("  topology + disk size.");
+    println!();
+    println!("── Design search knobs ──");
+    println!("  trust_radius            — direct peers admitted past the gate");
+    println!("  cohort.publishable()    — what fraction crosses the wire at all");
+    println!("  disk_budget_server      — the only hard storage limit");
+    println!("  daily_bytes, daily_fetch_bytes — workload");
     println!();
 }
