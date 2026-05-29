@@ -1151,6 +1151,20 @@ pub enum IngestError {
     /// Blog requires a non-empty post_title.
     #[error("post_title must be non-empty for blog_post")]
     EmptyPostTitle,
+    /// `BlobStorage::put_blob_signing` rejected the write — hash
+    /// mismatch, inline size cap exceeded, FK violation on
+    /// `attesting_key_id`, or signer error.
+    #[error("put_blob: {0}")]
+    PutBlob(String),
+    /// Envelope canonicalization or signing failed during
+    /// [`crate::sign::build_contribution`].
+    #[error("build_envelope: {0}")]
+    BuildEnvelope(String),
+    /// `NodeCoreService::put_contribution` rejected the typed write —
+    /// signature verification, conflict on contribution_id,
+    /// authorization, or backend error.
+    #[error("put_contribution: {0}")]
+    PutContribution(String),
 }
 
 fn compute_sha256(bytes: &[u8]) -> [u8; 32] {
@@ -1172,6 +1186,332 @@ fn hex_encode(bytes: &[u8; 32]) -> String {
         out.push(char::from_digit((b & 0xf) as u32, 16).unwrap());
     }
     out
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// Phase 2B I/O layer — full sign + put_blob + put_contribution sequence
+//
+// The pure `build_*_payload` builders above produce the wire JSON.
+// The functions below add the side effects:
+//   1. compute content_sha256 over body_bytes
+//   2. persist's `put_blob_signing` — atomic blob commit + holds_bytes
+//      attestation (CIRISPersist#121 v3.3.0; persist owns the
+//      canonicalizer to avoid the JCS-vs-Python silent-correctness trap)
+//   3. build the Contribution envelope (sub_kind discriminated via
+//      payload, ContributionType is always `Proposal` for external_content)
+//   4. sign the envelope via `LocalSignerAdapter` (the host's own
+//      `LocalSigner` — no proxy-signing; observation/witness claims
+//      about third parties live in the payload, not in the envelope
+//      identity)
+//   5. `NodeCoreService::put_contribution` — typed write, verify +
+//      insert
+//
+// Per the v0.2 scaling-model discipline: this path produces the wire
+// artifacts CEG's replication primitives flow on. The substrate
+// (persist + edge) then decides where the bytes propagate based on
+// trust × capacity + popularity × freshness. Node-core's job ends
+// at `put_contribution` returning Ok.
+// ───────────────────────────────────────────────────────────────────────
+
+use std::sync::Arc;
+
+use ciris_persist::cirisnode::NodeCoreService;
+use ciris_persist::federation::{BlobBody, BlobStorage};
+use ciris_persist::signing::{LocalSigner, LocalSignerHardwareAdapter};
+
+use crate::sign::{build_contribution, LocalSignerAdapter};
+use crate::substrate::{Cell, ContributionType};
+
+/// Injected substrate handles + signer for the full ingest path.
+///
+/// Per CIRISNodeCore#4: node-core NEVER constructs the substrate. The
+/// host process owns `Engine` (persist) + `Edge`, hands node-core
+/// these references via the cohabitation install path, and node-core
+/// borrows them for ingest. `Arc<LocalSigner>` is what
+/// `PyEngine::local_signer_capsule` (CIRISPersist#119) exposes — the
+/// agent's federation identity, used for BOTH:
+///
+/// * the holds_bytes attestation envelope (via persist's
+///   `LocalSignerHardwareAdapter`)
+/// * the Contribution envelope (via node-core's [`LocalSignerAdapter`])
+///
+/// One identity, two adapter shapes, because persist's blob-storage
+/// surface takes `&dyn HardwareSigner` and node-core's envelope-build
+/// surface takes `&dyn EnvelopeSigner`. Both wrap the same key.
+pub struct IngestContext<'a, B, N>
+where
+    B: BlobStorage,
+    N: NodeCoreService,
+{
+    /// Blob storage substrate — `Engine::blob_storage_capsule` /
+    /// `Engine::federation_directory().Postgres(_)` / etc., depending
+    /// on the cohabitation install path.
+    pub blob_storage: &'a B,
+    /// NodeCore write surface — `Engine::node_core_service()` per
+    /// CIRISPersist#90.
+    pub node_core: &'a N,
+    /// Host's `LocalSigner` (CIRISPersist#119). Cheap `Arc` clone is
+    /// expected at call sites.
+    pub signer: Arc<LocalSigner>,
+    /// Host's `federation_keys.key_id` — the directory FK that the
+    /// emitted `holds_bytes` attestation cites as `attesting_key_id`.
+    /// Typically `LocalSigner::key_id()`.
+    pub author_key_id: String,
+}
+
+/// What a successful ingest call returns. The `content_sha256_hex` is
+/// the cite-able blob identifier (`agent_files:*:{sha256}` /
+/// `holds_bytes:sha256:{prefix}` reference); the `contribution_id`
+/// is the ULID of the envelope persist stored.
+#[derive(Debug, Clone)]
+pub struct IngestOutcome {
+    /// ULID per SCHEMA §2.2.
+    pub contribution_id: String,
+    /// Hex of the content SHA-256 (lowercase, 64 chars).
+    pub content_sha256_hex: String,
+}
+
+/// Ingest an encyclopedia article — the Phase 2B template all six
+/// `external_content` sub_kinds follow.
+///
+/// # The sequence
+///
+/// 1. `build_encyclopedia_payload(&source)` — pure payload + SHA-256.
+/// 2. `BlobStorage::put_blob_signing(...)` — atomic blob+holder
+///    commit. Persist canonicalizes + signs the holds_bytes envelope
+///    via its production `PythonJsonDumpsCanonicalizer` (NOT JCS RFC
+///    8785; the trap CIRISPersist#121 closed). The hardware-signer
+///    adapter wraps our `Arc<LocalSigner>` so persist can drive its
+///    `&dyn HardwareSigner` interface.
+/// 3. `build_contribution(...)` — Contribution envelope.
+///    `ContributionType::Proposal` is the persist enum variant;
+///    sub_kind discrimination (`encyclopedia_article` vs
+///    `news_article` vs …) lives in the payload per SCHEMA §3.1 +
+///    §4.29.
+/// 4. `NodeCoreService::put_contribution(...)` — verify + insert
+///    into the `cirisnode.contributions` row.
+///
+/// # Identity discipline
+///
+/// `author_id` on the Contribution envelope is the host's own
+/// `contributor_id()` (base64 Ed25519 pubkey of `LocalSigner`). The
+/// host signs as itself; the article being *about* Wikipedia /
+/// Einstein / a third-party publisher is encoded in the payload
+/// fields (`source.project`, `entity_key_id`, citations,
+/// `topical_relations`), not by spoofing the envelope identity.
+/// "X wrote this" is an observation claim by the host, not a
+/// signature on behalf of X.
+///
+/// # Cell parameter
+///
+/// `Cell { domain, language, subject }` is per-call because the same
+/// content could be ingested into different domain cells depending
+/// on the deployment's classification policy. `subject` should be
+/// `Some("external_content".to_string())` for this surface.
+/// Shared I/O tail for every `external_content` sub_kind ingest.
+/// All six sub_kinds — encyclopedia / news / accord / local / chat /
+/// blog — produce the same `(payload, content_sha, body_bytes,
+/// media_type)` tuple shape from their per-kind builder; the put_blob
+/// + sign + put_contribution sequence is byte-for-byte identical.
+async fn finalize_external_content_ingest<B, N>(
+    payload: serde_json::Value,
+    content_sha: [u8; 32],
+    body_bytes: Vec<u8>,
+    media_type: String,
+    cell: Cell,
+    ctx: &IngestContext<'_, B, N>,
+) -> Result<IngestOutcome, IngestError>
+where
+    B: BlobStorage + Sync,
+    N: NodeCoreService,
+{
+    let hw_signer = LocalSignerHardwareAdapter::new(ctx.signer.clone());
+    ctx.blob_storage
+        .put_blob_signing(
+            &content_sha,
+            BlobBody::Inline(body_bytes),
+            Some(media_type.as_str()),
+            &ctx.author_key_id,
+            &hw_signer,
+            Utc::now(),
+            uuid::Uuid::new_v4(),
+        )
+        .await
+        .map_err(|e| IngestError::PutBlob(format!("{e}")))?;
+
+    let env_signer = LocalSignerAdapter::new(ctx.signer.clone());
+    let contribution_id = ulid::Ulid::new().to_string();
+    let envelope = build_contribution(
+        contribution_id.clone(),
+        ContributionType::Proposal,
+        env_signer.contributor_id(),
+        cell,
+        payload,
+        None,
+        &env_signer,
+    )
+    .map_err(|e| IngestError::BuildEnvelope(format!("{e}")))?;
+
+    ctx.node_core
+        .put_contribution(envelope)
+        .await
+        .map_err(|e| IngestError::PutContribution(format!("{e}")))?;
+
+    Ok(IngestOutcome {
+        contribution_id,
+        content_sha256_hex: hex_encode(&content_sha),
+    })
+}
+
+/// Ingest an encyclopedia article (SCHEMA §4.29 `sub_kind:
+/// encyclopedia_article`) — the Phase 2B template the other five
+/// sub_kind ingest functions follow. See [`IngestContext`] for the
+/// substrate injection discipline + [`finalize_external_content_ingest`]
+/// for the shared I/O tail.
+pub async fn ingest_encyclopedia_article<B, N>(
+    source: EncyclopediaArticleSource,
+    cell: Cell,
+    ctx: &IngestContext<'_, B, N>,
+) -> Result<IngestOutcome, IngestError>
+where
+    B: BlobStorage + Sync,
+    N: NodeCoreService,
+{
+    let (payload, content_sha) = build_encyclopedia_payload(&source)?;
+    finalize_external_content_ingest(
+        payload,
+        content_sha,
+        source.body_bytes,
+        source.body_media_type,
+        cell,
+        ctx,
+    )
+    .await
+}
+
+/// Ingest a news article (SCHEMA §4.29 `sub_kind: news_article`).
+/// Same I/O discipline as [`ingest_encyclopedia_article`]; sub_kind
+/// discrimination lives in the payload.
+pub async fn ingest_news_article<B, N>(
+    source: NewsArticleSource,
+    cell: Cell,
+    ctx: &IngestContext<'_, B, N>,
+) -> Result<IngestOutcome, IngestError>
+where
+    B: BlobStorage + Sync,
+    N: NodeCoreService,
+{
+    let (payload, content_sha) = build_news_payload(&source)?;
+    finalize_external_content_ingest(
+        payload,
+        content_sha,
+        source.body_bytes,
+        source.body_media_type,
+        cell,
+        ctx,
+    )
+    .await
+}
+
+/// Ingest accord data (SCHEMA §4.29 `sub_kind: accord_data`) —
+/// canonical text / encyclical mapping / framework / policy under
+/// a HumanityAccord / StewardTriple / WaQuorum / OneOfSix signer
+/// class. Same I/O discipline.
+pub async fn ingest_accord_data<B, N>(
+    source: AccordDataSource,
+    cell: Cell,
+    ctx: &IngestContext<'_, B, N>,
+) -> Result<IngestOutcome, IngestError>
+where
+    B: BlobStorage + Sync,
+    N: NodeCoreService,
+{
+    let (payload, content_sha) = build_accord_payload(&source)?;
+    finalize_external_content_ingest(
+        payload,
+        content_sha,
+        source.body_bytes,
+        source.body_media_type,
+        cell,
+        ctx,
+    )
+    .await
+}
+
+/// Ingest local data (SCHEMA §4.29 `sub_kind: local_data`) — notes /
+/// draft / bookmark / observation. Cohort scope is typically `self`
+/// or `family`; the CEG locality dividend means this content never
+/// crosses to inter-host paths via the `holds_bytes` advertisement
+/// in those cases — `put_blob_signing` still emits the holder
+/// attestation locally (own-substrate authoritative record), but no
+/// peer can discover it.
+pub async fn ingest_local_data<B, N>(
+    source: LocalDataSource,
+    cell: Cell,
+    ctx: &IngestContext<'_, B, N>,
+) -> Result<IngestOutcome, IngestError>
+where
+    B: BlobStorage + Sync,
+    N: NodeCoreService,
+{
+    let (payload, content_sha) = build_local_payload(&source)?;
+    finalize_external_content_ingest(
+        payload,
+        content_sha,
+        source.body_bytes,
+        source.body_media_type,
+        cell,
+        ctx,
+    )
+    .await
+}
+
+/// Ingest a chat message (SCHEMA §4.29 `sub_kind: chat_message`) —
+/// discord / slack / twitter / imessage / sms / xmpp / irc / matrix.
+/// Same I/O discipline.
+pub async fn ingest_chat_message<B, N>(
+    source: ChatMessageSource,
+    cell: Cell,
+    ctx: &IngestContext<'_, B, N>,
+) -> Result<IngestOutcome, IngestError>
+where
+    B: BlobStorage + Sync,
+    N: NodeCoreService,
+{
+    let (payload, content_sha) = build_chat_payload(&source)?;
+    finalize_external_content_ingest(
+        payload,
+        content_sha,
+        source.body_bytes,
+        source.body_media_type,
+        cell,
+        ctx,
+    )
+    .await
+}
+
+/// Ingest a blog post (SCHEMA §4.29 `sub_kind: blog_post`) —
+/// medium / substack / wordpress / ghost / personal / tumblr.
+/// Same I/O discipline.
+pub async fn ingest_blog_post<B, N>(
+    source: BlogPostSource,
+    cell: Cell,
+    ctx: &IngestContext<'_, B, N>,
+) -> Result<IngestOutcome, IngestError>
+where
+    B: BlobStorage + Sync,
+    N: NodeCoreService,
+{
+    let (payload, content_sha) = build_blog_payload(&source)?;
+    finalize_external_content_ingest(
+        payload,
+        content_sha,
+        source.body_bytes,
+        source.body_media_type,
+        cell,
+        ctx,
+    )
+    .await
 }
 
 #[cfg(test)]
