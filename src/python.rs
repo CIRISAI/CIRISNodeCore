@@ -344,9 +344,14 @@ fn global_feed(engine: &Bound<'_, PyAny>, filter_json: String) -> PyResult<Strin
 // persist's via `ciris_persist::current_runtime_handle()`.
 // ---------------------------------------------------------------------------
 
+use std::ffi::CStr;
+use std::ptr::NonNull;
+
 use ciris_edge::ffi::pyo3::PyEdge;
+use ciris_persist::engine::BackendDispatch;
 use ciris_persist::ffi::pyo3::{current_runtime_handle, PyEngine};
 use pyo3::exceptions::PyRuntimeError;
+use pyo3::types::PyCapsule;
 
 /// Wire node-core into the host's substrate — the cohabitation
 /// bootstrap, exposed to the agent's Python runtime.
@@ -400,6 +405,84 @@ fn install_cohabitation(engine: PyRef<'_, PyEngine>, edge: PyRef<'_, PyEdge>) ->
     Ok(())
 }
 
+/// Wire node-mode content serving into the host's edge runtime — the
+/// node-mode-serving half of CIRISNodeCore#11's joint `agent_files:*`
+/// namespace claim.
+///
+/// After this call returns, the host responds to inbound
+/// `ContentFetch{sha256}` messages by reading from persist's
+/// `federation_blobs` table (CIRISPersist#103) and returning
+/// `ContentBody{sha256, bytes, attestation_ref}` (or `ContentMiss`).
+/// This is what makes the `holds_bytes:sha256:*` advertisements that
+/// persist's `BlobStorage::put_blob` auto-emits actually serviceable
+/// to fetching peers.
+///
+/// Idiom (typically called right after [`install_cohabitation`]):
+///
+/// ```python
+/// install_cohabitation(engine, edge)        # write side: 8 MessageTypes
+/// install_node_mode_serving(engine, edge)   # read side: ContentFetch
+/// ```
+///
+/// # How the substrate handoff works
+///
+/// Persist v3.1.1 exposes the blob substrate as a `PyCapsule`
+/// (`PyEngine.blob_storage_capsule()`, CIRISPersist#115). The capsule
+/// wraps the same `BackendDispatch` value `federation_directory()` /
+/// `outbound_queue()` return — the concrete backend (Postgres or
+/// SQLite struct) implements all three trait surfaces — but the
+/// capsule is the *documented* blob-storage entry point and pins the
+/// name tag `ciris_persist::blob_storage` so misuse is caught.
+///
+/// We borrow the dispatch out of the capsule, clone it (cheap — it's
+/// just `Arc`-wrapped backends), and drop the GIL across `block_on`
+/// so other Python threads stay unblocked while edge registers the
+/// `ContentFetch` handler.
+#[pyfunction]
+fn install_node_mode_serving(
+    engine: &Bound<'_, PyEngine>,
+    edge: &Bound<'_, PyEdge>,
+) -> PyResult<()> {
+    let py = engine.py();
+
+    // Borrow the blob-storage `BackendDispatch` out of persist's
+    // capsule. Name tag pins identity (per CIRISPersist#115); the
+    // unsafe deref is bounded by the capsule lifetime — we clone
+    // into an owned value before any GIL drop so the deref window is
+    // strictly synchronous.
+    let cap_obj = engine.call_method0("blob_storage_capsule")?;
+    let cap: &Bound<'_, PyCapsule> = cap_obj.cast::<PyCapsule>()?;
+    let name: &CStr = CStr::from_bytes_with_nul(b"ciris_persist::blob_storage\0")
+        .expect("static tag has no interior NUL");
+    let raw: NonNull<std::ffi::c_void> = cap.pointer_checked(Some(name))?;
+    // SAFETY: `pointer_checked` returned Ok with the pinned name tag
+    // `ciris_persist::blob_storage`, which CIRISPersist#115 guarantees
+    // points to a `BackendDispatch` owned by the capsule for its
+    // lifetime. We deref once, clone immediately into an owned value,
+    // and never hold the reference across a `py.detach` boundary —
+    // so the pointer remains valid for the strictly synchronous deref
+    // window.
+    #[allow(unsafe_code)]
+    let dispatch: BackendDispatch =
+        unsafe { raw.cast::<BackendDispatch>().as_ref() }.clone();
+
+    let edge_handle = edge.borrow().edge_handle();
+    let runtime = current_runtime_handle().ok_or_else(|| {
+        PyRuntimeError::new_err(
+            "ciris_persist runtime not initialized — \
+             construct an Engine before install_node_mode_serving",
+        )
+    })?;
+
+    py.detach(|| {
+        runtime.block_on(async move {
+            crate::serving::install_from_dispatch(dispatch, edge_handle).await
+        })
+    })
+    .map_err(|e| PyRuntimeError::new_err(format!("install_node_mode_serving: {e}")))?;
+    Ok(())
+}
+
 /// The `ciris_node_core` Python module — Phase 1 client surface +
 /// Phase 2 read-composition (CIRISNodeCore#12) + external-content
 /// feeds (CIRISNodeCore#19) + Phase 3 cohabitation install
@@ -420,7 +503,8 @@ fn ciris_node_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(local_feed, m)?)?;
     m.add_function(wrap_pyfunction!(community_feed, m)?)?;
     m.add_function(wrap_pyfunction!(global_feed, m)?)?;
-    // Phase 3 (CIRISNodeCore#11 — cohabitation install)
+    // Phase 3 (CIRISNodeCore#11 — cohabitation install + node-mode serving)
     m.add_function(wrap_pyfunction!(install_cohabitation, m)?)?;
+    m.add_function(wrap_pyfunction!(install_node_mode_serving, m)?)?;
     Ok(())
 }
