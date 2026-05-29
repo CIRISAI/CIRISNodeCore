@@ -89,8 +89,8 @@ anyone who wants to walk it; operators just choose how far.
 | Tier | Default depth | Rationale |
 |---|---|---|
 | client | **0** (always) | Phone / tablet holds own + explicit fetches only. No recursion, no admission of trust-chain content. |
-| proxy | **0** (always) | Default tier caches what the user fetches. Same locality — no recursion. |
-| **server** | **1** (default) | The "full federation node" stance opts into friend-of-friends reach. Operator-tunable in either direction (0 for strict, 2-3 for more open). |
+| **proxy = L0 server** | **0** (default) | Entry-level federation participant — admits direct trust only (no recursion); 256 GB budget. Same admission discipline as L1, narrower depth. |
+| **server = L1** | **1** (default) | Full federation node — admits friend-of-friends; 1 TB budget. Operator-tunable to 0 (strict) or 2-3 (extended). |
 
 **Empirical hop-expansion** (small-world / six-degrees research,
 calibrated in `effective_trust_set_multiplier()`):
@@ -145,20 +145,32 @@ conservative-by-design baseline. Dev-host CPUs run 2–3× faster.
 
 ---
 
-## 3. v1 tier model
+## 3. v1 tier model (L0 / L1 server gradient)
 
-| Tier | Disk gate | Behavior |
-|---|---|---|
-| **client** | none | No inbound serving. Own contributions + own traces. Phone / tablet. |
-| **proxy (default)** | none | Single-pool cache from explicit fetches. Bytes stay while popular; evict when budget pressure displaces them. Laptop / desktop. |
-| **server** | **≥ 1 TB** | Single-pool hold: own + admitted-trust + hot cache + replicated traces. All compete for the budget; trust admission has priority share; popularity-weighted recency determines what stays. Home server / VPS. |
+The tier model collapses to **server-gradient + client**. "Proxy"
+isn't a distinct architecture — it's an L0 server, the entry-level
+storage gradient. Same trust+capacity admission discipline as L1
+server, just smaller disk and shallower default trust depth.
 
-**Per-server feasibility gates** (the model checks every scenario):
+| Tier | Storage gradient | Default disk | Default depth | Behavior |
+|---|---|---|---|---|
+| **client** | n/a | n/a | 0 | No inbound serving. Holds own contributions + own traces. Fetches via L0/L1 proxy/server. Phone / tablet. |
+| **proxy = L0 server** | L0 | **256 GB** | 0 (strict) | Full trust+capacity admission. Holds direct-trust content + hot cache. No agent-trace replication. Laptop / desktop. |
+| **server = L1** | L1 | **1 TB** | 1 (friend-of-friends) | Full participant. Holds own + admitted-trust + hot cache + replicated agent traces. Home server / VPS. |
+| (future) L2+ | L2+ | TBD | 2+ | "Fat servers" with deeper recursion + more disk. Not in v1. |
 
-| Resource | Gate | Source |
-|---|---|---|
-| Disk | 1 TB | Eric's spec |
-| Bandwidth | 1 Gbps (10.8 TB/day sustained) | Residential fiber |
+Each tier still runs the same `trust(source) ≥ threshold AND
+capacity_available` intake discipline; the gradient just changes
+(budget, depth). All three storage tiers (L0/L1/L2) are real
+federation participants — they admit content, sign holds_bytes
+attestations, become discoverable as holders.
+
+**Per-server feasibility gates** (the model checks at every tier):
+
+| Resource | L0 gate | L1 gate | Source |
+|---|---|---|---|
+| Disk | 256 GB | 1 TB | Eric's spec |
+| Bandwidth | 1 Gbps (10.8 TB/day sustained) | 1 Gbps | Residential fiber |
 | CPU | 1 full-utilization core (86.4 K cpu-sec/day) | Per-process CIRIS share |
 
 ---
@@ -311,3 +323,164 @@ attestation graph. CEG's 1+4 wire format stays locked.
 - The Phase 2B ingest path (CIRISNodeCore#19) produces the wire
   artifacts that ride these primitives. Node-core does not own
   any replication policy — by design.
+
+---
+
+## 9. Why this works at all — the identity-aware-storage property
+
+> **Eric's thesis:** "What makes this work is that you know whose
+> data you are storing, and can evict their data at any time if
+> you choose."
+
+This isn't just a feature — it's the load-bearing property the
+entire discipline rests on. The whole `trust(source) ≥ threshold
+AND capacity_available` intake + `popularity × freshness` eviction
+model presumes the substrate can answer two questions at any moment:
+
+1. **Whose bytes am I holding?**
+2. **Can I evict everything from a specific actor right now?**
+
+### 9.1 How CIRIS guarantees both
+
+Every blob admission is one atomic call:
+
+```rust
+BlobStorage::put_blob_signing(
+    sha256, body, media_type,
+    attesting_key_id,        // ← identity of the holder
+    signer,                  // ← cryptographic witness
+    now, attestation_id,
+)
+```
+
+The call commits THREE things atomically:
+* the bytes (`federation_blobs` row)
+* the holder attestation (`federation_attestations` row with
+  `attesting_key_id`, `attestation_type=holds_bytes:sha256:{prefix}`,
+  `evidence_refs` containing the SHA)
+* the signature over the canonical envelope (persist's
+  `PythonJsonDumpsCanonicalizer`, per CIRISPersist#121's
+  identity-pin)
+
+After this returns, the substrate can answer:
+* "whose bytes do I hold?" — `SELECT attesting_key_id FROM
+  federation_attestations WHERE attestation_type LIKE
+  'holds_bytes:%' AND blob_sha = ?`
+* "evict everything from author X" — query `federation_blobs` JOIN
+  `federation_attestations` ON the holder's `attesting_key_id`,
+  delete the rows + emit `withdraws` against each `holds_bytes`
+  attestation
+
+The attribution chain is **at the byte level**, not the application
+layer. Eviction granularity is **per-actor**, not just LRU-tail.
+Both properties ride the same atomic primitive.
+
+### 9.2 Prior art — no deployed system has this as a unified mechanism
+
+Surveyed against IPFS, Veilid, Hypercore, SSB, Storj, Filecoin, Sia,
+Tahoe-LAFS, Mastodon, Tor, Freenet. The two-property combination
+(identity-aware byte-level storage + per-actor eviction granularity
+as a substrate primitive) does not appear unified anywhere:
+
+| System | Identity-aware bytes? | Per-actor eviction? | Pattern |
+|---|---|---|---|
+| **IPFS / Kubo** | No | No | Anonymous content-addressing; LRU watermark only |
+| **IPFS Cluster** | Partial | Partial | Knows "the peer who asked us to pin," not the author |
+| **Veilid** | Partial | Couldn't verify | Signed DHT records; block storage hash-addressed |
+| **Hypercore / Holepunch** | Yes (feed-level) | Yes (feed-level) | Identity rides the feed; cross-feed blobs re-attributed |
+| **Storj** | Partial (satellite) | Partial | Nodes see only erasure-coded ciphertext |
+| **Filecoin** | Partial | **No** (by design) | Contract binds host to keep data; eviction = slashed |
+| **Sia** | Partial | **No** (by design) | Same — contract-bound hosting |
+| **Tor exit relay** | No (by design) | No | Unlinkability is the threat model |
+| **Freenet** | No (by design) | No | "Infeasible to discover origin" — by design |
+| **Tahoe-LAFS** | Partial (planned) | Partial | Accounting design proposed, not deployed |
+| **Mastodon / ActivityPub** | Yes (object-level) | Yes | But at **application layer**, not byte-storage substrate |
+| **SSB (Scuttlebutt)** | Yes (feed-level) | Partial | Replicated blobs decouple from feed identity |
+
+**The closest analogs are SSB and Hypercore** (feed-level identity)
+and **Mastodon** (object-level identity at the application layer).
+None weld attribution and eviction into a single byte-storage-
+substrate primitive the way `put_blob_signing` does.
+
+### 9.3 Why the contract-storage systems explicitly REJECT this
+
+**Filecoin / Sia / Storj are the inverse design.** Their entire
+commercial value proposition is that the host *cannot* evict the
+renter — the host signs a contract, posts collateral, and gets
+slashed if they drop data. Operator-side per-actor eviction is the
+threat model they sell against.
+
+CIRIS makes the opposite call because it's a **federation of
+mutually-attesting peers**, not a paid marketplace. Trust changes
+over time (a peer slashed today should not have their content
+held indefinitely); the substrate's authority to evict is exactly
+what makes federation governance enforceable at the storage layer.
+
+### 9.4 Why anonymous content-addressing (IPFS, Freenet) hits the wall
+
+The well-documented scaling pains in those systems are exactly the
+failures this property prevents:
+
+* **IPFS pin-set bloat** — no popularity-or-trust signal to drive
+  eviction; pinning services manually curate at the operator level
+  outside the protocol
+* **Freenet inability to handle abuse** — by-design anonymity means
+  operators legally hold opaque content with no surface to refuse
+  specific actors
+* **IPFS Cluster's "untrusted peers lying about free space"** —
+  resource attestation has no identity-tied recourse
+
+These are the failure modes CIRIS's `holds_bytes` +
+`attesting_key_id` + admission gate forecloses *structurally*. The
+substrate doesn't need a curation layer above it; the substrate
+itself is curatable because every byte carries its provenance.
+
+### 9.5 Privacy trade-off (intentional, explicit)
+
+The cost: the holder graph is observable. Peers can query "who's
+holding content from author X?" via `list_holders` against the
+public `federation_attestations` rows. This is the design's
+privacy-vs-trust trade-off:
+
+* IPFS / Freenet / Tor: **anonymity-preserving**, abuse-impossible-
+  to-handle, scaling pains from indiscriminate replication
+* CIRIS: **identity-aware**, trust-enforceable, governable, scaling
+  works precisely because admission is selective
+
+For content that needs anonymity (private deliberation, family-scope
+content), the CEG locality dividend (§1.3) is the answer: those
+cohort scopes never emit `holds_bytes` advertisements, never become
+discoverable, never enter the identity-aware substrate at all.
+Anonymity-preserving content stays self-hosted; trust-aware content
+rides the federation.
+
+### 9.6 Summary
+
+| Property | CIRIS substrate guarantee | Achieved by |
+|---|---|---|
+| Identity-aware at the byte level | Yes | `put_blob_signing` atomic commit |
+| Per-actor eviction granularity | Yes | `federation_attestations` index on `attesting_key_id` + `withdraws` primitive |
+| Operator authority to evict | Yes | Local config consuming `scores` trust graph |
+| Anonymity for sensitive content | Yes (via opt-out) | `cohort_scope ∈ {self, family}` blocks `holds_bytes` emission |
+| Per-byte attribution at app layer | NO | Substrate property, not app concern |
+
+This is the load-bearing property. Without it, the trust × capacity
+intake + popularity × freshness eviction discipline collapses to
+"LRU on opaque blobs" — which is exactly what IPFS does, and
+exactly the regime the scaling model says doesn't work at
+full-internet scale.
+
+Sources for the prior-art comparison (§9.2):
+
+- [IPFS Kubo garbage collection](https://docs.ipfs.tech/how-to/kubo-garbage-collection/)
+- [IPFS Cluster allocator](https://github.com/ipfs-cluster/ipfs-cluster/blob/master/allocate.go)
+- [Veilid cryptography](https://veilid.com/how-it-works/cryptography/)
+- [Hypercore DEP-0002](https://www.datprotocol.com/deps/0002-hypercore/)
+- [Storj v3 whitepaper](https://static.storj.io/storjv3.pdf)
+- [Filecoin Storage Market spec](https://spec.filecoin.io/systems/filecoin_markets/storage_market/)
+- [Sia hosting best practices](https://sia.tech/hosting-best-practices)
+- [Tahoe-LAFS Accounting design](https://tahoe-lafs.org/trac/tahoe-lafs/wiki/NewAccountingDesign)
+- [Mastodon ActivityPub federation](https://docs.joinmastodon.org/spec/activitypub/)
+- [Scuttlebutt protocol guide](https://ssbc.github.io/scuttlebutt-protocol-guide/)
+- [Freenet paper (Clarke et al.)](https://www.cs.cornell.edu/people/egs/615/freenet.pdf)
+- [Tor intro spec](https://spec.torproject.org/intro/index.html)

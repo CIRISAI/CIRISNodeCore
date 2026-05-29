@@ -296,22 +296,48 @@ fn per_actor(tier: Tier, s: &Scenario) -> ActorCosts {
             (0.0, 0.0, s.daily_fetch_bytes, verify_from_fetch, 0.0, 1.0, 0.0)
         }
         Tier::Proxy => {
-            // Default tier — holds the user's hot fetched content
-            // until eviction pressure displaces it. No persistent
-            // trust archive; opportunistic only.
+            // **Proxy = L0 server** (Eric's framing) — low-storage
+            // server tier (256 GB default budget). Same trust+capacity
+            // admission discipline as server; just smaller disk and
+            // depth=0 (strict — direct trust only, no recursion).
             //
-            // Effective retention of cached content: budget / daily fetch.
-            let effective_days = if s.daily_fetch_bytes > 0.0 {
-                remaining_budget / s.daily_fetch_bytes
+            // L0 / L1 / L(N) is a per-deployment storage gradient:
+            //   L0 (proxy): 256 GB, depth 0 (strict)
+            //   L1 (server, default): 1 TB, depth 1 (friend-of-friends)
+            //   L2+ (future "fat servers"): more disk, deeper recursion
+            //
+            // The model collapses all server-tier behavior into one
+            // formula parameterized by (budget, depth).
+            let effective_R = s.trust_radius
+                * effective_trust_set_multiplier(0.0); // L0 = strict
+
+            let daily_admitted = effective_R * s.daily_bytes * s.cohort.publishable();
+            // Proxy doesn't replicate agent traces (server-only).
+            let traces_in_per_day = 0.0;
+
+            let trust_share_of_remaining = 0.85;
+            let trust_budget = remaining_budget * trust_share_of_remaining;
+            let cache_budget = remaining_budget - trust_budget;
+
+            let effective_days = if daily_admitted > 0.0 {
+                trust_budget / daily_admitted
             } else { 0.0 };
-            let cache_held = (s.daily_fetch_bytes * effective_days).min(remaining_budget);
-            // Cache amortizes inbound on cache-hit; proxy hit rate is
-            // typically a bit lower than server tier because proxy
-            // serves a smaller user population (less aggregation).
+            let admitted_trust_held = (daily_admitted * effective_days).min(trust_budget);
+
             let cache_hit_rate = (s.cache_hit_rate - 0.1).max(0.1);
-            let inbound = s.daily_fetch_bytes * (1.0 - cache_hit_rate);
-            let verify = inbound / s.avg_envelope_bytes;
-            (0.0, cache_held, inbound, verify, 0.0, 2.0, effective_days)
+            let cache_inbound = s.daily_fetch_bytes * (1.0 - cache_hit_rate);
+            let cache_held = cache_inbound.min(cache_budget);
+
+            let verify = (daily_admitted + cache_inbound) / s.avg_envelope_bytes;
+            let inbound = daily_admitted + cache_inbound;
+
+            // Same outbound fanout shape as server — proxy is a
+            // federation participant.
+            let wide = s.cohort.species + s.cohort.planet + s.cohort.federation;
+            let narrow = s.cohort.community + s.cohort.affiliations;
+            let fanout = 1.0 + narrow * 4.0 + wide * 64.0;
+
+            (admitted_trust_held, cache_held, inbound, verify, 0.0, fanout, effective_days)
         }
         Tier::Server => {
             // Full node — admits trusted peers' publishable
@@ -471,7 +497,7 @@ fn scenarios() -> Vec<Scenario> {
             daily_bytes: 20.0 * KB,
             avg_envelope_bytes: 1.5 * KB,
             disk_budget_client: 32.0 * GB,
-            disk_budget_proxy: 100.0 * GB,
+            disk_budget_proxy: 256.0 * GB,
             disk_budget_server: 1.0 * TB,
             cohort,
             daily_fetch_bytes: 5.0 * MB,
@@ -488,7 +514,7 @@ fn scenarios() -> Vec<Scenario> {
             daily_bytes: 50.0 * KB,
             avg_envelope_bytes: 1.5 * KB,
             disk_budget_client: 64.0 * GB,
-            disk_budget_proxy: 250.0 * GB,
+            disk_budget_proxy: 256.0 * GB,
             disk_budget_server: 1.0 * TB,
             cohort,
             daily_fetch_bytes: 50.0 * MB,
@@ -505,7 +531,7 @@ fn scenarios() -> Vec<Scenario> {
             daily_bytes: 500.0 * KB,
             avg_envelope_bytes: 8.0 * KB,
             disk_budget_client: 128.0 * GB,
-            disk_budget_proxy: 500.0 * GB,
+            disk_budget_proxy: 256.0 * GB,
             disk_budget_server: 1.0 * TB,
             cohort,
             daily_fetch_bytes: 200.0 * MB,
@@ -522,7 +548,7 @@ fn scenarios() -> Vec<Scenario> {
             daily_bytes: 5.0 * KB,
             avg_envelope_bytes: 0.5 * KB,
             disk_budget_client: 32.0 * GB,
-            disk_budget_proxy: 100.0 * GB,
+            disk_budget_proxy: 256.0 * GB,
             disk_budget_server: 1.0 * TB,
             cohort,
             daily_fetch_bytes: 20.0 * MB,
@@ -539,7 +565,7 @@ fn scenarios() -> Vec<Scenario> {
             daily_bytes: 100.0 * KB,
             avg_envelope_bytes: 5.0 * KB,
             disk_budget_client: 64.0 * GB,
-            disk_budget_proxy: 250.0 * GB,
+            disk_budget_proxy: 256.0 * GB,
             disk_budget_server: 1.0 * TB,
             cohort,
             daily_fetch_bytes: 100.0 * MB,
@@ -556,7 +582,7 @@ fn scenarios() -> Vec<Scenario> {
             daily_bytes: 50.0 * MB,
             avg_envelope_bytes: 50.0 * KB,
             disk_budget_client: 256.0 * GB,
-            disk_budget_proxy: 500.0 * GB,
+            disk_budget_proxy: 256.0 * GB,
             disk_budget_server: 1.0 * TB,
             cohort,
             daily_fetch_bytes: 1.0 * GB,
@@ -573,7 +599,7 @@ fn scenarios() -> Vec<Scenario> {
             daily_bytes: 50.0 * MB,
             avg_envelope_bytes: 50.0 * KB,
             disk_budget_client: 256.0 * GB,
-            disk_budget_proxy: 500.0 * GB,
+            disk_budget_proxy: 256.0 * GB,
             disk_budget_server: 1.0 * TB,
             cohort: CohortDist::local_heavy(),
             daily_fetch_bytes: 1.0 * GB,
@@ -590,7 +616,7 @@ fn scenarios() -> Vec<Scenario> {
             daily_bytes: 50.0 * MB,
             avg_envelope_bytes: 50.0 * KB,
             disk_budget_client: 256.0 * GB,
-            disk_budget_proxy: 500.0 * GB,
+            disk_budget_proxy: 256.0 * GB,
             disk_budget_server: 1.0 * TB,
             cohort: CohortDist::global_heavy(),
             daily_fetch_bytes: 1.0 * GB,
@@ -607,7 +633,7 @@ fn scenarios() -> Vec<Scenario> {
             daily_bytes: 30.0 * MB,
             avg_envelope_bytes: 8.0 * KB,
             disk_budget_client: 256.0 * GB,
-            disk_budget_proxy: 500.0 * GB,
+            disk_budget_proxy: 256.0 * GB,
             disk_budget_server: 1.0 * TB,
             cohort: CohortDist::local_heavy(),
             daily_fetch_bytes: 200.0 * MB,
@@ -680,8 +706,16 @@ fn print_scenario(s: &Scenario, r: &FedRollup) {
         fmt_bytes(s.disk_budget_client), fmt_bytes(s.disk_budget_proxy),
         fmt_bytes(s.disk_budget_server));
 
+    let prx = &r.per_tier[1].1;
     println!();
-    println!("  Server-tier held-bytes composition (single pool, trust × demand):");
+    println!("  Proxy-tier (L0, depth 0, {} budget):", fmt_bytes(s.disk_budget_proxy));
+    println!("    held TOTAL          {}  ({:.0}% util)   admitted-trust retention {:.0}d",
+        fmt_bytes(prx.storage_total),
+        prx.storage_utilization * 100.0,
+        prx.effective_retention_days);
+    println!();
+    println!("  Server-tier (L1, depth {:.0}, {} budget) — single-pool held bytes:",
+        s.trust_depth_avg, fmt_bytes(s.disk_budget_server));
     println!("    own data            {}", fmt_bytes(srv.storage_own));
     println!("    admitted trust      {}", fmt_bytes(srv.storage_admitted_trust));
     println!("    hot cache           {}", fmt_bytes(srv.storage_hot_cache));
