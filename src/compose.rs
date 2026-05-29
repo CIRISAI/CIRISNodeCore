@@ -1264,3 +1264,340 @@ fn external_content_entry_from(row: &ContributionRowProjection) -> Option<Extern
         display_label,
     })
 }
+
+// ---------------------------------------------------------------------------
+// Surface 12 — article quality aggregation (CIRISNodeCore#19 Phase 3)
+//
+// For an external_content article (encyclopedia / news / blog), independent
+// peers emit `scores` attestations citing the article's entity_key_id with
+// dimensions like `encyclopedia:accuracy:{topic_area}`,
+// `news:source_quality:{publisher}`, etc. (FSD-002 §3.6 + SCHEMA §4.29
+// dimension vocabulary).
+//
+// This surface aggregates those attestations into a per-article
+// quality reading the agent UI can render. v0.1 = simple unweighted
+// mean per dimension axis; publisher-weighted composition for news
+// (Phase 3 sub-item 2) is a follow-up refinement.
+// ---------------------------------------------------------------------------
+
+/// Aggregated reading on a single dimension axis (e.g.,
+/// `encyclopedia:accuracy:*` collapses to one of these). When the
+/// dimension carries a sub-bucket (e.g., `:physics` topic_area), the
+/// bucket is captured in `buckets`.
+#[derive(Serialize, Default)]
+pub(crate) struct QualityReading {
+    /// Unweighted mean of scores across all active attestations.
+    pub weighted_mean: f64,
+    /// Number of distinct attestations contributing.
+    pub attester_count: usize,
+    /// Sub-bucket → weighted_mean for dimensioned families
+    /// (`encyclopedia:accuracy:{topic_area}` → topic_area buckets;
+    /// `news:bias:{spectrum_axis}` → spectrum_axis buckets). Empty for
+    /// flat dimensions (`encyclopedia:NPOV_compliance`).
+    pub buckets: HashMap<String, f64>,
+}
+
+/// Compose output for an article quality reading.
+#[derive(Serialize)]
+pub(crate) struct ArticleQualityOutput {
+    pub article_key_id: String,
+    pub sub_kind: String,
+    /// Per-axis quality readings. Keys are dimension axis names
+    /// without the `{sub_kind}:` prefix or `:{bucket}` suffix —
+    /// e.g., `accuracy`, `completeness`, `source_quality`.
+    pub quality: HashMap<String, QualityReading>,
+    pub computed_at: DateTime<Utc>,
+}
+
+/// Compose a per-article quality reading from raw persist attestation
+/// rows targeting the article's entity_key_id.
+///
+/// **Input**: JSON-serialized output of `engine.list_attestations_for(
+/// article_key_id)` — a list of attestation rows targeting the article.
+///
+/// **Output**: JSON object matching [`ArticleQualityOutput`].
+///
+/// **Semantics** (Phase 3 v0.1 — unweighted aggregation; publisher-
+/// weighted composition for news is a follow-up):
+/// - Only active `scores` attestations with a dimension prefix
+///   matching `sub_kind`'s family contribute.
+/// - For dimensions with a bucket suffix (`encyclopedia:accuracy:{topic}`,
+///   `news:source_quality:{publisher}`, `news:bias:{spectrum_axis}`),
+///   the bucket is captured in `QualityReading::buckets`.
+/// - Flat dimensions (`encyclopedia:NPOV_compliance`,
+///   `encyclopedia:citation_quality`, `news:freshness`,
+///   `news:eyewitness_distance`) aggregate to a single mean.
+/// - Withdrawn / recanted attestations are not filtered here —
+///   callers should pre-filter at persist or compose with a
+///   `withdraws`-aware projection in a future phase.
+pub fn compose_article_quality(
+    attestations_json: &str,
+    article_key_id: &str,
+    sub_kind: &str,
+) -> Result<String, serde_json::Error> {
+    compose_article_quality_at(attestations_json, article_key_id, sub_kind, Utc::now())
+}
+
+/// Test-friendly variant accepting an explicit `now`. Production callers
+/// use [`compose_article_quality`].
+pub(crate) fn compose_article_quality_at(
+    attestations_json: &str,
+    article_key_id: &str,
+    sub_kind: &str,
+    now: DateTime<Utc>,
+) -> Result<String, serde_json::Error> {
+    let rows: Vec<AttestationRow> = serde_json::from_str(attestations_json)?;
+
+    // dimension family prefix to walk per sub_kind. `encyclopedia_article`
+    // listens for `encyclopedia:*`; `news_article` for `news:*`;
+    // `blog_post` for `blog:*`; `chat_message` for `chat:*`. accord_data /
+    // local_data don't have a published quality vocabulary in v0.1 — they
+    // emit an empty `quality` map.
+    let family_prefix = match sub_kind {
+        "encyclopedia_article" => "encyclopedia:",
+        "news_article" => "news:",
+        "blog_post" => "blog:",
+        "chat_message" => "chat:",
+        _ => "", // no quality vocabulary defined; empty output
+    };
+
+    // Per-axis running aggregations. Outer key is the axis name
+    // (`accuracy`, `source_quality`, etc.); inner Vec carries
+    // (overall_score, optional_bucket).
+    let mut axis_aggregates: HashMap<String, Vec<(f64, Option<String>)>> = HashMap::new();
+
+    if !family_prefix.is_empty() {
+        for row in rows {
+            if row.attestation_type != "scores" || !row.is_active_at(now) {
+                continue;
+            }
+            let Some(dim) = row.dimension() else { continue };
+            let Some(score) = row.score() else { continue };
+            let Some(rest) = dim.strip_prefix(family_prefix) else { continue };
+
+            // rest is e.g. `accuracy:physics` or `NPOV_compliance` or
+            // `bias:political_spectrum`. Split into (axis, optional_bucket).
+            let (axis, bucket) = match rest.split_once(':') {
+                Some((a, b)) => (a.to_owned(), Some(b.to_owned())),
+                None => (rest.to_owned(), None),
+            };
+
+            axis_aggregates
+                .entry(axis)
+                .or_default()
+                .push((score, bucket));
+        }
+    }
+
+    // Collapse per-axis aggregates into QualityReading rows.
+    let mut quality: HashMap<String, QualityReading> = HashMap::new();
+    for (axis, entries) in axis_aggregates {
+        let count = entries.len();
+        let total: f64 = entries.iter().map(|(s, _)| s).sum();
+        let mean = if count > 0 { total / count as f64 } else { 0.0 };
+
+        // Per-bucket aggregation: collect per-bucket scores, mean them.
+        let mut bucket_scores: HashMap<String, Vec<f64>> = HashMap::new();
+        for (score, bucket) in &entries {
+            if let Some(b) = bucket {
+                bucket_scores.entry(b.clone()).or_default().push(*score);
+            }
+        }
+        let buckets: HashMap<String, f64> = bucket_scores
+            .into_iter()
+            .map(|(b, scores)| {
+                let mean = scores.iter().sum::<f64>() / scores.len() as f64;
+                (b, mean)
+            })
+            .collect();
+
+        quality.insert(
+            axis,
+            QualityReading {
+                weighted_mean: mean,
+                attester_count: count,
+                buckets,
+            },
+        );
+    }
+
+    serde_json::to_string(&ArticleQualityOutput {
+        article_key_id: article_key_id.to_owned(),
+        sub_kind: sub_kind.to_owned(),
+        quality,
+        computed_at: now,
+    })
+}
+
+#[cfg(test)]
+mod article_quality_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn att(dim: &str, score: f64) -> serde_json::Value {
+        serde_json::json!({
+            "attestation_type": "scores",
+            "asserted_at": "2026-05-15T10:00:00Z",
+            "attestation_envelope": {
+                "dimension": dim,
+                "score": score,
+            },
+        })
+    }
+
+    fn now_fixed() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 5, 20, 12, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn encyclopedia_quality_aggregates_per_axis_and_bucket() {
+        let attestations = serde_json::json!([
+            att("encyclopedia:accuracy:physics", 0.9),
+            att("encyclopedia:accuracy:physics", 0.8),
+            att("encyclopedia:accuracy:history", 0.7),
+            att("encyclopedia:NPOV_compliance", 0.95),
+            att("encyclopedia:NPOV_compliance", 0.85),
+            att("encyclopedia:citation_quality", 0.6),
+        ])
+        .to_string();
+
+        let out = compose_article_quality_at(
+            &attestations,
+            "wikipedia:article:einstein",
+            "encyclopedia_article",
+            now_fixed(),
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+
+        assert_eq!(parsed["article_key_id"], "wikipedia:article:einstein");
+        assert_eq!(parsed["sub_kind"], "encyclopedia_article");
+
+        let accuracy = &parsed["quality"]["accuracy"];
+        assert_eq!(accuracy["attester_count"], 3);
+        // mean of 0.9, 0.8, 0.7
+        let mean = accuracy["weighted_mean"].as_f64().unwrap();
+        assert!((mean - 0.8).abs() < 1e-9, "accuracy mean ≈ 0.8, got {mean}");
+        let physics_mean = accuracy["buckets"]["physics"].as_f64().unwrap();
+        assert!(
+            (physics_mean - 0.85).abs() < 1e-9,
+            "physics bucket mean ≈ 0.85, got {physics_mean}"
+        );
+        let history_mean = accuracy["buckets"]["history"].as_f64().unwrap();
+        assert!((history_mean - 0.7).abs() < 1e-9);
+
+        let npov = &parsed["quality"]["NPOV_compliance"];
+        assert_eq!(npov["attester_count"], 2);
+        // flat dimension — no buckets
+        assert!(npov["buckets"].as_object().unwrap().is_empty());
+
+        let citation = &parsed["quality"]["citation_quality"];
+        assert_eq!(citation["attester_count"], 1);
+        assert!((citation["weighted_mean"].as_f64().unwrap() - 0.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn news_quality_keeps_publisher_buckets_for_source_quality() {
+        let attestations = serde_json::json!([
+            att("news:source_quality:nyt", 0.9),
+            att("news:source_quality:nyt", 0.85),
+            att("news:source_quality:reuters", 0.92),
+            att("news:freshness", 0.7),
+            att("news:bias:political_spectrum", 0.4),
+            att("news:bias:economic_spectrum", 0.3),
+        ])
+        .to_string();
+
+        let out = compose_article_quality_at(
+            &attestations,
+            "news:article:nyt:2026-05-15:climate-summit",
+            "news_article",
+            now_fixed(),
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+
+        let source_quality = &parsed["quality"]["source_quality"];
+        assert_eq!(source_quality["attester_count"], 3);
+        let nyt_mean = source_quality["buckets"]["nyt"].as_f64().unwrap();
+        assert!((nyt_mean - 0.875).abs() < 1e-9, "nyt mean ≈ 0.875, got {nyt_mean}");
+        let reuters_mean = source_quality["buckets"]["reuters"].as_f64().unwrap();
+        assert!((reuters_mean - 0.92).abs() < 1e-9);
+
+        let bias = &parsed["quality"]["bias"];
+        assert_eq!(bias["attester_count"], 2);
+        assert!(bias["buckets"]["political_spectrum"].is_number());
+        assert!(bias["buckets"]["economic_spectrum"].is_number());
+
+        let freshness = &parsed["quality"]["freshness"];
+        assert!(freshness["buckets"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn ignores_attestations_outside_the_sub_kind_family() {
+        let attestations = serde_json::json!([
+            att("encyclopedia:accuracy:physics", 0.9),
+            att("news:source_quality:nyt", 0.8), // wrong family for encyclopedia query
+            att("credits:mental_health:en:arc_question", 1.0), // unrelated
+        ])
+        .to_string();
+
+        let out = compose_article_quality_at(
+            &attestations,
+            "wikipedia:article:einstein",
+            "encyclopedia_article",
+            now_fixed(),
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+
+        let quality = parsed["quality"].as_object().unwrap();
+        assert_eq!(quality.len(), 1, "only the encyclopedia: family is aggregated");
+        assert!(quality.contains_key("accuracy"));
+    }
+
+    #[test]
+    fn expired_attestations_are_filtered_out() {
+        let attestations = serde_json::json!([
+            {
+                "attestation_type": "scores",
+                "asserted_at": "2026-05-01T10:00:00Z",
+                "expires_at": "2026-05-10T10:00:00Z", // expired by now_fixed (2026-05-20)
+                "attestation_envelope": {"dimension": "encyclopedia:accuracy:physics", "score": 0.99},
+            },
+            att("encyclopedia:accuracy:physics", 0.7),
+        ])
+        .to_string();
+
+        let out = compose_article_quality_at(
+            &attestations,
+            "wikipedia:article:einstein",
+            "encyclopedia_article",
+            now_fixed(),
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+
+        let accuracy = &parsed["quality"]["accuracy"];
+        assert_eq!(accuracy["attester_count"], 1, "expired attestation excluded");
+        assert!((accuracy["weighted_mean"].as_f64().unwrap() - 0.7).abs() < 1e-9);
+    }
+
+    #[test]
+    fn unknown_sub_kind_returns_empty_quality_map() {
+        let attestations = serde_json::json!([
+            att("encyclopedia:accuracy:physics", 0.9),
+        ])
+        .to_string();
+
+        let out = compose_article_quality_at(
+            &attestations,
+            "wikipedia:article:einstein",
+            "accord_data", // no published quality vocabulary
+            now_fixed(),
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(parsed["quality"].as_object().unwrap().is_empty());
+    }
+}

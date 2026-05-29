@@ -278,6 +278,29 @@ fn wa_state(engine: &Bound<'_, PyAny>, domain: String, language: String) -> PyRe
     .map_err(|e| json_err("compose_wa_state", e))
 }
 
+/// One-call surface for an article's quality reading
+/// (CIRISNodeCore#19 Phase 3). For an `external_content` article at
+/// `article_key_id`, fetches every active `scores` attestation
+/// targeting it and aggregates per-axis quality per
+/// [`crate::compose::compose_article_quality`].
+///
+/// `sub_kind` is one of `encyclopedia_article` / `news_article` /
+/// `blog_post` / `chat_message` and selects which dimension family
+/// (`encyclopedia:*` / `news:*` / `blog:*` / `chat:*`) drives the
+/// aggregation.
+#[pyfunction]
+fn article_quality(
+    engine: &Bound<'_, PyAny>,
+    article_key_id: String,
+    sub_kind: String,
+) -> PyResult<String> {
+    let attestations_json: String = engine
+        .call_method1("list_attestations_for", (&article_key_id,))?
+        .extract()?;
+    crate::compose::compose_article_quality(&attestations_json, &article_key_id, &sub_kind)
+        .map_err(|e| json_err("compose_article_quality", e))
+}
+
 /// One-call surface for the **Local** section of the three-tier UI —
 /// the user's own self-scoped `external_content` Contributions.
 /// Calls `engine.list_contributions` (subject_kind=external_content,
@@ -628,6 +651,8 @@ fn ciris_node_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(local_feed, m)?)?;
     m.add_function(wrap_pyfunction!(community_feed, m)?)?;
     m.add_function(wrap_pyfunction!(global_feed, m)?)?;
+    // External-content quality aggregation (CIRISNodeCore#19 Phase 3)
+    m.add_function(wrap_pyfunction!(article_quality, m)?)?;
     // Phase 3 (CIRISNodeCore#11 — cohabitation install + node-mode serving)
     m.add_function(wrap_pyfunction!(install_cohabitation, m)?)?;
     m.add_function(wrap_pyfunction!(install_node_mode_serving, m)?)?;
