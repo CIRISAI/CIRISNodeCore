@@ -38,8 +38,10 @@ const PROXY_CACHE_BYTES: f64 = 4.0 * GIB;
 
 /// Server-tier disk gate. Servers below this don't exist (in the
 /// model); above it, we assume disk is not the bottleneck.
+/// Bumped 256 GB → 1 TB per Eric — gives headroom for news-archive
+/// + full-internet-replacement scenarios.
 #[allow(dead_code)]
-const SERVER_DISK_GATE_BYTES: f64 = 256.0 * GIB;
+const SERVER_DISK_GATE_BYTES: f64 = 1024.0 * GIB;
 
 /// Second-order trust discount — server tier replicates `T(T(host))`
 /// at this fraction (most second-order content isn't relevant).
@@ -326,6 +328,33 @@ fn scenarios() -> Vec<Scenario> {
             cohort,
             daily_fetch_bytes: 100.0 * MB,
         },
+        // Full internet replacement: everything humans generate +
+        // consume online — social posts, chat, photos, short video,
+        // news, encyclopedia, blogs, collaborative docs. Excludes
+        // streaming-CDN long-form video (Netflix / YouTube live
+        // streaming) which is a transport problem, not a federation-
+        // substrate problem; those would ride ContentFetch external_ref
+        // pointers to S3-class stores, not inline blobs.
+        //
+        // 5B users (humans online); 50 MB/user/day across all forms
+        // (text + photos + short clips); R=250 (wider trust nets when
+        // a single substrate carries all your sources); 10% server
+        // tier (more diversity needs more replication anchors); 10y
+        // retention (the "permanent record" target — beats Internet
+        // Archive's "best effort" model). Daily fetch 1 GB/user
+        // ≈ Cisco's median-consumer internet pull (excluding raw
+        // video streaming, which is the CDN tier).
+        Scenario {
+            name: "full_internet",
+            n_users: 5_000_000_000.0,
+            tier_mix: TierMix { client: 0.35, proxy: 0.55, server: 0.10 },
+            trust_radius: 250.0,
+            daily_bytes: 50.0 * MB,
+            avg_envelope_bytes: 50.0 * KB,
+            retention_days: 3650.0, // 10 years
+            cohort,
+            daily_fetch_bytes: 1.0 * GB,
+        },
     ]
 }
 
@@ -418,8 +447,13 @@ fn print_comparison(s: &Scenario, r: &FedRollup) {
 
     // Server-tier feasibility check.
     let avg_server_storage = r.per_tier[2].1.storage_bytes;
+    let gate_tb = SERVER_DISK_GATE_BYTES / (1024.0 * 1024.0 * 1024.0 * 1024.0);
     let disk_gate_ok = avg_server_storage <= SERVER_DISK_GATE_BYTES * 10.0;
-    let disk_gate_marker = if disk_gate_ok { "✓ within 10× the 256 GB gate" } else { "⚠ exceeds 10× the 256 GB gate" };
+    let disk_gate_marker = if disk_gate_ok {
+        format!("✓ within 10× the {} TB gate", gate_tb as u64)
+    } else {
+        format!("⚠ exceeds 10× the {} TB gate", gate_tb as u64)
+    };
     println!("    Avg server-tier storage:           {} {}",
         fmt_bytes(avg_server_storage), disk_gate_marker);
 }

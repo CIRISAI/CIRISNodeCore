@@ -83,7 +83,7 @@ Edge v1.0 ships a global `agent_mode` switch. Per Eric:
 |---|---|---|---|
 | **client** | Personal device only | none | No inbound serving. No replication. Outbound own contributions; fetches via proxy. Phone / tablet / low-end laptop. |
 | **proxy** | **Default tier** | none | Caches transit blobs (best-effort, LRU). Responds to ContentFetch from cache. Forwards on miss. Laptop / desktop. |
-| **server** | Full federation node | **≥ 256 GB** | Long-term replicates trust-set content per cohort overlap. Responds to ContentFetch from full archive. Home server / VPS. |
+| **server** | Full federation node | **≥ 1 TB** | Long-term replicates trust-set content per cohort overlap. Responds to ContentFetch from full archive. Home server / VPS. |
 
 Tier mix is a **deployment-population** parameter, not a per-user
 choice mid-session. The model parameterizes federation behavior as
@@ -246,6 +246,7 @@ The companion binary models five reference scenarios:
 | `media_heavy` | 10⁶ | (0.30, 0.60, 0.10) | 150 | 500 KB/d (incl. blobs) | Facebook-style activity |
 | `twitter_scale` | 10⁹ | (0.45, 0.50, 0.05) | 150 | 5 KB/d | Tweet-sized contributions, planetary |
 | `news_replacement` | 10⁹ | (0.40, 0.55, 0.05) | 300 | 100 KB/d | Wider trust nets, longer articles |
+| `full_internet` | 5×10⁹ | (0.35, 0.55, 0.10) | 250 | 50 MB/d | All humans, all UGC content forms, 10y archive — the "what would it take" upper bound |
 
 Each scenario prints:
 - Storage per tier (per-user × tier proportion × N)
