@@ -22,17 +22,33 @@
 
 ## 0. The thesis (one paragraph)
 
-CEWP is an **AI governance and superalignment platform**, structured
-as an *epistemic web* — a cryptographically-accountable federation
-where humans, agents, and organizations are first-class participants,
-where every load-bearing claim ("this content is accurate," "this
-peer is trusted," "this action should be deferred to a human") is a
-signed wire-format artifact, and where the federation's collective
-weighted-aggregate scoring of those artifacts is what *governs* the
-system in real time. Agents live INSIDE CEWP; they don't have CEWP
-as a tool. The platform's job is to make the agents' reasoning
-auditable, their trust accumulable, their misalignment slashable,
-and their deference to humans first-class.
+**CEWP's premise: big tech is not necessary. CEWP's bet:
+cryptographic substrate + standardized ethical tracing prove it.**
+
+CEWP is a **decentralized replacement for the internet** — and
+simultaneously an **AI governance and superalignment platform** —
+structured as an *epistemic web* of cryptographically-accountable
+federations where humans, agents, and organizations are first-class
+participants. Every load-bearing claim ("this content is accurate,"
+"this peer is trusted," "this action should be deferred to a
+human") is a signed wire-format artifact; the federation's
+collective weighted-aggregate scoring of those artifacts is what
+*governs* the system in real time. Agents live INSIDE CEWP; they
+don't have CEWP as a tool. The substrate eliminates the centralized
+internet's structural failure modes (surveillance, platform lock-
+in, trust collapse, content-quality regression, identity
+fragmentation) AND removes the dependency on large datacenters at
+both the data-sharing and AI-inference layers — substrate runs on
+commodity hardware down to home-server class (CIRISHome on Jetson
+Orin, already deployment-ready), with the
+[scaling model](FEDERATION_SCALING_MODEL.md) showing the entire
+internet at 5B users fits on home-broadband-class infrastructure
+without a single datacenter required. The supporting empirical
+bet — that *reasoning has a shape we can measure as everything else
+scales*, and that distributed trace commons can substitute for
+proprietary benchmarking and centralized alignment authority — is
+articulated in the [research synthesis at
+ciris.ai/research-status](https://ciris.ai/research-status/).
 
 ---
 
@@ -247,7 +263,167 @@ citizens of CEWP.
 
 ---
 
-## 4. The H3ERE pipeline — where agents reason
+## 4. CEWP proves we do not need big tech
+
+This is the load-bearing premise and the load-bearing bet. CEWP is
+not just an "AI governance platform that happens to be
+decentralized." The decentralization is the SAME structural property
+that makes the AI governance work — and the same property is what
+proves the substrate doesn't require big-tech datacenters, big-tech
+AI labs, big-tech identity providers, or big-tech moderation
+oligopolies to function. Two things at once, one substrate, one
+mathematical claim that has to hold for the whole thing to work.
+
+The bet (per [ciris.ai/research-status](https://ciris.ai/research-status/)):
+
+> "Reasoning has a shape we can measure as everything else scales."
+
+If reasoning shape is measurable via standardized ethical tracing —
+the corridor between rigidity (`ρ → 1`, single-voice collapse) and
+chaos (`ρ → 0`, vacuous dispersal), with effective diversity
+`k_eff = k / (1 + ρ(k−1)) → 1` as constraints correlate — then the
+substrate's collective measurement of that shape can substitute for
+centralized authority. No "alignment lab" needs to be the arbiter;
+no datacenter operator needs to be the trust root; no platform
+needs to be the moderator. The federation's cryptographic
+attestation graph *is* the measurement substrate, and the
+distributed trace commons (from CIRIS's [free, AGPL,
+mission-locked](https://ciris.ai/) runtime) accumulates the
+consented-trace evidence that lets that measurement happen.
+
+### 4.1 The internet's biggest problems (and how CEWP eliminates each)
+
+| Problem of the centralized internet | CEWP mechanism that addresses it |
+|---|---|
+| **Centralization** — five companies (Google, Meta, Amazon, Microsoft, Apple) own the substrate; everyone else is downstream + extractable | Federation of equals; no central party; every byte goes through the trust × capacity intake gate at each operator's own infrastructure |
+| **Surveillance capitalism** — every interaction is data-mined; the substrate's economic model IS extraction | CEG locality dividend: 65% of typical activity (self/family scope) NEVER leaves your device because the wire format won't carry it; identity-aware storage means YOUR data sits in YOUR substrate |
+| **Trust crisis** — deepfakes, deniable provenance, "could be a bot," nobody knows what's real | Cryptographic provenance on every claim (hybrid Ed25519 + ML-DSA-65); CEG attestation graph with consumer-computable trust scores; quality attestations on content (`encyclopedia:accuracy:*`, `news:source_quality:*`); the federation can answer "who said this, who vouches for them, how fresh is the claim" for every wire artifact |
+| **Misinformation amplification** — algorithmic feeds optimize for engagement, not truth | No engagement-optimization layer in the substrate; trust depth is consumer-controlled (operator picks 0 / 1 / 2 / 3 per [scaling model §1.4](FEDERATION_SCALING_MODEL.md)); quality compose surfaces aggregate per-article truth signals; consumers see what their trust set vouched for, not what an ad-revenue optimizer surfaced |
+| **Platform lock-in** — Facebook holds your network; you can't leave because everyone else hasn't | Federation key is portable across deployments; content is SHA-addressed; identity is wire-format-native; switching cost approaches zero; network effects don't trap you |
+| **Identity fragmentation** — 100 logins, OAuth providers gate-keep your identity, password fatigue | One federation key works across the substrate; pseudonymous by default; hybrid PQC means the key is good for decades; identity rooted in cryptography, not in a corporate database |
+| **Content moderation conflicts** — every platform sets different rules; cross-platform consistency impossible; content is hostage to deplatforming risk | Per-cohort moderation via NodeCore's pipeline (ModerationEvent → witness aggregation → WA-quorum slashing); each operator chooses trust threshold + recursion depth (their disk, their rules); reconsideration is structural so mistakes get reversed |
+| **Network-effects monopolies** — once entrenched, incumbents are uncatchable; new entrants can't bootstrap a user base | Federation interop at the wire-format layer means new entrants are wire-compatible from day one; users carry their identity + trust set with them; the substrate is the network, not any single application atop it |
+| **No cryptographic accountability** — claims circulate with no provenance; "I read it online" has no signature chain | Every wire artifact is signed; persist's transparency log (Merkle-anchored audit chain) gives forensic auditability; CEG §10.1.2 ContentMiss feedback handles freshness decay; the substrate's epistemic layer is *the* layer — claims have provenance by construction |
+| **Datacenter dependency (data)** — billions of users → giant centralized infrastructure → climate cost, single points of failure, national security risks | [Scaling model](FEDERATION_SCALING_MODEL.md) shows full-internet replacement (5B users, 50 MB/user/day, 10y archive) fits on **500 M L1 servers + 2.75 B L0 proxies** — roughly one server per ten humans, the density home-internet / IoT deployments already hit. **No datacenters required.** |
+| **Datacenter dependency (AI)** — current AI requires massive centralized compute; democratic access is gated by a handful of labs; alignment decisions made by 5-10 organizations globally | Agents are first-class participants running ON the same substrate as humans. H3ERE pipeline runs on consumer hardware. [CIRISHome](https://github.com/CIRISAI/CIRISHome) on Jetson Orin is deployment-ready. Edge-class LLMs (Llama-family, etc.) run locally. The federation's collective wisdom (the attestation graph) substitutes for the centralized lab's training-time alignment — and is observable, governable, and reversible in ways the lab's RLHF is not. |
+
+### 4.2 The datacenter-elimination claim, precisely
+
+**Two distinct datacenter dependencies, both eliminated:**
+
+#### 4.2.1 Data-sharing datacenters (today: Facebook / YouTube / Twitter / etc.)
+
+The [scaling model](FEDERATION_SCALING_MODEL.md) v0.3 with proxy-
+as-L0-server framing produces:
+
+| Scenario | Per-server load | Aggregate fed | Verdict |
+|---|---|---|---|
+| `full_internet_v1` (5 B users, 50 MB/u/day) | L0 218 GB / 23-day retention; L1 741 GB / 37-day retention | 1098 EB | ✓ 500 M servers globally |
+
+500 M servers globally is the order of magnitude where home internet
+densities already sit (one server per ten humans). Bandwidth per
+server is ~5 GB/day (residential broadband easily handles).
+**No datacenters required for the storage + transport substrate.**
+
+#### 4.2.2 AI inference datacenters (today: OpenAI / Anthropic / Google clusters)
+
+The CEWP claim is not that all AI inference moves off datacenters
+tomorrow — large-frontier-model training still requires substantial
+compute. The claim is that **inference + alignment-relevant
+reasoning moves to the edge**:
+
+* **H3ERE pipeline runs on commodity CPU + edge accelerators.**
+  CIRISHome's reference deployment is Jetson Orin (~$2K hardware),
+  not a GPU cluster.
+* **Edge-class LLMs (Llama 3/4 family, Phi, Mistral local, etc.)
+  handle the agent's reasoning loop.** Frontier models are an
+  optional escalation, not a requirement.
+* **Alignment work moves to the federation, not the lab.** The
+  trust graph, the moderation pipeline, the quality attestations
+  — these run distributed across operators, each contributing
+  modest compute. No central "alignment lab" is the load-bearing
+  authority.
+
+The economic shift is significant: rather than a few thousand
+alignment researchers at 5 labs deciding what every model does,
+the substrate runs governance distributed across the operator
+population, with cryptographic accountability and reversibility.
+**Datacenter compute becomes optional infrastructure for special-
+purpose workloads (e.g., frontier model training), not the
+substrate everything depends on.**
+
+### 4.3 The distributed trace commons (how the bet is paid out)
+
+CEWP's bet pays out via standardized ethical tracing as a public
+good. The mechanism, per the [research synthesis](https://ciris.ai/research-status/):
+
+* **Consented traces from real use** — the free, AGPL, mission-
+  locked CIRISAgent runtime generates H3ERE pipeline traces with
+  privacy-preserving schemas (NOT transcript dumps; the [scrub
+  pipeline](https://github.com/CIRISAI/CIRISEdge/blob/main/docs/BENCHMARKS.md)
+  runs Classify + redact before storage at ~10 ns/byte). Users
+  consent to trace contribution as part of using the agent.
+* **Distributed trace commons** — traces accumulate across operators,
+  not in a single central corpus owned by a single lab. The CEG
+  attestation graph carries trace provenance; LensCore's detector
+  family runs on the commons-wide trace stream; no party owns the
+  measurement.
+* **Reasoning-shape measurement as alignment signal** — the
+  corridor metrics (ρ, k_eff, completion corridor / refusal
+  boundary / hesitation zone field structures) compute over the
+  trace stream. Misalignment shows up as shape regression
+  detectable by any operator running LensCore. Alignment is
+  measurable WITHOUT requiring access to the model's private state
+  or its training data.
+* **Trace commons replaces proprietary benchmarking** — Anthropic /
+  OpenAI / Google publish benchmark scores selectively, on their
+  schedule, against their chosen evals. The distributed trace
+  commons gives the federation the same evaluative capacity in
+  real time, on every deployed agent, observable to everyone with
+  trust-graph access. The asymmetry of the benchmark publication
+  cycle disappears.
+
+This is what "we don't need big tech" looks like at the AI-alignment
+layer specifically: the measurement substrate is owned by the
+federation, generated by consent at real use, and computed in
+real-time on infrastructure the federation runs. The lab's RLHF
+becomes one historical training-time input; the federation's
+runtime trust graph becomes the live alignment surface.
+
+### 4.4 Why this matters now
+
+Three convergent trends make CEWP not just possible but timely:
+
+1. **Capability maturity at the edge.** Edge-deployable LLMs and
+   the H3ERE pipeline running on consumer-class hardware
+   (CIRISHome reference deployment on Jetson Orin) demonstrate the
+   AI-substrate no-datacenter claim is achievable today, not in
+   some future theoretical regime.
+2. **Substrate maturity.** [CEG 0.2](https://github.com/CIRISAI/CIRISRegistry/tree/main/FSD/CEG)
+   is published; [CIRISPersist v3.4.x](https://github.com/CIRISAI/CIRISPersist)
+   has the trust-admission gate + popularity×freshness eviction
+   sweeper; [CIRISEdge v0.17.x](https://github.com/CIRISAI/CIRISEdge)
+   has the transport. The 7-repo Agent 3.0 stack is largely
+   shipping; what's in design vs deployed is documented in §11.
+3. **Centralized-internet failure modes accelerating.** Surveillance
+   capitalism, deepfake-driven trust collapse, platform-decision
+   asymmetries (a CEO blocks a country), AI alignment being
+   determined by 5 labs globally — the structural pressures
+   that motivate CEWP are getting worse, not better, year over
+   year. The federation substrate doesn't have to be perfect to
+   be a structural improvement.
+
+CEWP is not promising to prove "we don't need big tech" in some
+abstract future. It's the seven-repo Agent 3.0 stack, shipping now,
+with the scaling model showing the structural properties hold at
+full-internet scale, with the research synthesis showing
+reasoning-shape measurement is tractable on the trace commons.
+The path from "running today on Jetson Orin home deployments" to
+"running at 5B-user scale" is incremental, not revolutionary —
+same substrate, same wire format, same trust graph, just more
+participants accumulating the proof.
+
+## 5. The H3ERE pipeline — where agents reason
 
 The agent runtime (CIRISAgent) drives every action through the
 **H3ERE pipeline**: DMA → CSDMA → DSDMA → ASPDMA → conscience →
@@ -595,12 +771,20 @@ soup is for everyone; come participate.*
 
 ### External
 
+* [**ciris.ai/research-status**](https://ciris.ai/research-status/)
+  — the research synthesis paper; the empirical bet
+  (reasoning-shape measurement, corridor metrics, k_eff math, the
+  distributed trace commons that replaces proprietary benchmarking)
+  that the "we don't need big tech" premise rests on
 * [CEG 0.2 PWD](https://github.com/CIRISAI/CIRISRegistry/tree/main/FSD/CEG)
   — the authoritative wire-format spec
 * [The Accord](https://ciris.ai/ciris_accord.pdf) — the ethical
   framework the substrate enforces
 * [CIRIS Architecture paper](https://doi.org/10.5281/zenodo.18137161)
 * [Coherence Ratchet paper](https://doi.org/10.5281/zenodo.18142668)
+* [ciris.ai](https://ciris.ai/) — public-facing positioning ("A free
+  ChatGPT alternative you can actually check, in your language, on
+  your phone")
 
 ---
 
