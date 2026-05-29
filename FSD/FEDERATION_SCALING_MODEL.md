@@ -1,273 +1,351 @@
 # Federation Scaling Model
 
-**Status:** model v0.1 — empirical inputs measured (Verify v2.7.0/v2.8.0
-ubuntu-latest CI); Edge v0.10.0 targets carry forward to v1.0; tier
-definitions are the v1.0 design Edge is holding the release for.
-**Companion:** `examples/scale_model.rs` runs the model on preset
-scenarios + accepts overrides — `cargo run --example scale_model`.
+**Status:** model v0.2 — fetch-on-demand load-bearing; full-internet
+scenario fits per-server gates.
+**Empirical inputs:** Verify v2.7.0 / v2.8.0 measured on
+ubuntu-latest CI; Edge v0.10.0 targets carrying into v1.0; Persist
+v3.1.1 storage floor.
+**Companion:** `examples/scale_model.rs` — `cargo run --example
+scale_model`.
 
-This is the model we use to answer "what does it take to replace
-Twitter / Facebook / news at the CIRIS substrate?". The question
-sounds large; the empirical inputs make it small. Most data is local;
-replication only happens for sources you trust (or trust to be
-trusted). The toy below lets us play `what-if` on tier mix, trust
-radius, and cohort distribution and see storage / bandwidth / compute
-roll up.
+This is a design-search tool. The question is not "how big can it
+get" — it's "what caching + replication policy makes CIRIS substrate
+carry the entire internet from day one on commodity hardware?" The
+toy lets you change knobs, see per-server feasibility flip from
+✓ to ⚠, and converge on the v1 parameter set.
 
 ---
 
-## 1. Empirical inputs (measured)
+## 1. The CEG locality dividend
 
-All numbers are wall-clock on GitHub Actions `ubuntu-latest` runners
-unless noted — the conservative-by-design baseline. Dev-host CPUs run
-2–3× faster.
+The biggest scaling win is structural and comes for free from the
+wire format, not from policy or runtime enforcement:
 
-### 1.1 Crypto (CIRISVerify v2.8.0)
+> **`cohort_scope` is a CEG wire field. The substrate refuses to
+> replicate Contributions outside their stated cohort. Local data
+> stays local because the wire shape will not carry it elsewhere.**
+
+The default cohort distribution (FSD §3) has 65% of activity at
+`self` or `family` scope. That 65% is **structurally invisible to
+the federation**:
+- It never enters any peer's `federation_attestations`.
+- It never crosses Edge as a `Contribution{Submit,Replicate}`.
+- It never appears in any replication, caching, or discovery path.
+
+The federation pays for the remaining 35%
+(`σ_publishable = σ_community + σ_affiliations + σ_species +
+σ_planet + σ_federation`). The model accounts for this as a hard
+floor — anything `≤ family` does not appear in inter-host bandwidth,
+storage, or CPU columns at all. Privacy and scale share the same
+load-bearing primitive.
+
+---
+
+## 2. Empirical inputs (measured)
+
+All numbers are wall-clock on GitHub Actions `ubuntu-latest`
+runners — the conservative-by-design baseline. Dev-host CPUs run 2–3×
+faster.
+
+### 2.1 Crypto (CIRISVerify v2.8.0)
 
 | Op | Cost |
 |---|---|
 | `hybrid_sign` (Ed25519 + ML-DSA-65) | **466 µs** (~2.15 K sign/s/core) |
 | `hybrid_verify` | **276 µs** (~3.62 K verify/s/core) |
-| `aes_gcm_encrypt` / 256 B | 428 ns (570 MiB/s) |
 | `aes_gcm_encrypt` / 64 KiB | 11.2 µs (**5.45 GiB/s**) |
 | `aes_gcm_decrypt` / 64 KiB | 10.3 µs (**5.91 GiB/s**) |
 | `hkdf_sha256` | 548 ns |
-| `hmac_sha256` | 242 ns |
 | Merkle `root` (any N) | 19.7 ns (O(1)) |
-| Merkle `append` @ 64K leaves | ~1.33 µs (750 K appends/s) |
-| Merkle `inclusion_proof` @ 64K | 171 ns |
-| Merkle `verify_inclusion` @ 64K | 1.99 µs |
+| Merkle `append` @ 64K leaves | 1.33 µs (750 K/s) |
 
-### 1.2 Edge (v0.10.0 targets → v1.0 contract)
+### 2.2 Edge (v0.10.0 targets → v1.0 contract)
 
 | Op | Target |
 |---|---|
-| `envelope_canonicalize` (slope) | ~250 ns/KiB |
+| `envelope_canonicalize` slope | ~250 ns/KiB |
 | `envelope_verify` (single) | ~280 µs (verify-dominated) |
 | `dispatch_inbound` (256 B) | < 400 µs → ~2.5 K msg/s/thread |
-| `outbound_enqueue Ephemeral` | < 600 µs (sign-dominated) |
-| `outbound_enqueue Durable` | < 1.5 ms (+1 SQLite row) |
+| `outbound_enqueue Durable` | < 1.5 ms (incl. SQLite row) |
 | `content_fetch_roundtrip` 4 KiB | < 2 ms |
-| `content_fetch_roundtrip` 64 KiB | < 30 ms |
 | `content_fetch_roundtrip` 1 MiB | < 500 ms |
-| `transport_reticulum_loopback` 256 B | < 500 µs |
-| `transport_http_loopback` 1 KiB | < 1 ms |
-| `subscription_throughput` (1 sub) | > 50 K events/sec |
+| `inline_text_pipeline` Classify+Scrub | **5–10 ns/byte** |
 
-### 1.3 Persist (v3.1.1)
+### 2.3 Persist (v3.1.1)
 
 | Op | Cost |
 |---|---|
 | SQLite per-row write (incl. async wrapper) | ~1.5 ms |
-| Ingest pipeline @ 768 rows (release) | ~9 ms → ~85 K rows/s |
-| Software signer (no HW backing) | ~100 µs/sign |
-| Hardware signer (TPM/Keystore) | ~30 µs/sign |
-| NATS JetStream comparator | ~100 µs/row (15× faster — different durability story) |
+| Ingest pipeline @ 768 rows (release) | ~9 ms (~85 K rows/s) |
+| Software signer | ~100 µs/sign |
+| Hardware signer (TPM) | ~30 µs/sign |
+| H3ERE trace per agent decision | ~14 KB (≈14 components × 1 KB) |
 
-### 1.4 Comparison anchors (web-scale baselines)
+### 2.4 Comparison anchors
 
-| Service | Volume / day | Per-user / day | Notes |
-|---|---|---|---|
-| Twitter | ~500 M tweets, ~70 GB raw | ~0.5 tweet × 140 B ≈ **70 B raw / 1 KB w/ metadata** | Avg active user |
-| Facebook | ~4 PB new content | **~2 MB / user / day** | ~2 B users, all media |
-| News (major publisher) | ~10 K articles, ~100 MB | (~1 publisher, not per user) | ~10 KB avg article |
-| Wikipedia | ~7 M EN articles, ~80 GB compressed | (static corpus) | ~11 KB compressed avg |
-
----
-
-## 2. Topology — v1.0 tier model
-
-Edge v1.0 ships a global `agent_mode` switch. Per Eric:
-
-| Tier | Role | Disk gate | Behavior |
-|---|---|---|---|
-| **client** | Personal device only | none | No inbound serving. No replication. Outbound own contributions; fetches via proxy. Phone / tablet / low-end laptop. |
-| **proxy** | **Default tier** | none | Caches transit blobs (best-effort, LRU). Responds to ContentFetch from cache. Forwards on miss. Laptop / desktop. |
-| **server** | Full federation node | **≥ 1 TB** | Long-term replicates trust-set content per cohort overlap. Responds to ContentFetch from full archive. Home server / VPS. |
-
-Tier mix is a **deployment-population** parameter, not a per-user
-choice mid-session. The model parameterizes federation behavior as
-`(α_client, α_proxy, α_server)` where the three sum to 1.
-
----
-
-## 3. Replication semantics
-
-Every Contribution carries a `cohort_scope`. Replication policy is
-the join of (host tier, host trust set, cohort scope):
-
-**Tier behavior:**
-- **client** — replicates *nothing* inbound; fetches own data only.
-- **proxy** — caches transit, no long-term replication. Bounded by
-  `proxy_cache_bytes` (deployment-config; default model: 4 GiB LRU).
-- **server** — long-term replicates `T(host)`'s contributions where
-  `cohort_scope ≥ community` (i.e. anything publishable). Personal-
-  scope content (`self` / `family`) is NEVER replicated by anyone
-  else — that's the discipline that makes "most data is local"
-  arithmetically true.
-
-**Trust set `T(host)`:** the directly-trusted peers — typically
-Dunbar-shaped, default model `R = 150`. Server tier additionally
-replicates the second-order set (`T(T(host))`) at a discount factor
-`δ = 0.1` (10% of second-order content because most isn't relevant
-to my circle). Higher orders are not pre-replicated; fetched on
-demand via ContentFetch.
-
-**Cohort scope distribution `σ`:** what fraction of a typical
-user's daily activity lands at each scope. Default model:
-
-| Scope | Fraction | Replicated by |
+| Service | Volume / day | Per-user / day |
 |---|---|---|
-| `self` (private notes / drafts) | 0.50 | nobody — local only |
-| `family` | 0.15 | nobody outside family — local + family-trusted only |
-| `community` | 0.15 | server-tier members of community |
-| `affiliations` (work / projects) | 0.10 | server-tier members of affiliations |
-| `species` (broadcast-to-humans) | 0.05 | every server in federation that trusts the author transitively |
-| `planet` (environmental data, multispecies) | 0.03 | same |
-| `federation` (governance, P1-P11 primitives) | 0.02 | every server in federation (gossiped via FederationAnnouncement) |
-
-The "most data is local" property holds because **65% of typical
-activity is self+family** — never replicated off-device. The
-remaining 35% goes through the trust-radius funnel.
+| Twitter | ~500 M tweets / ~70 GB raw | ~70 B raw |
+| Facebook | ~4 PB | ~2 MB |
+| Wikipedia | ~7 M EN articles / ~80 GB compressed | (static corpus) |
+| **Modeled `full_internet`** | ~250 PB/day | ~50 MB |
 
 ---
 
-## 4. Per-actor cost model
+## 3. v1 tier model
 
-For a user `U` running tier `t ∈ {client, proxy, server}`:
+| Tier | Disk gate | Behavior |
+|---|---|---|
+| **client** | none | No inbound serving. No cache. Own contributions + own traces. Phone / tablet. |
+| **proxy (default)** | none | LRU-bounded encrypted cache (TTL after last access). Serves cache hits; forwards misses. Laptop / desktop. |
+| **server** | **≥ 1 TB** | Direct-trust archive (R first-order × σ_publishable × T_direct), encrypted cache, replicated publishable agent traces. Home server / VPS. |
 
-### 4.1 Storage (bytes resident on `U`'s persist)
+**Feasibility budgets per server (the gates the model checks):**
 
-```
-storage(U, t) = own(U) + replicated(U, t) + proxy_cache(t)
-```
-
-Where:
-- `own(U)` = `U`'s contributions × payload size × retention (T days).
-  Default model: `D = 50 KB/day` activity (chat-heavy use); retention
-  unbounded for own data, capped at `T = 365` days for archive sizing.
-- `replicated(U, server)` = sum over `T(U)`'s server-publishable
-  activity × cohort-overlap × T. With default model and `R = 150`:
-  `150 peers × 50 KB/day × 0.35 community+ × T`.
-  `replicated(U, client | proxy) = 0`.
-- `proxy_cache(t)`:
-  - client: 0
-  - proxy: 4 GiB (LRU; deployment-config)
-  - server: equal to or greater than `replicated` (no separate cap)
-
-### 4.2 Bandwidth (bytes/sec on `U`'s link)
-
-```
-outbound(U) = D(U) × fanout(t, σ)
-inbound(U)  = trust_inbound(U, t) + fetch_inbound(U)
-```
-
-Where:
-- `fanout(client) = 1` (own → upstream proxy)
-- `fanout(proxy) = 1 + transit` (own + relay-through)
-- `fanout(server) = 1 + steward_set_size × σ_publishable + transit`
-- `trust_inbound(server) = R × D × σ_publishable`
-- `trust_inbound(client | proxy) ≈ 0` (proxy fetches on demand only)
-- `fetch_inbound(U)` ≈ user's daily browse traffic (model: 100 MB/day
-  for media-heavy use)
-
-### 4.3 Compute (CPU-seconds/day on `U`)
-
-```
-sign(U)   = D / avg_envelope_size × 466 µs    # hybrid_sign cost
-verify(U) = inbound_envelopes × 276 µs        # hybrid_verify cost
-canon(U)  = (sign + verify envelopes) × env_size × 250 ns/KiB
-```
-
-Modeling notes:
-- Inbound envelope count for `server`: every replicated contribution
-  + every ContentFetch hit. The verify path dominates server CPU.
-- `dispatch_inbound` adds ~120 µs per envelope (canonicalize +
-  replay-window + handler) on top of the 276 µs verify.
+| Resource | Per-server gate | Source |
+|---|---|---|
+| Disk | 1 TB | Eric's spec, this session |
+| Bandwidth | 1 Gbps (10.8 TB/day sustained) | Residential fiber |
+| CPU | 1 full-utilization core (86.4 K cpu-sec/day) | Per-process CIRIS share |
 
 ---
 
-## 5. Federation rollup
+## 4. v1 caching + replication policy (load-bearing)
 
-Total federation storage:
-```
-S_fed = N × Σ_t α_t × storage(U, t)
-```
+### 4.1 Replication
 
-Server tier dominates the storage rollup; client+proxy contribute
-own-data only. The "trust radius" knob is what bounds server
-storage — bigger `R` means more inbound replication per server.
+- **`self` / `family` scope: never replicates** — CEG wire-format
+  guarantee, §1.
+- **`community` / `affiliations` / `species` / `planet` /
+  `federation` scope** (σ_publishable, default 35%): subject to the
+  policy below.
+- **Direct-trust pre-replication only.** Server tier pre-stores
+  publishable content from R first-order trusted peers for
+  `direct_trust_archive_days` (default v1: 30 d at internet scale).
+- **No second-order pre-replication.** R²-scaled replication is the
+  cliff the v0.1 model fell off; v1 sets it to zero. Second-order
+  content is fetched on demand via discovery + ContentFetch.
 
-Total federation bandwidth:
-```
-B_fed = N × Σ_t α_t × (outbound + inbound)(U, t)
-```
+### 4.2 Caching
 
-The replication multiplier appears here as `α_server × R × D`
-(server inbound is the dominant term).
+- **Fetch-on-demand is the primary inbound path.** A user (any tier)
+  asking for content not in local archive issues `ContentFetch`.
+- **TTL after last access.** Cache holds an item for
+  `cache_ttl_minutes` after the most recent serve. Continuous demand
+  resets the timer; hot content stays warm until LRU evicts.
+- **LRU bound:** `server_cache_max_bytes`. Cache never exceeds this
+  even if everything is hot.
+- **Encrypted at rest.** AES-256-GCM via persist's `ring` backend
+  (5.45 GiB/s write, 5.91 GiB/s read — essentially free).
+- **Encrypted in transit.** Already true via Edge's
+  `InlineText`-style pipeline; cached bytes never cross the wire
+  in cleartext.
+- **Cache hit rate** is an assumption now (default 60% for
+  trust-graph topologies where interest is locally clustered);
+  measured later from real deployments.
+
+### 4.3 Agent traces
+
+The H3ERE pipeline produces ~14 KB of trace components per agent
+decision (per CIRISPersist `INTEGRATION_LENS.md`). Traces are:
+
+- **Scrubbed before storage.** PII / secret redaction via the
+  Classify + Scrub pipeline (10 ns/byte — negligible at any scale).
+- **Stored locally.** Own traces × `trace_retention_days`.
+- **Replicated to direct trust only at `trace_publishable_fraction`.**
+  Most agent traces are personal deliberation (drafts, planning,
+  private reasoning) and stay at `self` scope. The minority that
+  cross to community/affiliations decisions (governance,
+  collaborative work) are replicated via the same direct-trust
+  archive as content. Default: 10% publishable.
 
 ---
 
-## 6. Why this scales (the asymmetry)
+## 5. Per-actor cost model
 
-The CIRIS substrate is NOT trying to be a global CDN. Twitter /
-Facebook serve every user from every datacenter. CIRIS serves:
+For tier `t ∈ {client, proxy, server}` with scenario params:
 
-1. **Your own content from your own device** (always; tier-independent).
-2. **Trusted peers' published content from your trust-set's servers**
-   (server tier only; bounded by `R`, not by `N`).
-3. **Anything else, on demand**, via ContentFetch through proxies and
-   servers along the discovery path.
+```
+storage(t)   = own + direct_trust_archive(t) + cache(t) + traces(t)
+bandwidth_in = fetch_misses + replicated_direct_trust + replicated_traces
+bandwidth_out= D × fanout(σ)
+sign_ops/d   = (D + trace_bytes) / env_size
+verify_ops/d = direct_trust_envs + trace_envs + cache_miss_envs
+cpu_sec/d    = sign + verify + dispatch + canon + scrub + encrypt + decrypt
+```
 
-**The federation-wide replication factor for any single piece of
-content is bounded by trust-graph reach, NOT by `N`.** A community-
-scoped contribution replicates to the union of `T⁻¹(author)` server-
-tier members — typically < 10⁴ servers even at `N = 10⁹`. A
-federation-scoped (P1-P11 governance) contribution replicates more
-broadly, but those are also rare (`σ_federation = 0.02`).
+Where the v1 model collapses prior cost cliffs:
 
-**Compare to Twitter:** a viral tweet hits every datacenter and rides
-~5K-fanout pubsub. CIRIS doesn't have viral as a primitive; "viral
-content" emerges only through the trust graph re-citing it
-(re-quoting the SHA in their own signed payloads), which creates
-new attestations that themselves only propagate via trust links.
-Virality is rate-limited by the trust-fabric topology — by design.
+```
+direct_trust_archive(server) = R × D × σ_publishable × T_direct
+direct_trust_archive(client | proxy) = 0
+cache(t) = min(cache_max, daily_fetch × (TTL_min / 1440) × cache_factor)
+traces(t) = own_traces + (direct_trust × trace_publishable × R if server)
+```
+
+`σ_local_only × D × T` never appears anywhere except `own` — the CEG
+locality dividend.
 
 ---
 
-## 7. Preset scenarios (run via `examples/scale_model.rs`)
+## 6. v1 scenarios
 
-The companion binary models five reference scenarios:
+The companion binary runs ten scenarios. Each prints a per-server
+feasibility report against the three gates.
 
-| Scenario | N | (α_client, α_proxy, α_server) | R | D / user | Notes |
-|---|---|---|---|---|---|
-| `bootstrap` | 10⁴ | (0.30, 0.65, 0.05) | 50 | 20 KB/d | Early federation, light activity |
-| `dunbar_steady` | 10⁶ | (0.40, 0.55, 0.05) | 150 | 50 KB/d | "Normal" tier mix |
-| `media_heavy` | 10⁶ | (0.30, 0.60, 0.10) | 150 | 500 KB/d (incl. blobs) | Facebook-style activity |
-| `twitter_scale` | 10⁹ | (0.45, 0.50, 0.05) | 150 | 5 KB/d | Tweet-sized contributions, planetary |
-| `news_replacement` | 10⁹ | (0.40, 0.55, 0.05) | 300 | 100 KB/d | Wider trust nets, longer articles |
-| `full_internet` | 5×10⁹ | (0.35, 0.55, 0.10) | 250 | 50 MB/d | All humans, all UGC content forms, 10y archive — the "what would it take" upper bound |
+| Scenario | N | Tier (c/p/s) | R | D/user | σ_pub | T_direct | Feasible? |
+|---|---|---|---|---|---|---|---|
+| `bootstrap` | 10⁴ | (30/65/5) | 50 | 20 KB | 35% | 365 d | ✓ |
+| `dunbar_steady` | 10⁶ | (40/55/5) | 150 | 50 KB | 35% | 365 d | ✓ |
+| `media_heavy` | 10⁶ | (30/60/10) | 150 | 500 KB | 35% | 365 d | ✓ |
+| `twitter_scale` | 10⁹ | (45/50/5) | 150 | 5 KB | 35% | 365 d | ✓ |
+| `news_replacement` | 10⁹ | (40/55/5) | 300 | 100 KB | 35% | 365 d | ✓ |
+| **`full_internet_v1`** | **5×10⁹** | **(35/55/10)** | **250** | **50 MB** | **35%** | **30 d** | **✓ 332 GB / 5 GB/d / 43 s/d** |
+| `full_internet_local_heavy` | 5×10⁹ | (35/55/10) | 250 | 50 MB | 30% | 90 d | ✓ 521 GB / 4 GB/d / 36 s/d |
+| `full_internet_global_heavy` | 5×10⁹ | (30/55/15) | 250 | 50 MB | 60% | 14 d | ✓ 330 GB / 9 GB/d / 73 s/d |
+| `village_dense` | 10³ | (40/40/20) | 50 | 30 MB | 30% | 730 d | ✓ 433 GB / 0.6 GB/d / 27 s/d |
+| `full_internet_stretch` | 5×10⁹ | (35/55/10) | 250 | 50 MB | 35% | 365 d | ⚠ 1.72 TB (>1 TB gate) |
 
-Each scenario prints:
-- Storage per tier (per-user × tier proportion × N)
-- Bandwidth per tier (avg + peak estimate)
-- Compute per server tier (verify ops/sec, sign ops/sec)
-- Federation totals
-- Comparison ratio against Twitter / Facebook anchors
+### 6.1 `full_internet_v1` — the v1 target (default cohort)
+
+5 B users, 50 MB/user/day across all UGC content forms
+(text + photos + short clips; excludes long-form video streaming,
+which rides external_ref blob pointers to S3-class stores).
+
+Per-server load:
+- Storage 332 GB (32% of 1 TB) — 178 GB own + 128 GB direct-trust
+  archive + 25 GB agent traces + 128 MB cache
+- Bandwidth 5.15 GB/day (~62 KB/sec)
+- CPU 43 sec/day (0.05% of 1 core)
+
+Replicates to 500 M servers globally — roughly one server per
+ten humans, which is the order of magnitude where today's home
+internet / IoT densities already sit.
+
+### 6.2 `full_internet_local_heavy` — the natural human shape
+
+Same 5 B users with the cohort distribution that matches how human
+attention actually clusters (Robin-Dunbar — tight family / community
+trust, light global). σ_publishable drops from 35% → 30%, but the
+real win is that we can afford a 90-day direct-trust archive (3× v1)
+because the publishable slice is smaller AND lighter on wide-scope
+content (3% vs 10% on species/planet/federation).
+
+Per-server: 521 GB / 4 GB/day / 36 sec/day. Cache hit rate climbs to
+75% (tight communities of interest cluster).
+
+### 6.3 `full_internet_global_heavy` — the governance / OSS shape
+
+The other extreme: federation governance regulars, open-source
+maintainers, scientific collaborators. σ_publishable jumps to 60%,
+forcing the direct-trust archive down to 14 days. Server tier mix
+bumps to 15% to absorb the bandwidth + CPU load.
+
+Per-server: 330 GB / 9 GB/day / 73 sec/day — still fits, just
+working harder. This is the demanding case the model says we CAN
+serve, but it costs more servers.
+
+### 6.4 `village_dense` — the Pi-class anchor
+
+1 000-person village, R = 50, σ_publishable 30% (local-heavy). Tight
+community = high cache locality (85% hit rate), low fanout, slow
+content cycling. The model says a Pi-class home server runs a
+**730-day** direct-trust archive (433 GB) for the entire village on
+~7 KB/sec sustained bandwidth. This is what "the substrate is
+deployable everywhere, including small communities, day one" looks
+like in numbers.
+
+### 6.5 What broke the stretch scenario
+
+`full_internet_stretch` keeps default σ but pushes
+`direct_trust_archive_days` from 30 → 365. Per-server storage hits
+1.72 TB. The model flags the dominant cost (direct-trust archive)
+and the knob to turn — exactly the design-tool behavior we want.
+
+---
+
+## 6.6 Cohort distribution as a scaling lever
+
+The three cohort shapes the model carries:
+
+| Distribution | self+family | publishable | wide-global | Storage shape |
+|---|---|---|---|---|
+| `default` | 65% | 35% | 10% | Balanced |
+| `local_heavy` | 70% | 30% | 3% | Most favorable — tight trust |
+| `global_heavy` | 40% | 60% | 25% | Hardest — wide fanout |
+
+A 5%-point shift in `σ_publishable` changes server-tier storage
+linearly: at R=250, D=50 MB, T=30 d, every 1% of σ_publishable is
+~3.6 GB of direct-trust archive. **The cohort distribution chosen by
+the population is the dominant scaling lever after R.** Public
+narratives about "go global, share everywhere" are scaling
+*adversarial*; "tight communities of interest" is scaling
+*favorable*. CIRIS's design pushes the population toward
+locality because the wire format makes it the path of least
+resistance, not because policy enforces it.
+
+### 6.1 `full_internet_v1` — the v1 target
+
+5 B users, 50 MB/user/day across all UGC content forms
+(text + photos + short clips; excludes long-form video streaming,
+which rides external_ref blob pointers to S3-class stores).
+
+Per-server load:
+- Storage 332 GB (32% of 1 TB) — 178 GB own + 128 GB direct-trust
+  archive + 25 GB agent traces + 128 MB cache
+- Bandwidth 5.15 GB/day (~62 KB/sec)
+- CPU 43 sec/day (0.05% of 1 core)
+
+Replicates to 500 M servers globally — roughly one server per
+ten humans, which is the order of magnitude where today's home
+internet / IoT densities already sit.
+
+### 6.2 What broke the stretch scenario
+
+Bumping `direct_trust_archive_days` from 30 → 365 pushes per-server
+storage to 1.72 TB. The model flags the dominant cost (direct-trust
+archive) and the knob to turn (`direct_trust_archive_days` or
+`trust_radius`). This is the model working as a design tool — it
+exposes the trade-off curve without anyone having to argue about
+it from intuition.
+
+---
+
+## 7. Why the three resources behave so differently
+
+**Compute is free at every scale.** Even at 5 B users with 200 agent
+decisions/day each, federation-aggregate CPU at 5% utilization sits
+at ~11 M cores — ~0.02 core/server across 500 M servers. The hybrid
+PQC verify (276 µs) does not bend the curve.
+
+**Bandwidth is the second-cheapest resource.** Server-tier inbound at
+`full_internet_v1` is 5 GB/day per server (~62 KB/sec sustained,
+~0.05% of 1 Gbps). The "billion small pipes" topology pays
+residential broadband prices, not datacenter-egress prices.
+
+**Storage is the resource that bites — and only one knob bends it.**
+The `direct_trust_archive_days × trust_radius × σ_publishable × D`
+term is what occupies most of the 1 TB server budget. v1 controls it
+by capping the pre-replicated window (30 d at internet scale; the
+rest is fetch-on-demand). The model's job is to surface that knob
+honestly.
 
 ---
 
 ## 8. What this model is NOT
 
 - **Not a capacity guarantee.** Bench numbers are CI ubuntu-latest;
-  production hardware varies 2-10×.
-- **Not a network simulator.** We model steady-state averages, not
+  production hardware varies 2–10×.
+- **Not a network simulator.** Steady-state averages; not
   congestion, packet loss, or Reticulum reachability dynamics.
-- **Not a privacy model.** "Most data is local" is enforced by
-  cohort_scope discipline + tier behavior, both modeled here, but
-  the privacy guarantees themselves are in `MISSION.md §1.6` +
-  `THREAT_MODEL.md` — this doc costs them, doesn't certify them.
+- **Not a privacy certifier.** Locality is enforced by CEG wire
+  shape + cohort_scope discipline + tier behavior, all modeled here;
+  the guarantees themselves are in `MISSION.md §1.6` +
+  `THREAT_MODEL.md`. This doc costs them; it doesn't certify them.
+- **Not a final answer.** Cache hit rate is an assumption pending
+  measurement. Second-order fetch-on-demand latency / availability
+  needs Reticulum-network simulation. Agent decision rate at
+  population scale is a guess.
 
 The model is a planning tool. Run scenarios, see where the knobs
-matter, calibrate deployment guidance against measured workloads as
-real federation data accumulates.
+matter, calibrate against real federation data as it accumulates.
