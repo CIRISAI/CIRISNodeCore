@@ -435,24 +435,224 @@ These are the failure modes CIRIS's `holds_bytes` +
 substrate doesn't need a curation layer above it; the substrate
 itself is curatable because every byte carries its provenance.
 
-### 9.5 Privacy trade-off (intentional, explicit)
+### 9.5 The precise privacy trade-off
 
-The cost: the holder graph is observable. Peers can query "who's
-holding content from author X?" via `list_holders` against the
-public `federation_attestations` rows. This is the design's
-privacy-vs-trust trade-off:
+The substrate exposes four federation-queryable surfaces (the
+public directory; this is HOW discovery works):
 
-* IPFS / Freenet / Tor: **anonymity-preserving**, abuse-impossible-
-  to-handle, scaling pains from indiscriminate replication
-* CIRIS: **identity-aware**, trust-enforceable, governable, scaling
-  works precisely because admission is selective
+| Query | Returns | Leaks |
+|---|---|---|
+| `list_holders(sha256)` | `attesting_key_id`s holding this content | Where the bytes are |
+| `list_attestations_by(key_id)` | All `holds_bytes` rows by this holder | What this peer holds |
+| `list_attestations_for(key_id)` | Inbound `scores` / `delegates_to` rows | Who vouches for this peer |
+| `list_contributions(filter)` | Contribution envelopes (carry `author_id`) | Who authored what |
 
-For content that needs anonymity (private deliberation, family-scope
-content), the CEG locality dividend (§1.3) is the answer: those
-cohort scopes never emit `holds_bytes` advertisements, never become
-discoverable, never enter the identity-aware substrate at all.
-Anonymity-preserving content stays self-hosted; trust-aware content
-rides the federation.
+The **join across these tables** is the actual privacy surface:
+`author X created content C` ⨝ `peer P holds C` = **inference that
+peer P admits author X's content**, which transitively reveals
+**P's trust graph at the public-cohort scope**.
+
+So precisely: **the published trust graph is observable for content
+at `community` scope or wider**. Not the access patterns, not the
+bytes — the *admission relations*.
+
+**What's NOT observable** (precisely):
+
+| Surface | Visible to federation? |
+|---|---|
+| Cleartext bytes of any blob | No — only the SHA + signature; bytes are encrypted at rest |
+| Who fetched what (browse history) | No — fetch logs are local to the serving peer |
+| Local popularity / access counters | No — eviction signal stays local |
+| Local trust thresholds | No — operator config, private |
+| Trust recursion depth choice | No — local config, nothing advertised |
+| `self` / `family` scope content (existence, author, holders) | No — locality dividend, never in `federation_attestations` |
+
+The per-fetch leak still exists but is *bilateral*: when I
+`ContentFetch` from peer P, P learns I'm interested in that SHA —
+same property a CDN edge has about its viewers — but no other peer
+sees that interaction.
+
+### 9.6 What CIRIS does NOT allow at protocol level
+
+There is **no "publish anonymously" mode** at federation scope.
+Content at `community` / `affiliations` / `species` / `planet` /
+`federation` scope carries `author_id` cryptographically and *is*
+the author's identity attestation. You cannot publish-but-hide-
+author on the main path — that would break the trust-enforceability
+story.
+
+For content where the author wants publication without identity-
+attribution on the main substrate, the operator-side options are:
+
+1. **Pseudonymous federation key** — operator practice, not a system
+   feature. The substrate sees a key; whether that key maps to a
+   real-world identity is outside CIRIS's concern. Same posture as
+   Bitcoin: keys are pseudonymous unless de-anonymized off-chain.
+2. **Stay at `self` or `family` scope** — never federated, never
+   observable.
+
+A third path — *protocol-level deniability* — is a v2 design
+possibility, sketched in §9.9.
+
+### 9.7 Comparison to anonymity systems
+
+| System | Trust graph observable? | Author observable? | Holder observable? |
+|---|---|---|---|
+| **CIRIS public-scope** | **Yes (by design)** | Yes (`author_id`) | Yes (`attesting_key_id`) |
+| CIRIS local-scope | No | n/a (never federated) | n/a |
+| IPFS / Kubo | No (no trust concept) | No | Pseudonymous |
+| Freenet | No (by design) | No (by design) | No (by design) |
+| Tor hidden services | No (unlinkable) | Onion key, pseudonymous | n/a (no storage layer) |
+| Signal sealed sender | No (one-sided) | Server doesn't see; recipient does | Server forgets after delivery |
+| Veilid | No (DHT only sees ciphertext) | No (owner key) | Pseudonymous DHT node |
+| Mastodon | Yes (federation-level) | Yes (`attributedTo`) | Yes (instance-level) |
+| SSB | Yes (follow graph) | Yes (`author` per message) | Yes (per-feed) |
+
+CIRIS sits closest to **Mastodon + SSB** on the privacy axis —
+federated systems that chose identity-aware-publication, accepting
+the trust-graph observability as the cost of trust-enforceability +
+governance.
+
+### 9.8 Bottom line — the trade in one sentence
+
+**CIRIS makes the published trust graph observable in exchange for
+the operator-side ability to govern admission and eviction by
+actor; it preserves anonymity for everything at self/family scope,
+and offers pseudonymous federation keys as the operator-practice
+escape hatch — there is no protocol-level "publish anonymously"
+on the main path because that would dissolve the trust-
+enforceability the whole substrate rests on.**
+
+### 9.9 Could we add deniability? — totalitarian threat model
+
+**Yes, as an opt-in parallel publication path.** The identity-aware
+substrate stays unchanged; a separate anonymous tier rides
+alongside, addressed by blinded keys, holding opaque ciphertext.
+
+#### How Veilid / Signal sealed sender / Tor v3 do this
+
+All three achieve storage-/forwarder-layer deniability through the
+same structural pattern: **the holder's input is ciphertext bound
+to an ephemeral or blinded public key, never to the originator's
+long-term identity, plus routing indirection severs the network-
+layer link.**
+
+| System | Storage record | Blinding | Discoverability |
+|---|---|---|---|
+| **Veilid** | DHT tuple `(record_key, subkey, ciphertext, sig)` keyed by *owner* pubkey; AEAD-encrypted with keys the storage node lacks; arrives via onion-routed *private route* | Owner key may rotate per record; signature schema (DFLT / SMPL) authorizes writers without revealing them | Reader must know `record_key` out-of-band; no global directory |
+| **Signal sealed sender** | Forwarded envelope; server sees recipient address + opaque inner blob | Two-layer envelope — ephemeral X25519 outer wraps static-key inner carrying `sender_cert ‖ ciphertext` | Sender presents 96-bit delivery token derived from recipient's profile key |
+| **Tor v3 onion** | HSDir holds AEAD-encrypted descriptor keyed by **per-period blinded Ed25519 key** + subcredential | Ed25519 key blinding rotates per time-period; HSDir never sees the underlying onion identity | Client independently derives the same `blinded_public_key` from public onion identity + current period |
+
+The common primitive set: **(a) Ed25519 key blinding or ephemeral
+key derivation** that severs the holder's view from the originator's
+stable identity, plus **(b) onion-routed transport** that severs
+network-layer linkage.
+
+#### Could CIRIS overlay this without sacrificing the main path?
+
+Architecturally, **yes** — all three deniability designs run as
+*parallel paths* on their substrates (Signal runs sealed sender
+alongside identified delivery on the same server; Tor onion services
+coexist with identified relays; Veilid DHT records can carry both
+signed-by-known-key payloads and routed-via-private-route payloads
+on the same node). None of them require *uniform* anonymity.
+
+**Minimum primitive set CIRIS would need** for a parallel anonymous
+publication path:
+
+1. **Per-publication blinded keys** — Ed25519 key blinding,
+   Tor-style. Each anonymous record's signing key is unlinkable to
+   the holder's federation identity.
+2. **AEAD on the payload** — XChaCha20-Poly1305 keyed by
+   `KDF(blinded_pk, period)`, so the storage node holds ciphertext
+   under a key it never sees.
+3. **Onion-routed write path** — Sphinx-style or Veilid-style
+   3-hop, so the publishing node's IP is not the record's network
+   origin.
+4. **Discoverability rendezvous** — either a recipient-derived
+   delivery token (Signal model, for targeted publication) or a
+   time-rotated blinded index (Tor model, for open publication).
+
+#### What the anonymous tier loses (and that's the point)
+
+A new wire-format record class — call it `AnonymousContribution` —
+sits parallel to the identity-aware `Contribution`. It cannot ride
+the existing trust+capacity admission discipline because there's
+no identity to gate on:
+
+| Property | Identity-aware tier (main) | Anonymous tier (proposed) |
+|---|---|---|
+| Trust-weighted admission | Yes | **No** (no identity to score) |
+| Per-actor eviction | Yes | **No** (LRU only) |
+| Operator-side governance | Yes | **No** (operator holds opaque ciphertext) |
+| Trust graph observable | Yes | **No** |
+| Compelled disclosure resistance | Limited | **Strong** (operator literally cannot decrypt) |
+| Abuse handling | Trust-graph + slashing | LRU + capacity gating only |
+| Discoverability | Federation directory | Out-of-band rendezvous |
+
+The author chooses per-publication. The operator runs both
+substrates. For totalitarian threat model: dissident publication
+uses the anonymous tier → coerced operator sees only opaque
+ciphertext → no proof of holding specific content, no proof of
+trust relationship → cryptographic deniability instead of legal /
+operator-discretionary deniability.
+
+#### Important: the anonymous tier needs to be MANDATORY infrastructure
+
+If only some operators run the anonymous tier, those operators
+become identification targets (raid the nodes that run the
+deniable storage). For meaningful deniability, the anonymous tier
+must be **standard substrate-level infrastructure that every
+L0/L1 server runs**, indistinguishably — much like every Tor relay
+runs the same code regardless of which onion services it happens to
+be holding descriptors for. The operator's deniability is "I'm
+running the standard substrate; I have no way to know which
+records on my disk belong to which publication."
+
+#### What this would cost CIRIS to build
+
+* **CEG**: a parallel record class (`AnonymousContribution` with
+  blinded-key signature instead of `author_id`). Wire-format
+  addition, not a change to existing primitives. The 1+4 stays
+  locked.
+* **Persist**: a parallel storage table for opaque-blinded records;
+  same put/get/has surface but no trust-score lookup at admission
+  (capacity only).
+* **Edge**: onion-routing layer (Sphinx-style packets). This is
+  substantial — likely a new transport class alongside Reticulum
+  and HTTPS.
+* **NodeCore**: minimal — node-core doesn't own replication
+  policy. Maybe a publish_anonymously() entry point.
+
+**Roughly the size of a v2 release.** v1 ships the identity-aware
+substrate; v2 could add the anonymous tier without disrupting v1
+deployments.
+
+#### Why this matters for the mission
+
+CIRIS's first audience is humans + agents operating in tractable
+trust contexts (communities, governance, federation). The identity-
+aware substrate is right for that. But the mission goal is to serve
+*all* of humanity — including humans operating in totalitarian
+contexts where federation-attribution would put them at lethal
+risk. The anonymous tier closes the gap: dissidents, journalists,
+whistleblowers can publish onto CIRIS using the same wire format
+substrate as everyone else, with cryptographic guarantees the
+identity-aware tier doesn't offer.
+
+**The right mental model:** the main substrate is the *public
+square*; the anonymous tier is the *encrypted letter dropped in
+a mailbox*. Both are first-class postal-system functions; neither
+breaks the other. CIRIS v1 builds the public square. CIRIS v2
+adds the mailbox.
+
+Sources for §9.9:
+- [Veilid: Private Routing](https://veilid.com/how-it-works/private-routing/)
+- [Veilid: Cryptography](https://veilid.com/how-it-works/cryptography/)
+- [Veilid Developer Book](https://veilid.gitlab.io/developer-book/)
+- [Signal: Sealed Sender](https://signal.org/blog/sealed-sender/)
+- [Tor rend-spec-v3: Deriving Keys](https://spec.torproject.org/rend-spec/deriving-keys.html)
+- [Tor rend-spec-v3: Descriptor Encryption](https://spec.torproject.org/rend-spec/hsdesc-encrypt.html)
 
 ### 9.6 Summary
 
