@@ -72,12 +72,15 @@ where
 /// identically — the backend choice is the host's, transparent to
 /// node-core.
 ///
-/// Both `Postgres` and `Sqlite` variants are matched, gated on the
-/// same feature flags persist v2.x uses to expose its variants
-/// (`CIRISPersist engine.rs:497-508` — `cirisnode` + at least one of
-/// `postgres` / `sqlite`). Node-core's default cohabitation target is
-/// Postgres (the safety.ciris.ai shape, MISSION §7.3); Sqlite is
-/// opt-in via node-core's parallel `sqlite` feature. NodeCore#6.
+/// Both `Postgres` and `Sqlite` variants are matched
+/// unconditionally. At the cohabitation triple, edge v0.13.1 pins
+/// persist with `features = ["sqlite"]`, so Cargo feature unification
+/// forces persist's `Sqlite` variant active in every build that links
+/// edge — gating node-core's match arm on a local `sqlite` feature
+/// would silently de-cover an enum variant the consumer can produce.
+/// Node-core's default cohabitation target remains Postgres (the
+/// safety.ciris.ai shape, MISSION §7.3); the `sqlite` feature is
+/// retained for explicit opt-in symmetry. NodeCore#6.
 pub async fn install_from_dispatch(
     dispatch: NodeCoreDispatch,
     edge: &Edge,

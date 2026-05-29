@@ -15,43 +15,37 @@ name = "ciris_node_core"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Substrate. Persist v2.1.0 — the "Federation Ready" line convergence
-# point (per CIRISAgent/requirements.txt: ciris-persist>=2.0.7,<3.0.0,
-# ciris-verify>=3.0.1,<4.0.0; agent comment: "All three in-process
-# consumers (agent + CIRISNodeCore + CIRISLensCore) link this identical
-# pin"). Bumped from v1.12.0 → v2.1.0 alongside the Federation
-# Announcement primitive landing (FSD/FEDERATION_ANNOUNCEMENT.md); the
-# 2.0.x line carries the federation-surface concurrency-hardening
-# (advisory-lock pattern, V045 UNIQUE constraint, CIRISPersist#95
-# closing CIRISEdge#16) that the new primitive's mandatory-delivery
-# audit path needs.
+# Substrate — the CIRIS 3.0 in-process cohabitation triple.
 #
-# Pins CIRISVerify v3.0.1 transitively — the bootstrap key trust
-# anchor (FSD/FEDERATION_ANNOUNCEMENT.md §4) shares
-# canonical-hash discipline with verify's CanonicalBuild v2 wire
-# format on POST /v1/builds.
+# persist v3.1.1 + edge v0.13.1 (transitively pins verify v4.0.0).
+# This is the production triple consumed by the agent + node-core +
+# lens-core in one process; matching is required for feature
+# unification + PyO3 ABI alignment (all co-resident cdylibs link one
+# `pyo3` ABI).
 #
-# `postgres` feature preserved: the `cirisnode` feature was decoupled
-# from backends at v1.11.0; `NodeCoreDispatch::Postgres` is what
-# `crate::cohabitation::install_from_dispatch` matches.
+# Persist v3 surface in use:
+#  - `NodeCoreDispatch` (postgres / sqlite) → `cohabitation::install_from_dispatch`
+#  - `BackendDispatch`  (postgres / sqlite) → `serving::install_from_dispatch`
+#  - PyCapsule accessors: blob_storage_capsule / runtime_handle_capsule /
+#    federation_directory_capsule / outbound_queue_capsule /
+#    keyring_signer_capsule / local_signer_capsule
+#
+# `postgres` feature explicit; `sqlite` reaches us transitively via
+# edge v0.13.1's pin `ciris-persist = { ..., features = ["sqlite"] }`.
+# Our local `sqlite` feature is retained for symmetry but is
+# effectively no-op (the variant is always present via unification).
+#
+# DEPLOYMENT NOTE: persist's ciris-keyring `tpm` feature unification
+# still forces system `libtss2` (`libtss2-dev` for builds) onto every
+# co-resident Linux build / host. See CIRISEdge#12.
 ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v3.1.1", version = "3", features = ["cirisnode", "cirisaudit", "postgres"] }
 
-# Edge v0.5.1 — latest on the v0.5.x line; carries persist v2.x +
-# verify v3.x. Consumed surface (`src/messages/`, `src/handler.rs`,
-# `src/edge.rs`) byte-stable v0.2.5 → v0.5.1; v0.5.x adds the
-# substrate hooks the Federation Announcement primitive needs for
-# Mandatory-delivery / subscription-bypass MessageType (tracked: this
-# repo's FSD/FEDERATION_ANNOUNCEMENT.md §3.2).
-#
-# NOTE: edge's PyO3 `Edge` class status — re-check at v0.5.1; if
-# still stub, the cohabitation `#[pyfunction]`
-# (crate::cohabitation, agent-runtime entry point) remains blocked.
-# Tracked: CIRISEdge#16.
-#
-# DEPLOYMENT NOTE: persist's ciris-keyring `tpm` feature
-# unification still forces system `libtss2` (`libtss2-dev` for
-# builds) onto every co-resident Linux build / host. See
-# CIRISEdge#12.
+# Edge v0.13.1 — cohabitation triple anchor. Consumed surface:
+#  - `Edge` runtime + `MessageType` registry (federation-consensus
+#    handlers register here from `crate::cohabitation::install`)
+#  - PyO3: `PyEdge` with `edge_handle()` Rust-tier `Arc<Edge>` accessor
+#    (unblocks the `#[pyfunction]` form of cohabitation install)
+#  - `init_edge_runtime(engine: Bound<'_, PyAny>)` injection pattern
 ciris-edge = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v0.13.1", version = "0" }
 
 # Serde + canonicalization. Canonicalization itself routes through
@@ -103,12 +97,11 @@ default = []
 # feature yet.
 python = ["dep:pyo3"]
 
-# Sqlite backend support for the cohabitation bootstrap. Persist v2.x
-# feature-gates `NodeCoreDispatch::Sqlite` behind its own `sqlite`
-# feature (CIRISPersist `engine.rs:497-508`); to keep the cohabitation
-# match arm exhaustive when the host's Engine is Sqlite-backed,
-# node-core forwards a parallel `sqlite` feature that activates
-# persist's. The default cohabitation target is Postgres (the
-# safety.ciris.ai shape per MISSION §7.3); Sqlite is opt-in for
-# embedded / Pi-class deployments. NodeCore#6.
+# Sqlite backend support for the cohabitation bootstrap. Effectively
+# no-op at the v0.13.1 cohabitation triple — edge transitively enables
+# `ciris-persist/sqlite`, so the `Sqlite` variants of `BackendDispatch`
+# / `NodeCoreDispatch` are always present in our build. The feature is
+# retained for explicit-opt-in symmetry with persist's gating
+# (CIRISPersist `engine.rs:497-508`) and as forward-compatibility if
+# edge's pin ever decouples sqlite. NodeCore#6.
 sqlite = ["ciris-persist/sqlite"]
