@@ -15,6 +15,8 @@
 //! `cirisnode::verify::canonical_bytes_for_envelope` — node-core never
 //! re-implements the canonicalizer (CIRISPersist#7 / AV-5).
 
+use std::sync::Arc;
+
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use chrono::Utc;
@@ -22,6 +24,7 @@ use ed25519_dalek::{Signer as DalekSigner, SigningKey};
 use serde::Serialize;
 
 use ciris_persist::cirisnode::verify::canonical_bytes_for_envelope;
+use ciris_persist::signing::LocalSigner;
 
 use crate::substrate::{
     Cell, ContributionEnvelope, ContributionType, HybridSignature, ModerationEvent,
@@ -68,6 +71,77 @@ impl EnvelopeSigner for Ed25519Signer {
         let sig = self.key.sign(canonical_bytes);
         Ok(HybridSignature {
             ed25519: BASE64.encode(sig.to_bytes()),
+            ml_dsa_65: None,
+            signed_at: Utc::now(),
+        })
+    }
+}
+
+/// Adapter making persist's [`LocalSigner`] usable as an
+/// [`EnvelopeSigner`] for node-core's wire builders.
+///
+/// This is the **production** signing path for node-core ingest +
+/// emit flows. The host signs every envelope with its OWN federation
+/// identity (the local_signer the agent process bootstrapped via
+/// [`ciris_persist::ffi::pyo3::PyEngine::local_signer_capsule`],
+/// CIRISPersist#119). Node-core never accepts a "sign as someone
+/// else" surface — claims about third parties (e.g. "X submitted
+/// this", "Reuters published this article") are encoded as the
+/// host's own observation/witness attestations in the payload, not
+/// by spoofing the envelope identity. The accountability chain
+/// stays one-signer-per-envelope, the Recursive Golden Rule
+/// (MISSION §1.5) intact.
+///
+/// Currently classical-only: [`EnvelopeSigner::sign_bytes`] is sync
+/// and `LocalSigner::sign_ml_dsa_65` is async, so the PQC half of
+/// the hybrid signature is left empty here. PQC fill-in happens
+/// cold-path via the same backend hook persist uses for
+/// `put_attestation` (CIRISPersist#10), so a node-core-signed
+/// artifact still reaches PQC-complete state after persistence —
+/// just not synchronously at sign time.
+pub struct LocalSignerAdapter {
+    inner: Arc<LocalSigner>,
+}
+
+impl LocalSignerAdapter {
+    /// Wrap an `Arc<LocalSigner>` extracted from persist's
+    /// `local_signer_capsule`. Cheap: `Arc` clone only — the signer
+    /// keeps living in persist; we hold a reference for sign-time.
+    pub fn new(inner: Arc<LocalSigner>) -> Self {
+        Self { inner }
+    }
+
+    /// The host's `ContributorId` — base64 (standard) Ed25519 pubkey.
+    /// Use as `author_id` / `voter_id` / `attesting_key_id` on every
+    /// envelope node-core builds + signs through this adapter.
+    pub fn contributor_id(&self) -> String {
+        self.inner.public_key_b64()
+    }
+
+    /// The host's `key_id` label (the human-readable name persist's
+    /// local-identity bootstrap assigned). Distinct from
+    /// [`Self::contributor_id`] — `key_id` is the directory lookup
+    /// handle, `contributor_id` is the cryptographic identity.
+    pub fn key_id(&self) -> &str {
+        self.inner.key_id()
+    }
+
+    /// Borrow the inner `Arc<LocalSigner>` for callers that need it
+    /// directly (e.g. PQC-async sign paths that can't go through the
+    /// sync [`EnvelopeSigner`] trait, or cold-path fill-in jobs).
+    pub fn inner(&self) -> &Arc<LocalSigner> {
+        &self.inner
+    }
+}
+
+impl EnvelopeSigner for LocalSignerAdapter {
+    fn sign_bytes(&self, canonical_bytes: &[u8]) -> Result<HybridSignature, SubstrateError> {
+        let sig = self
+            .inner
+            .sign_ed25519(canonical_bytes)
+            .map_err(|e| SubstrateError::Signature(format!("local_signer.sign_ed25519: {e}")))?;
+        Ok(HybridSignature {
+            ed25519: BASE64.encode(sig),
             ml_dsa_65: None,
             signed_at: Utc::now(),
         })
@@ -336,6 +410,63 @@ mod tests {
         )
         .unwrap();
         verify_envelope_signed(&env, &env.signature, &env.voter_id).expect("verify passes");
+    }
+
+    #[test]
+    fn local_signer_adapter_signs_and_verifies() {
+        // Construct a persist `LocalSigner` directly from primitives —
+        // mirrors how production wires it via persist's seed-file
+        // loader, without needing a real seed on disk.
+        use ed25519_dalek::SigningKey;
+        let seed = [0x5Cu8; 32];
+        let signing_key = SigningKey::from_bytes(&seed);
+        let local_signer = ciris_persist::signing::LocalSigner::from_parts(
+            signing_key,
+            "test-local-key".to_string(),
+            None,
+            None,
+        );
+        let adapter = LocalSignerAdapter::new(std::sync::Arc::new(local_signer));
+
+        // contributor_id must match what build_contribution stamps as
+        // author_id — base64(verifying_key) — for verify to accept.
+        let env = build_contribution(
+            "01HXLOCAL00000000000000001".into(),
+            ContributionType::Proposal,
+            adapter.contributor_id(),
+            Cell {
+                domain: "mental_health".into(),
+                language: "am".into(),
+                subject: Some("arc_question".into()),
+            },
+            serde_json::json!({"proposal_id": "P-1", "title": "via local_signer"}),
+            None,
+            &adapter,
+        )
+        .unwrap();
+
+        verify_envelope_signed(&env, &env.signature, &env.author_id)
+            .expect("local_signer-signed envelope verifies");
+    }
+
+    #[test]
+    fn local_signer_adapter_key_id_vs_contributor_id_are_distinct() {
+        use ed25519_dalek::SigningKey;
+        let signing_key = SigningKey::from_bytes(&[0x11u8; 32]);
+        let local_signer = ciris_persist::signing::LocalSigner::from_parts(
+            signing_key,
+            "human-readable-label".to_string(),
+            None,
+            None,
+        );
+        let adapter = LocalSignerAdapter::new(std::sync::Arc::new(local_signer));
+
+        // key_id is the directory lookup handle (a label); contributor_id
+        // is base64 of the pubkey (44 chars). These are NOT the same and
+        // must not be confused at call sites.
+        assert_eq!(adapter.key_id(), "human-readable-label");
+        assert_eq!(adapter.contributor_id().len(), 44);
+        assert_ne!(adapter.key_id(), adapter.contributor_id());
     }
 
     #[test]
