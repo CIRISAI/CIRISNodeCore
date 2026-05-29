@@ -202,6 +202,15 @@ pub enum TopicalRelationKind {
     /// from the structural-primitive `supersedes` which applies to
     /// individual attestations).
     SupersedesArticle,
+    /// Chat reply — this message replies to a prior message in a
+    /// conversation thread.
+    RepliesTo,
+    /// Blog comment — this Contribution is a comment on a prior
+    /// blog post (or a reply to a prior comment).
+    CommentsOn,
+    /// Quote / excerpt — this content quotes a specific span of the
+    /// target. Distinct from `References` (which is a soft mention).
+    Quotes,
 }
 
 impl TopicalRelationKind {
@@ -214,6 +223,9 @@ impl TopicalRelationKind {
             Self::Disambiguates => "disambiguates",
             Self::Corrects => "corrects",
             Self::SupersedesArticle => "supersedes_article",
+            Self::RepliesTo => "replies_to",
+            Self::CommentsOn => "comments_on",
+            Self::Quotes => "quotes",
         }
     }
 }
@@ -716,6 +728,285 @@ pub fn build_local_payload(
     ))
 }
 
+/// Chat-message source. One message in a conversational thread —
+/// imported from Discord / Slack / Twitter / iMessage / SMS / XMPP /
+/// IRC / etc. Each message is a Contribution; reply chains form via
+/// `RepliesTo` topical_relations referencing prior messages.
+///
+/// Chat tends toward narrower cohort_scope than articles —
+/// `community` for group channels, `family` for household chat, `self`
+/// for DMs the user wants only their own runtime to see. Privacy
+/// sensitivity is higher than articles; consumer policy should
+/// downweight chat in cross-cohort aggregation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessageSource {
+    /// Stable key_id. Pattern:
+    /// `chat:{platform}:{conversation_id}:{message_id}` — e.g.
+    /// `chat:discord:123-456:789012345678`. The (platform,
+    /// conversation_id, message_id) triple makes messages uniquely
+    /// identifiable across imports.
+    pub entity_key_id: String,
+    /// ISO 639-1 language code (best-effort detection for chat).
+    pub language: String,
+    /// The message body bytes (the raw text or rich-content payload).
+    pub body_bytes: Vec<u8>,
+    /// RFC 6838 media type. Typical: `text/plain` (plain chat),
+    /// `text/markdown` (formatted), `application/json` (rich
+    /// embed-bearing).
+    pub body_media_type: String,
+    /// Chat platform tag (e.g. `discord`, `slack`, `twitter`,
+    /// `imessage`, `sms`, `xmpp`, `irc`, `matrix`).
+    pub platform: String,
+    /// Conversation / thread / channel / DM identifier on the source
+    /// platform. Multiple messages in the same conversation share
+    /// this; consumers group by it for thread reconstruction.
+    pub conversation_id: String,
+    /// Platform-specific message identifier (Discord snowflake,
+    /// Twitter status ID, etc.). Distinct from the federation
+    /// `entity_key_id` which composes platform + conversation + this.
+    pub message_id: String,
+    /// Sender's display handle on the source platform.
+    pub sender_handle: String,
+    /// Optional federation key_id for the sender, when known + when
+    /// the sender has a federation identity bridged to their chat
+    /// handle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_key_id: Option<String>,
+    /// When the message was sent on the source platform.
+    pub sent_at: DateTime<Utc>,
+    /// Sequence index within the conversation (0-based). Helps
+    /// consumers order messages even when source timestamps are
+    /// imprecise.
+    pub message_index: u64,
+    /// Cohort scope at which this message is being asserted (per
+    /// [`scope`] module). Typically `family` (household chat),
+    /// `community` (group channels), `affiliations` (professional
+    /// chats), or `self` (DMs).
+    pub cohort_scope: String,
+    /// Topical relations. Use `RepliesTo` to point at the prior
+    /// message in the thread (the federation `entity_key_id` of the
+    /// message being replied to).
+    #[serde(default)]
+    pub topical_relations: Vec<TopicalRelation>,
+    /// External citations referenced in the message body.
+    #[serde(default)]
+    pub citations: Vec<Citation>,
+    /// Optional staleness contract. Chat can decay quickly (e.g.
+    /// minutes for live-conversation channels) or stay indefinitely
+    /// (e.g. permanent archive). Per-deployment policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_until: Option<DateTime<Utc>>,
+}
+
+/// Blog-post source. Single-author published commentary / opinion /
+/// long-form writing — imported from Medium / Substack / personal
+/// blogs / Tumblr / LiveJournal / etc. Distinct from news (no
+/// publisher editorial), distinct from encyclopedia (no
+/// peer-consensus editing), distinct from chat (long-form, slower).
+///
+/// Comments on blog posts are themselves Contributions citing the
+/// blog post via `CommentsOn` topical_relation. Reply chains within
+/// comments use `RepliesTo`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlogPostSource {
+    /// Stable key_id. Pattern: `blog:{platform}:{blog_id}:{post_slug}` —
+    /// e.g. `blog:medium:@ericmoore:on-coherence-2026-05-15`.
+    pub entity_key_id: String,
+    /// ISO 639-1 language code.
+    pub language: String,
+    /// The post body bytes.
+    pub body_bytes: Vec<u8>,
+    /// RFC 6838 media type. Typical: `text/markdown`, `text/html`,
+    /// `application/x-mdx`.
+    pub body_media_type: String,
+    /// Blog platform tag (e.g. `medium`, `substack`, `wordpress`,
+    /// `ghost`, `personal`, `tumblr`).
+    pub platform: String,
+    /// Blog identifier on the source platform (the BLOG itself, not
+    /// the post — e.g. `@ericmoore` for a Medium handle,
+    /// `example-blog` for a Substack subdomain).
+    pub blog_id: String,
+    /// Author's display handle on the source platform.
+    pub author_handle: String,
+    /// Optional federation key_id for the author, when known + when
+    /// the author has a federation identity bridged to their blog
+    /// handle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_key_id: Option<String>,
+    /// When the post was published on the source platform.
+    pub published_at: DateTime<Utc>,
+    /// Post title.
+    pub post_title: String,
+    /// Canonical URL of the post on the source platform (for
+    /// round-trip reference).
+    pub post_url: String,
+    /// User-supplied tags / categories from the source platform.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// Cohort scope at which this post is being asserted (per [`scope`]
+    /// module). Typical: `federation` (public blog), `community`
+    /// (community-internal blog), `affiliations` (org-internal posts).
+    pub cohort_scope: String,
+    /// Topical relations. Posts may reference other posts /
+    /// encyclopedia entries / news articles.
+    #[serde(default)]
+    pub topical_relations: Vec<TopicalRelation>,
+    /// External citations.
+    #[serde(default)]
+    pub citations: Vec<Citation>,
+    /// Optional staleness contract. Blog posts typically leave this
+    /// unset (long shelf life) unless explicitly time-bound (e.g. a
+    /// time-sensitive announcement post).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_until: Option<DateTime<Utc>>,
+}
+
+/// Build the canonical `payload` JSON for a chat-message Contribution
+/// per SCHEMA.md §4.29.
+pub fn build_chat_payload(
+    source: &ChatMessageSource,
+) -> Result<(serde_json::Value, [u8; 32]), IngestError> {
+    if source.entity_key_id.is_empty() {
+        return Err(IngestError::EmptyKeyId);
+    }
+    if source.language.is_empty() {
+        return Err(IngestError::EmptyLanguage);
+    }
+    if source.body_bytes.is_empty() {
+        return Err(IngestError::EmptyBody);
+    }
+    if source.platform.is_empty() {
+        return Err(IngestError::EmptyPlatform);
+    }
+    if source.conversation_id.is_empty() {
+        return Err(IngestError::EmptyConversationId);
+    }
+    if source.sender_handle.is_empty() {
+        return Err(IngestError::EmptySenderHandle);
+    }
+    if !is_promotable_scope(&source.cohort_scope) {
+        return Err(IngestError::UnknownPromotionScope(source.cohort_scope.clone()));
+    }
+    let sha256 = compute_sha256(&source.body_bytes);
+
+    let mut source_block = serde_json::json!({
+        "kind": "chat",
+        "platform": source.platform,
+        "conversation_id": source.conversation_id,
+        "message_id": source.message_id,
+        "sender_handle": source.sender_handle,
+        "sent_at": source.sent_at,
+        "message_index": source.message_index,
+    });
+    if let Some(ref sk) = source.sender_key_id {
+        source_block["sender_key_id"] = serde_json::Value::String(sk.clone());
+    }
+
+    let mut payload = serde_json::json!({
+        "sub_kind": "chat_message",
+        "entity_key_id": source.entity_key_id,
+        "language": source.language,
+        "cohort_scope": source.cohort_scope,
+        "content_sha256": hex_encode(&sha256),
+        "content_media_type": source.body_media_type,
+        "content_size_bytes": source.body_bytes.len(),
+        "source": source_block,
+        "topical_relations": source.topical_relations.iter().map(|tr| {
+            serde_json::json!({
+                "target_key_id": tr.target_key_id,
+                "relation": tr.relation.as_str(),
+            })
+        }).collect::<Vec<_>>(),
+        "citations": source.citations.iter().map(|c| {
+            serde_json::json!({
+                "kind": c.kind.as_str(),
+                "ref": c.ref_string,
+            })
+        }).collect::<Vec<_>>(),
+    });
+    if let Some(vu) = source.valid_until {
+        payload["valid_until"] = serde_json::json!(vu);
+    }
+
+    Ok((payload, sha256))
+}
+
+/// Build the canonical `payload` JSON for a blog-post Contribution
+/// per SCHEMA.md §4.29.
+pub fn build_blog_payload(
+    source: &BlogPostSource,
+) -> Result<(serde_json::Value, [u8; 32]), IngestError> {
+    if source.entity_key_id.is_empty() {
+        return Err(IngestError::EmptyKeyId);
+    }
+    if source.language.is_empty() {
+        return Err(IngestError::EmptyLanguage);
+    }
+    if source.body_bytes.is_empty() {
+        return Err(IngestError::EmptyBody);
+    }
+    if source.platform.is_empty() {
+        return Err(IngestError::EmptyPlatform);
+    }
+    if source.blog_id.is_empty() {
+        return Err(IngestError::EmptyBlogId);
+    }
+    if source.author_handle.is_empty() {
+        return Err(IngestError::EmptyAuthorHandle);
+    }
+    if source.post_title.is_empty() {
+        return Err(IngestError::EmptyPostTitle);
+    }
+    if !is_promotable_scope(&source.cohort_scope) {
+        return Err(IngestError::UnknownPromotionScope(source.cohort_scope.clone()));
+    }
+    let sha256 = compute_sha256(&source.body_bytes);
+
+    let mut source_block = serde_json::json!({
+        "kind": "blog",
+        "platform": source.platform,
+        "blog_id": source.blog_id,
+        "author_handle": source.author_handle,
+        "published_at": source.published_at,
+        "post_title": source.post_title,
+        "post_url": source.post_url,
+    });
+    if let Some(ref ak) = source.author_key_id {
+        source_block["author_key_id"] = serde_json::Value::String(ak.clone());
+    }
+    if !source.tags.is_empty() {
+        source_block["tags"] = serde_json::json!(source.tags);
+    }
+
+    let mut payload = serde_json::json!({
+        "sub_kind": "blog_post",
+        "entity_key_id": source.entity_key_id,
+        "language": source.language,
+        "cohort_scope": source.cohort_scope,
+        "content_sha256": hex_encode(&sha256),
+        "content_media_type": source.body_media_type,
+        "content_size_bytes": source.body_bytes.len(),
+        "source": source_block,
+        "topical_relations": source.topical_relations.iter().map(|tr| {
+            serde_json::json!({
+                "target_key_id": tr.target_key_id,
+                "relation": tr.relation.as_str(),
+            })
+        }).collect::<Vec<_>>(),
+        "citations": source.citations.iter().map(|c| {
+            serde_json::json!({
+                "kind": c.kind.as_str(),
+                "ref": c.ref_string,
+            })
+        }).collect::<Vec<_>>(),
+    });
+    if let Some(vu) = source.valid_until {
+        payload["valid_until"] = serde_json::json!(vu);
+    }
+
+    Ok((payload, sha256))
+}
+
 /// Build the canonical `payload` JSON for a scope-promotion of an
 /// existing `external_content` Contribution.
 ///
@@ -798,7 +1089,12 @@ pub fn is_promotable_scope(scope: &str) -> bool {
 pub fn is_promotable_sub_kind(sub_kind: &str) -> bool {
     matches!(
         sub_kind,
-        "encyclopedia_article" | "news_article" | "accord_data" | "local_data"
+        "encyclopedia_article"
+            | "news_article"
+            | "accord_data"
+            | "local_data"
+            | "chat_message"
+            | "blog_post"
     )
 }
 
@@ -837,6 +1133,24 @@ pub enum IngestError {
     /// external_content sub_kind enumeration.
     #[error("unknown sub_kind: {0}")]
     UnknownSubKind(String),
+    /// Chat / blog requires a non-empty platform tag.
+    #[error("platform must be non-empty")]
+    EmptyPlatform,
+    /// Chat requires a non-empty conversation_id.
+    #[error("conversation_id must be non-empty for chat_message")]
+    EmptyConversationId,
+    /// Chat requires a non-empty sender_handle.
+    #[error("sender_handle must be non-empty for chat_message")]
+    EmptySenderHandle,
+    /// Blog requires a non-empty blog_id.
+    #[error("blog_id must be non-empty for blog_post")]
+    EmptyBlogId,
+    /// Blog requires a non-empty author_handle.
+    #[error("author_handle must be non-empty for blog_post")]
+    EmptyAuthorHandle,
+    /// Blog requires a non-empty post_title.
+    #[error("post_title must be non-empty for blog_post")]
+    EmptyPostTitle,
 }
 
 fn compute_sha256(bytes: &[u8]) -> [u8; 32] {
@@ -1227,6 +1541,241 @@ mod tests {
         let promoted = promote_payload(&payload, "c-1", None, "community").unwrap();
         assert_eq!(promoted["sub_kind"], "local_data");   // unchanged
         assert_eq!(promoted["supersedes_payload"]["new_target_scope"], "community");
+    }
+
+    // --- chat_message --------------------------------------------------
+
+    #[test]
+    fn chat_payload_with_reply_chain() {
+        let src = ChatMessageSource {
+            entity_key_id: "chat:discord:123:456".into(),
+            language: "en".into(),
+            body_bytes: b"hey, the coherence post was great".to_vec(),
+            body_media_type: "text/plain".into(),
+            platform: "discord".into(),
+            conversation_id: "123-channel".into(),
+            message_id: "456".into(),
+            sender_handle: "alice#1234".into(),
+            sender_key_id: Some("user-alice-fed-key".into()),
+            sent_at: parse_dt("2026-05-29T08:00:00Z"),
+            message_index: 42,
+            cohort_scope: "community".into(),
+            topical_relations: vec![TopicalRelation {
+                target_key_id: "chat:discord:123:455".into(),
+                relation: TopicalRelationKind::RepliesTo,
+            }],
+            citations: vec![],
+            valid_until: Some(parse_dt("2026-06-29T08:00:00Z")),
+        };
+        let (payload, _sha) = build_chat_payload(&src).unwrap();
+        assert_eq!(payload["sub_kind"], "chat_message");
+        assert_eq!(payload["cohort_scope"], "community");
+        assert_eq!(payload["source"]["platform"], "discord");
+        assert_eq!(payload["source"]["conversation_id"], "123-channel");
+        assert_eq!(payload["source"]["sender_handle"], "alice#1234");
+        assert_eq!(payload["source"]["sender_key_id"], "user-alice-fed-key");
+        assert_eq!(payload["source"]["message_index"], 42);
+        // reply chain captured as topical_relation
+        let trs = payload["topical_relations"].as_array().unwrap();
+        assert_eq!(trs.len(), 1);
+        assert_eq!(trs[0]["relation"], "replies_to");
+        assert!(payload["valid_until"].is_string());
+    }
+
+    #[test]
+    fn chat_payload_without_sender_key_omits_field() {
+        let src = ChatMessageSource {
+            entity_key_id: "chat:irc:freenode#ciris:1".into(),
+            language: "en".into(),
+            body_bytes: b"a wild IRC user appears".to_vec(),
+            body_media_type: "text/plain".into(),
+            platform: "irc".into(),
+            conversation_id: "#ciris".into(),
+            message_id: "1".into(),
+            sender_handle: "anon-user".into(),
+            sender_key_id: None,
+            sent_at: parse_dt("2026-05-29T08:00:00Z"),
+            message_index: 0,
+            cohort_scope: "community".into(),
+            topical_relations: vec![],
+            citations: vec![],
+            valid_until: None,
+        };
+        let (payload, _) = build_chat_payload(&src).unwrap();
+        assert!(payload["source"].get("sender_key_id").is_none());
+        assert!(payload.get("valid_until").is_none());
+    }
+
+    #[test]
+    fn chat_rejects_empty_required_fields() {
+        let mut src = ChatMessageSource {
+            entity_key_id: "chat:discord:123:456".into(),
+            language: "en".into(),
+            body_bytes: b"body".to_vec(),
+            body_media_type: "text/plain".into(),
+            platform: "".into(),
+            conversation_id: "conv".into(),
+            message_id: "1".into(),
+            sender_handle: "alice".into(),
+            sender_key_id: None,
+            sent_at: parse_dt("2026-05-29T08:00:00Z"),
+            message_index: 0,
+            cohort_scope: "community".into(),
+            topical_relations: vec![],
+            citations: vec![],
+            valid_until: None,
+        };
+        assert!(matches!(build_chat_payload(&src), Err(IngestError::EmptyPlatform)));
+
+        src.platform = "discord".into();
+        src.conversation_id = "".into();
+        assert!(matches!(
+            build_chat_payload(&src),
+            Err(IngestError::EmptyConversationId)
+        ));
+
+        src.conversation_id = "conv".into();
+        src.sender_handle = "".into();
+        assert!(matches!(
+            build_chat_payload(&src),
+            Err(IngestError::EmptySenderHandle)
+        ));
+    }
+
+    // --- blog_post -----------------------------------------------------
+
+    #[test]
+    fn blog_payload_with_full_metadata() {
+        let src = BlogPostSource {
+            entity_key_id: "blog:substack:@ericmoore:coherence-2026-05".into(),
+            language: "en".into(),
+            body_bytes: b"# On Coherence\n\nLong-form post body...".to_vec(),
+            body_media_type: "text/markdown".into(),
+            platform: "substack".into(),
+            blog_id: "@ericmoore".into(),
+            author_handle: "Eric Moore".into(),
+            author_key_id: Some("author-key-eric".into()),
+            published_at: parse_dt("2026-05-15T12:00:00Z"),
+            post_title: "On Coherence".into(),
+            post_url: "https://ericmoore.substack.com/p/on-coherence".into(),
+            tags: vec!["coherence".into(), "epistemology".into()],
+            cohort_scope: "federation".into(),
+            topical_relations: vec![TopicalRelation {
+                target_key_id: "wikipedia:article:coherence".into(),
+                relation: TopicalRelationKind::References,
+            }],
+            citations: vec![Citation {
+                kind: CitationKind::Doi,
+                ref_string: "10.5281/zenodo.18217688".into(),
+            }],
+            valid_until: None,
+        };
+        let (payload, _sha) = build_blog_payload(&src).unwrap();
+        assert_eq!(payload["sub_kind"], "blog_post");
+        assert_eq!(payload["cohort_scope"], "federation");
+        assert_eq!(payload["source"]["kind"], "blog");
+        assert_eq!(payload["source"]["platform"], "substack");
+        assert_eq!(payload["source"]["blog_id"], "@ericmoore");
+        assert_eq!(payload["source"]["author_handle"], "Eric Moore");
+        assert_eq!(payload["source"]["author_key_id"], "author-key-eric");
+        assert_eq!(payload["source"]["post_title"], "On Coherence");
+        assert_eq!(payload["source"]["tags"].as_array().unwrap().len(), 2);
+        assert!(payload.get("valid_until").is_none());  // typical blog: indefinite
+    }
+
+    #[test]
+    fn blog_rejects_empty_required_fields() {
+        let mut src = BlogPostSource {
+            entity_key_id: "blog:medium:test:1".into(),
+            language: "en".into(),
+            body_bytes: b"body".to_vec(),
+            body_media_type: "text/markdown".into(),
+            platform: "medium".into(),
+            blog_id: "".into(),
+            author_handle: "Author".into(),
+            author_key_id: None,
+            published_at: parse_dt("2026-05-15T12:00:00Z"),
+            post_title: "Title".into(),
+            post_url: "https://example.com/post".into(),
+            tags: vec![],
+            cohort_scope: "federation".into(),
+            topical_relations: vec![],
+            citations: vec![],
+            valid_until: None,
+        };
+        assert!(matches!(build_blog_payload(&src), Err(IngestError::EmptyBlogId)));
+
+        src.blog_id = "blog-1".into();
+        src.author_handle = "".into();
+        assert!(matches!(
+            build_blog_payload(&src),
+            Err(IngestError::EmptyAuthorHandle)
+        ));
+
+        src.author_handle = "Author".into();
+        src.post_title = "".into();
+        assert!(matches!(
+            build_blog_payload(&src),
+            Err(IngestError::EmptyPostTitle)
+        ));
+    }
+
+    #[test]
+    fn blog_comment_chain_via_topical_relations() {
+        // A comment on a blog post is itself a Contribution (chat_message
+        // OR blog_post depending on platform conventions) citing the
+        // post via CommentsOn. Verify the relation enum is wired.
+        let comment_src = ChatMessageSource {
+            entity_key_id: "chat:medium:comment-789".into(),
+            language: "en".into(),
+            body_bytes: "Great post! I disagree with §3 though.".as_bytes().to_vec(),
+            body_media_type: "text/plain".into(),
+            platform: "medium".into(),
+            conversation_id: "comments-on-post-456".into(),
+            message_id: "comment-789".into(),
+            sender_handle: "reader-alice".into(),
+            sender_key_id: None,
+            sent_at: parse_dt("2026-05-16T09:00:00Z"),
+            message_index: 0,
+            cohort_scope: "federation".into(),
+            topical_relations: vec![TopicalRelation {
+                target_key_id: "blog:medium:@ericmoore:coherence-2026-05".into(),
+                relation: TopicalRelationKind::CommentsOn,
+            }],
+            citations: vec![],
+            valid_until: None,
+        };
+        let (payload, _) = build_chat_payload(&comment_src).unwrap();
+        assert_eq!(payload["topical_relations"][0]["relation"], "comments_on");
+    }
+
+    #[test]
+    fn promote_blog_to_global_works() {
+        let payload = serde_json::json!({
+            "sub_kind": "blog_post",
+            "entity_key_id": "blog:medium:author:post",
+            "content_sha256": "abc",
+            "cohort_scope": "community",
+        });
+        let promoted = promote_payload(&payload, "c-1", None, "federation").unwrap();
+        assert_eq!(promoted["sub_kind"], "blog_post");
+        assert_eq!(promoted["cohort_scope"], "federation");
+    }
+
+    #[test]
+    fn promote_chat_to_news_works() {
+        // An observation chat message ("breaking news in my city")
+        // promoted to a news_article at federation scope.
+        let payload = serde_json::json!({
+            "sub_kind": "chat_message",
+            "entity_key_id": "chat:slack:newsroom:42",
+            "content_sha256": "abc",
+            "cohort_scope": "community",
+        });
+        let promoted =
+            promote_payload(&payload, "c-1", Some("news_article"), "federation").unwrap();
+        assert_eq!(promoted["sub_kind"], "news_article");
+        assert_eq!(promoted["cohort_scope"], "federation");
     }
 
     #[test]
