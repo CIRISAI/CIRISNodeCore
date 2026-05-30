@@ -103,6 +103,32 @@ impl BlobStorage for MockBlobStorage {
     ) -> impl std::future::Future<Output = Result<Vec<String>, BlobError>> + Send {
         async move { Ok(vec![]) }
     }
+
+    fn list_local_holders(
+        &self,
+        _sha256: &[u8; 32],
+    ) -> impl std::future::Future<Output = Result<Vec<String>, BlobError>> + Send {
+        async move { Ok(vec![]) }
+    }
+
+    fn list_held_by(
+        &self,
+        _attesting_key_id: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<[u8; 32]>, BlobError>> + Send {
+        async move { Ok(vec![]) }
+    }
+
+    fn evict_actor<'s>(
+        &'s self,
+        _attesting_key_id: &'s str,
+        _signer: &'s dyn ciris_keyring::HardwareSigner,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> impl std::future::Future<
+        Output = Result<ciris_persist::federation::EvictActorReport, BlobError>,
+    > + Send
+           + 's {
+        async move { Ok(ciris_persist::federation::EvictActorReport::default()) }
+    }
 }
 
 fn test_signer() -> Arc<LocalSigner> {

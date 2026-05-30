@@ -38,7 +38,7 @@ crate-type = ["cdylib", "rlib"]
 # DEPLOYMENT NOTE: persist's ciris-keyring `tpm` feature unification
 # still forces system `libtss2` (`libtss2-dev` for builds) onto every
 # co-resident Linux build / host. See CIRISEdge#12.
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v3.3.0", version = "3", features = ["cirisnode", "cirisaudit", "postgres", "sqlite"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v3.6.3", version = "3", features = ["cirisnode", "cirisaudit", "postgres", "sqlite"] }
 
 # Edge v0.13.1 — cohabitation triple anchor. Consumed surface:
 #  - `Edge` runtime + `MessageType` registry (federation-consensus
@@ -46,7 +46,7 @@ ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v3.3.0
 #  - PyO3: `PyEdge` with `edge_handle()` Rust-tier `Arc<Edge>` accessor
 #    (unblocks the `#[pyfunction]` form of cohabitation install)
 #  - `init_edge_runtime(engine: Bound<'_, PyAny>)` injection pattern
-ciris-edge = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v0.17.1", version = "0" }
+ciris-edge = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v1.0.1", version = "1" }
 
 # Serde + canonicalization. Canonicalization itself routes through
 # persist's `Engine.canonicalize_envelope_for_signing` — see
@@ -92,7 +92,7 @@ uuid = { version = "1", features = ["v4"] }
 # ciris-keyring is reached via the BlobStorage trait surface
 # (evict_actor takes `&dyn ciris_keyring::HardwareSigner`); only the
 # in-memory test mocks need it directly.
-ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v4.3.0", version = "4" }
+ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v4.4.2", version = "4" }
 
 [features]
 default = []
@@ -123,18 +123,10 @@ python = ["dep:pyo3", "ciris-persist/pyo3", "ciris-edge/pyo3"]
 # edge's pin ever decouples sqlite. NodeCore#6.
 sqlite = ["ciris-persist/sqlite"]
 
-# v3.3.0 (CIRISPersist#121) ships `put_blob_signing` which closes the
-# JCS-vs-Python canonicalizer-identity trap for NodeCore Phase 2B
-# holds_bytes ingest. Edge v0.17.1 still pins persist v3.2.0
-# transitively; this patch unifies the whole dep graph onto v3.3.0 so
-# the cohabitation singletons (engine_slot, blob_storage_capsule, …)
-# are one set, not two. v3.2.0 → v3.3.0 is additive (a default-impl
-# trait method); no breaking surface for edge to recompile against.
-#
-# Path patch convention: Cargo refuses git-source patches that share
-# the original URL (`patches must point to different sources`); the
-# canonical local-dev workaround is a path patch against the sibling
-# checkout. Until edge cuts a release with persist v3.3.0, this
-# repo expects ~/CIRISPersist checked out at v3.3.0 (commit baad6bf).
-[patch."https://github.com/CIRISAI/CIRISPersist"]
-ciris-persist = { path = "/home/emoore/CIRISPersist" }
+# Substrate triple aligned: persist v3.6.3 + edge v1.0.1 + keyring
+# v4.4.2 cohabit at this pin without local path patches. The earlier
+# v3.3.0 / v0.17.1 path-patch convention is no longer needed — edge
+# v1.0.1 ships the persist v3.6.x HardwareSigner trait coordination
+# directly, and persist v3.6.3 ships the multimedia-tier read
+# accessors (list_takedowns_for / list_key_grants_for /
+# retire_key_grants) that the integration-test mocks need.

@@ -256,6 +256,39 @@ impl NodeCoreService for SpikeMock {
     ) -> Result<u64, SubstrateError> {
         Ok(0)
     }
+
+    // v3.6.0 (CIRISPersist#134) — multimedia tier read accessors +
+    // key_grant retirement. Spike mock returns empty / default.
+    async fn list_takedowns_for(
+        &self,
+        _content_sha256: &str,
+    ) -> Result<Vec<ContributionEnvelope>, SubstrateError> {
+        Ok(Vec::new())
+    }
+
+    async fn list_key_grants_for(
+        &self,
+        _recipient_key_id: &str,
+    ) -> Result<Vec<ContributionEnvelope>, SubstrateError> {
+        Ok(Vec::new())
+    }
+
+    async fn list_key_grants_for_content(
+        &self,
+        _content_sha256: &str,
+        _recipient_key_id: &str,
+    ) -> Result<Vec<ContributionEnvelope>, SubstrateError> {
+        Ok(Vec::new())
+    }
+
+    async fn retire_key_grants(
+        &self,
+        _actor_key_id: &str,
+        _signer: &dyn ciris_keyring::HardwareSigner,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ciris_persist::cirisnode::service::RetireKeyGrantsReport, SubstrateError> {
+        Ok(ciris_persist::cirisnode::service::RetireKeyGrantsReport::default())
+    }
 }
 
 // ── Contract-fit tests ──────────────────────────────────────────────────

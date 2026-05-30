@@ -557,6 +557,44 @@ impl NodeCoreService for MockEngine {
             }))
         }
     }
+
+    // v3.6.0 (CIRISPersist#134) — multimedia tier read accessors +
+    // key_grant retirement. MockEngine returns empty / default;
+    // tests targeting multimedia coverage are at ingest.rs level.
+    fn list_takedowns_for(
+        &self,
+        _content_sha256: &str,
+    ) -> impl Future<Output = Result<Vec<ContributionEnvelope>, SubstrateError>> + Send {
+        async move { Ok(Vec::new()) }
+    }
+
+    fn list_key_grants_for(
+        &self,
+        _recipient_key_id: &str,
+    ) -> impl Future<Output = Result<Vec<ContributionEnvelope>, SubstrateError>> + Send {
+        async move { Ok(Vec::new()) }
+    }
+
+    fn list_key_grants_for_content(
+        &self,
+        _content_sha256: &str,
+        _recipient_key_id: &str,
+    ) -> impl Future<Output = Result<Vec<ContributionEnvelope>, SubstrateError>> + Send {
+        async move { Ok(Vec::new()) }
+    }
+
+    fn retire_key_grants(
+        &self,
+        _actor_key_id: &str,
+        _signer: &dyn ciris_keyring::HardwareSigner,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> impl Future<
+        Output = Result<ciris_persist::cirisnode::service::RetireKeyGrantsReport, SubstrateError>,
+    > + Send {
+        async move {
+            Ok(ciris_persist::cirisnode::service::RetireKeyGrantsReport::default())
+        }
+    }
 }
 
 // Convenience alias for the federation directory's error type.

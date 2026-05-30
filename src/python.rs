@@ -560,6 +560,7 @@ fn effective_trust_set(
         )
     })?;
 
+    let root_for_async = root_key_id.clone();
     let set = py
         .detach(|| {
             runtime.block_on(async move {
@@ -568,7 +569,7 @@ fn effective_trust_set(
                         BackendDispatch::Postgres(b) => b.as_ref(),
                         BackendDispatch::Sqlite(b) => b.as_ref(),
                     };
-                crate::trust_depth::effective_trust_set(directory, &root_key_id, depth).await
+                crate::trust_depth::effective_trust_set(directory, &root_for_async, depth).await
             })
         })
         .map_err(|e| PyRuntimeError::new_err(format!("effective_trust_set: {e}")))?;
