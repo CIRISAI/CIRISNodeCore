@@ -194,6 +194,115 @@ attestations, become discoverable as holders.
 | Disk | 256 GB | 1 TB | Eric's spec |
 | Bandwidth | 1 Gbps (10.8 TB/day sustained) | 1 Gbps | Residential fiber |
 | CPU | 1 full-utilization core (86.4 K cpu-sec/day) | Per-process CIRIS share |
+| Retention | 2-day admitted-trust floor (soft failure under this) | v0.4 — anti-thrash gate |
+
+### 3.4 Device-class realism (v0.4)
+
+The tier model `client / proxy / server` says *what a node does* in
+the federation; the device class says *what hardware it runs on*.
+Different device classes have radically different idle power,
+marginal-share availability (a phone serving CEWP costs ~5% of its
+idle draw — the human pays the rest), always-on reachability, and
+useful-work-per-watt efficiency.
+
+| Class | idle_W | marginal_share | always_on | efficiency | net_new |
+|---|---|---|---|---|---|
+| phone | 2.5 W | 5% | 15% | 0.50× | no |
+| laptop | 10 W | 10% | 20% | 0.40× | no |
+| tablet | 5 W | 7% | 10% | 0.45× | no |
+| ARM mini-PC | 5 W | 100% | 100% | 0.60× | yes |
+| home x86 | 25 W | 100% | 100% | 0.40× | yes |
+| old desktop | 60 W | 100% | 100% | 0.20× | no |
+
+Fleet styles (per-tier device composition presets):
+
+- **PhoneFirst** — substrate rides hardware that's already on.
+  Server slice is mostly ARM mini-PCs; very few dedicated x86 boxes.
+- **Realistic 2026** — what you'd see today: phones for clients and
+  proxies; L1 is a mix of dedicated ARM boxes, laptops left on, and
+  some x86 home servers.
+- **Homelab** — dedicated home servers everywhere. Worst-case for
+  net-new buildout + per-watt efficiency.
+
+### 3.5 Regional realism (v0.4)
+
+Nine GSMA-aligned regions with real 2024-2026 data. The website's
+model assumed a uniform global pool; in reality smartphone
+penetration, broadband reach, and grid CO2 differ by an order of
+magnitude across the world. Per-region tier mix is computed from
+penetration data, not hand-set.
+
+| Region | Pop (M) | Smartphone | Broadband | L1-capable | Grid CO2 |
+|---|---|---|---|---|---|
+| North America | 378 | 85% | 82% | 75% | 0.38 |
+| Europe | 743 | 83% | 77% | 70% | 0.27 |
+| East Asia | 1660 | 79% | 73% | 65% | 0.51 |
+| South Asia | 2010 | 61% | 42% | 25% | 0.71 |
+| Southeast Asia | 695 | 70% | 55% | 35% | 0.55 |
+| MENA | 581 | 66% | 58% | 40% | 0.55 |
+| Sub-Saharan Africa | 1280 | 52% | 28% | 12% | 0.45 |
+| Latin America | 660 | 72% | 65% | 45% | 0.21 |
+| Oceania | 45 | 80% | 75% | 65% | 0.55 |
+
+**Sources** — UN World Population Prospects 2024 medium variant /
+GSMA Mobile Economy 2024 / ITU Facts and Figures 2024 + Speedtest
+Global Index 2024 / IEA Energy Statistics 2024 weighted regional
+averages.
+
+The regional model surfaces the truer comparison: South Asia's grid
+is 3× dirtier than Latin America's; CEWP power spent in hydro-heavy
+Iceland or Norway has near-zero CO2 cost; sub-Saharan Africa's home-
+server capability is real but small (12%), so substrate participation
+there is dominated by the phone-class client tier at first.
+
+### 3.6 Environmental footprint (v0.4)
+
+Two perspectives in parallel:
+
+1. **Centralized internet substrate today** — datacenter-counted.
+   Calibrated against the IEA 2024 global DC electricity estimate
+   (~415 TWh/yr at 5 B users); ~10 K facilities × 5 MW avg.
+2. **CEWP substrate** — device-class-counted. Most participation
+   rides hardware already on for other reasons; marginal power per
+   device, not full draw. Regional CEWP footprint uses each region's
+   grid CO2 (Latin America 0.21 / South Asia 0.71 kg/kWh).
+
+At the `full_internet_v1` scenario (5 B users):
+
+| Posture | Power | Electricity | CO2 | vs Internet |
+|---|---|---|---|---|
+| Internet substrate (today) | 50 GW | 438 TWh/yr | 175 Mt/yr | baseline |
+| CEWP PhoneFirst | 5.3 GW | 47 TWh/yr | 18.6 Mt/yr | **9.4× less** |
+| CEWP Realistic 2026 | 10.3 GW | 90 TWh/yr | 36.2 Mt/yr | **4.8× less** |
+| CEWP Homelab | 16.9 GW | 148 TWh/yr | 59.3 Mt/yr | 3.0× less |
+| CEWP Regional Realism (Realistic 2026, per-region grid CO2) | 14.3 GW | 125 TWh/yr | 61.4 Mt/yr | 3.5× less power, 2.9× less CO2 |
+
+The marginal vs new-buildout split shows where the joules actually
+come from: at Realistic 2026, ~47% is marginal (rides phones /
+laptops already on) and ~53% is new buildout (ARM mini-PCs + home
+x86). At PhoneFirst it flips to ~55% marginal / ~45% new buildout —
+the phone-class population is the largest fleet but contributes
+little new hardware.
+
+### 3.7 Latency model (v0.4)
+
+First-order p50 RTT estimate driven by the same sliders that drive
+storage and bandwidth. Numbers come from measured residential ISP
+RTTs, CDN edge cache RTTs, and great-circle backbone delays.
+
+| Component | Cost | Source |
+|---|---|---|
+| CEWP cache hit (same box / metro) | 2 ms | local SSD read + LAN hop |
+| CEWP local-cohort hop (metro) | 18 ms | typical residential ISP intra-metro |
+| CEWP regional hop (continent) | 55 ms | continental backbone RTT |
+| CEWP global hop (cross-ocean) | 195 ms | submarine cable great-circle |
+| CEWP trust-depth hop penalty | 14 ms / hop | friend-of-friends resolution |
+| Internet CDN edge cache | 28 ms | Akamai / Cloudflare typical |
+| Internet hyperscale origin fetch | 180 ms | TLS + auth + cross-region |
+| Sparseness penalty | +5 ms / decade above 10 users/server | server density |
+
+At `full_internet_v1` with default cohort + 60% cache hit rate +
+depth 1: CEWP p50 ≈ 22.6 ms vs Internet ≈ 88.8 ms (**75% reduction**).
 
 ---
 

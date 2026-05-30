@@ -2,12 +2,35 @@
 //!
 //! Run: `cargo run --example scale_model`
 //!
-//! **v0.3 — single-pool, CEG-organic.** The v0.2 model split storage
-//! into an explicit "direct-trust archive" with a `T_direct` knob
-//! and a separate "cache" with TTL + LRU cap. That dichotomy was
-//! premature — CEG's primitives compose into a simpler model where
-//! every node holds ONE pool of bytes, scored by trust × demand ×
-//! recency, with disk budget the only hard limit.
+//! **v0.4 — device classes + 9-region realism.** Extends v0.3's
+//! single-pool CEG-organic model with:
+//!
+//!   1. **Device-class power accounting** — phones / laptops / tablets /
+//!      ARM mini-PCs / home x86 / old desktops, each with per-class
+//!      idle_W, marginal_share, always_on_factor, efficiency_factor,
+//!      and net_new flag. Replaces an implicit "50 W per server"
+//!      constant with truer numbers per device class.
+//!   2. **Fleet styles** — `PhoneFirst` / `Realistic2026` / `Homelab`
+//!      presets for the device mix per tier.
+//!   3. **9 GSMA-aligned regions** with real 2024-2026 data:
+//!      population (UN WPP 2024 medium variant), smartphone penetration
+//!      (GSMA Mobile Economy 2024), broadband reach (ITU 2024 + Speedtest),
+//!      grid CO2 intensity (IEA 2024 weighted regional avg), and
+//!      derived home-server-capable fraction. Per-region tier mix is
+//!      computed from these, not hand-set.
+//!   4. **Environmental footprint** — internet (datacenter-counted)
+//!      vs CEWP (device-class-counted, marginal-share-discounted).
+//!   5. **Latency model** — first-order p50 RTT estimate for CEWP vs
+//!      centralized internet, decomposed into cache + local hop +
+//!      regional + global + trust-depth + sparseness penalty.
+//!   6. **Retention floor gate** — soft feasibility failure if the
+//!      admitted-trust pool churns under 2 days.
+//!
+//! v0.3 was single-pool CEG-organic — every node holds ONE pool of
+//! bytes, scored by trust × demand × recency, disk budget the only
+//! hard limit. The v0.2 model split storage into "direct-trust
+//! archive" with a `T_direct` knob and a separate "cache" with TTL +
+//! LRU cap; that dichotomy was premature.
 //!
 //! **The discipline** (Eric, this session):
 //!
@@ -85,6 +108,513 @@ const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 const TB: f64 = 1024.0 * GB;
 const PB: f64 = 1024.0 * TB;
 const EB: f64 = 1024.0 * PB;
+
+// ─── Environment (energy + CO2) ────────────────────────────────────
+//
+// Numbers are rough; the toy shows the math so anyone can dispute the
+// inputs. Sources cited inline. Tracks two perspectives in parallel:
+//
+//   1. Centralized internet substrate today — datacenter-counted.
+//      Calibrated against IEA's 2024 global DC electricity estimate
+//      (~415 TWh/yr) at 5 B users.
+//
+//   2. CEWP substrate — device-class-counted. Most participation
+//      rides hardware that's already on for other reasons (phones,
+//      laptops); marginal power per device, not full draw.
+
+const HOURS_PER_YEAR: f64 = 8760.0;
+const TODAY_DC_COUNT_AT_5B: f64 = 10_000.0;
+const HYPERSCALE_DC_AVG_MW: f64 = 5.0;
+const DC_FLOOR: f64 = 100.0;
+const GLOBAL_GRID_CO2_KG_PER_KWH: f64 = 0.40; // IEA global avg 2023
+
+// 30-50% of today's substrate spend goes to value extraction
+// (ad targeting, recommender training, surveillance analytics, A/B
+// test platforms). SemiAnalysis ML breakdowns at large ad-funded
+// platforms show 30-50% of accelerator hours on personalization /
+// targeting workloads; Sandvine 2024 traffic dominated by
+// recommender-driven content. CEWP removes this layer
+// architecturally — every joule it spends goes to the user's actual
+// task.
+#[allow(dead_code)]
+const EXTRACTION_OVERHEAD: f64 = 0.40;
+
+// Retention floor — if the trust pool churns faster than 2 days, the
+// server is mostly a pass-through cache. Feasibility-failure soft gate.
+const RETENTION_FLOOR_DAYS: f64 = 2.0;
+
+// ─── Device class model ──────────────────────────────────────────────
+//
+// Replaces the implicit "50W per server" constant with per-class
+// energy accounting. Ported + extended from the website's lib/model.ts
+// device-class table. Each class carries:
+//
+//   - idle_W: typical continuous idle draw
+//   - marginal_share: fraction attributable to CEWP vs the device's
+//     primary purpose. A phone running a CEWP client costs ~5% of its
+//     idle draw, not 100% — the human is already paying the rest.
+//   - always_on_factor: fraction of the day the device is reachable
+//     (no sleep, no NAT). Phones float around 15%; ARM mini-PCs are
+//     100%. Multiplies into per-device storage / fanout utility.
+//   - efficiency_factor: useful-work-per-watt vs hyperscale baseline
+//     (1.0). Commodity SoCs at low utilization are worse than a
+//     custom-silicon facility with PUE 1.1 and pooled cooling.
+//   - net_new: does the participant need to buy new hardware?
+//   - typical_storage_gb: stock storage capacity on the device class
+//   - typical_uplink_mbps: stock uplink available to the device
+//     class on its dominant connectivity tier
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum DeviceClass {
+    Phone,
+    Laptop,
+    Tablet,
+    ArmBox,
+    HomeX86,
+    OldDesktop,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DeviceSpec {
+    label: &'static str,
+    idle_w: f64,
+    marginal_share: f64,
+    always_on_factor: f64,
+    efficiency_factor: f64,
+    net_new: bool,
+    typical_storage_gb: f64,
+    typical_uplink_mbps: f64,
+}
+
+fn device_spec(c: DeviceClass) -> DeviceSpec {
+    match c {
+        DeviceClass::Phone => DeviceSpec {
+            label: "phone", idle_w: 2.5, marginal_share: 0.05,
+            always_on_factor: 0.15, efficiency_factor: 0.5, net_new: false,
+            typical_storage_gb: 128.0, typical_uplink_mbps: 25.0,
+        },
+        DeviceClass::Laptop => DeviceSpec {
+            label: "laptop", idle_w: 10.0, marginal_share: 0.10,
+            always_on_factor: 0.20, efficiency_factor: 0.4, net_new: false,
+            typical_storage_gb: 512.0, typical_uplink_mbps: 100.0,
+        },
+        DeviceClass::Tablet => DeviceSpec {
+            label: "tablet", idle_w: 5.0, marginal_share: 0.07,
+            always_on_factor: 0.10, efficiency_factor: 0.45, net_new: false,
+            typical_storage_gb: 128.0, typical_uplink_mbps: 50.0,
+        },
+        DeviceClass::ArmBox => DeviceSpec {
+            label: "ARM mini-PC", idle_w: 5.0, marginal_share: 1.0,
+            always_on_factor: 1.0, efficiency_factor: 0.6, net_new: true,
+            typical_storage_gb: 1024.0, typical_uplink_mbps: 1000.0,
+        },
+        DeviceClass::HomeX86 => DeviceSpec {
+            label: "home x86", idle_w: 25.0, marginal_share: 1.0,
+            always_on_factor: 1.0, efficiency_factor: 0.4, net_new: true,
+            typical_storage_gb: 4096.0, typical_uplink_mbps: 1000.0,
+        },
+        DeviceClass::OldDesktop => DeviceSpec {
+            label: "old desktop", idle_w: 60.0, marginal_share: 1.0,
+            always_on_factor: 1.0, efficiency_factor: 0.2, net_new: false,
+            typical_storage_gb: 1024.0, typical_uplink_mbps: 200.0,
+        },
+    }
+}
+
+/// Per-tier device composition. Fractions in each tier sum to ~1.0.
+#[derive(Debug, Clone)]
+struct DeviceMix {
+    items: Vec<(DeviceClass, f64)>,
+}
+
+impl DeviceMix {
+    fn new(items: &[(DeviceClass, f64)]) -> Self {
+        Self { items: items.to_vec() }
+    }
+}
+
+/// Fleet styles — global presets for the device mix across all three
+/// tiers. Clients and proxies are mostly phones in every style;
+/// phones don't dominate the L1 mix because they're poor at
+/// always-on reachability.
+#[derive(Debug, Clone, Copy)]
+enum FleetStyle {
+    PhoneFirst,
+    Realistic2026,
+    Homelab,
+}
+
+fn fleet_mix(style: FleetStyle, tier: Tier) -> DeviceMix {
+    use DeviceClass::*;
+    match (style, tier) {
+        (FleetStyle::PhoneFirst, Tier::Client) =>
+            DeviceMix::new(&[(Phone, 0.95), (Laptop, 0.05)]),
+        (FleetStyle::PhoneFirst, Tier::Proxy) =>
+            DeviceMix::new(&[(Phone, 0.70), (Laptop, 0.30)]),
+        (FleetStyle::PhoneFirst, Tier::Server) =>
+            DeviceMix::new(&[(Phone, 0.05), (Laptop, 0.15), (ArmBox, 0.70), (HomeX86, 0.05), (OldDesktop, 0.05)]),
+        (FleetStyle::Realistic2026, Tier::Client) =>
+            DeviceMix::new(&[(Phone, 0.85), (Laptop, 0.15)]),
+        (FleetStyle::Realistic2026, Tier::Proxy) =>
+            DeviceMix::new(&[(Phone, 0.50), (Laptop, 0.40), (ArmBox, 0.10)]),
+        (FleetStyle::Realistic2026, Tier::Server) =>
+            DeviceMix::new(&[(Phone, 0.05), (Laptop, 0.20), (ArmBox, 0.40), (HomeX86, 0.25), (OldDesktop, 0.10)]),
+        (FleetStyle::Homelab, Tier::Client) =>
+            DeviceMix::new(&[(Phone, 0.70), (Laptop, 0.30)]),
+        (FleetStyle::Homelab, Tier::Proxy) =>
+            DeviceMix::new(&[(Phone, 0.30), (Laptop, 0.40), (ArmBox, 0.30)]),
+        (FleetStyle::Homelab, Tier::Server) =>
+            DeviceMix::new(&[(Laptop, 0.10), (ArmBox, 0.30), (HomeX86, 0.45), (OldDesktop, 0.15)]),
+    }
+}
+
+// ─── Regional realism ────────────────────────────────────────────────
+//
+// Nine GSMA-aligned regions with real 2024-2026 data. The website's
+// model assumes a uniform global pool; in reality smartphone
+// penetration, broadband reach, and grid CO2 differ by an order of
+// magnitude across the world.
+//
+// **Sources** (all rough — uncertainty bars are wide):
+//   - Population 2026: UN World Population Prospects 2024 medium variant
+//   - Smartphone penetration: GSMA Mobile Economy reports 2024
+//   - Broadband reach (4G+ or fixed ≥ 25 Mbps): ITU + Speedtest Global Index 2024
+//   - Grid CO2: IEA 2024 Energy Statistics, regional weighted average
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Region {
+    NorthAmerica,
+    Europe,
+    EastAsia,
+    SouthAsia,
+    SoutheastAsia,
+    Mena,            // Middle East + North Africa
+    SubSaharanAfrica,
+    LatinAmerica,
+    Oceania,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RegionStats {
+    label: &'static str,
+    population_2026: f64,          // millions (UN WPP 2024 medium variant)
+    smartphone_penetration: f64,   // fraction with smartphones (GSMA 2024)
+    broadband_penetration: f64,    // 4G+ or fixed ≥ 25 Mbps (ITU 2024)
+    grid_co2_kg_per_kwh: f64,      // regional grid intensity (IEA 2024)
+    /// Fraction of population realistically capable of hosting an
+    /// always-on L1 server — needs phone/PC + persistent broadband +
+    /// stable grid power. Conservative under-estimate.
+    home_server_capable: f64,
+}
+
+fn region_stats(r: Region) -> RegionStats {
+    match r {
+        Region::NorthAmerica => RegionStats {
+            label: "North America", population_2026: 378.0,
+            smartphone_penetration: 0.85, broadband_penetration: 0.82,
+            grid_co2_kg_per_kwh: 0.38, home_server_capable: 0.75,
+        },
+        Region::Europe => RegionStats {
+            label: "Europe", population_2026: 743.0,
+            smartphone_penetration: 0.83, broadband_penetration: 0.77,
+            grid_co2_kg_per_kwh: 0.27, home_server_capable: 0.70,
+        },
+        Region::EastAsia => RegionStats {
+            label: "East Asia", population_2026: 1660.0,
+            smartphone_penetration: 0.79, broadband_penetration: 0.73,
+            grid_co2_kg_per_kwh: 0.51, home_server_capable: 0.65,
+        },
+        Region::SouthAsia => RegionStats {
+            label: "South Asia", population_2026: 2010.0,
+            smartphone_penetration: 0.61, broadband_penetration: 0.42,
+            grid_co2_kg_per_kwh: 0.71, home_server_capable: 0.25,
+        },
+        Region::SoutheastAsia => RegionStats {
+            label: "Southeast Asia", population_2026: 695.0,
+            smartphone_penetration: 0.70, broadband_penetration: 0.55,
+            grid_co2_kg_per_kwh: 0.55, home_server_capable: 0.35,
+        },
+        Region::Mena => RegionStats {
+            label: "MENA", population_2026: 581.0,
+            smartphone_penetration: 0.66, broadband_penetration: 0.58,
+            grid_co2_kg_per_kwh: 0.55, home_server_capable: 0.40,
+        },
+        Region::SubSaharanAfrica => RegionStats {
+            label: "Sub-Saharan Africa", population_2026: 1280.0,
+            smartphone_penetration: 0.52, broadband_penetration: 0.28,
+            grid_co2_kg_per_kwh: 0.45, home_server_capable: 0.12,
+        },
+        Region::LatinAmerica => RegionStats {
+            label: "Latin America", population_2026: 660.0,
+            smartphone_penetration: 0.72, broadband_penetration: 0.65,
+            grid_co2_kg_per_kwh: 0.21, home_server_capable: 0.45,
+        },
+        Region::Oceania => RegionStats {
+            label: "Oceania", population_2026: 45.0,
+            smartphone_penetration: 0.80, broadband_penetration: 0.75,
+            grid_co2_kg_per_kwh: 0.55, home_server_capable: 0.65,
+        },
+    }
+}
+
+fn all_regions() -> [Region; 9] {
+    [
+        Region::NorthAmerica, Region::Europe, Region::EastAsia,
+        Region::SouthAsia, Region::SoutheastAsia, Region::Mena,
+        Region::SubSaharanAfrica, Region::LatinAmerica, Region::Oceania,
+    ]
+}
+
+/// Sum of population × smartphone_penetration across all regions —
+/// the realistic CEWP-reachable population at 100% adoption among
+/// smartphone-owning humans.
+fn realistic_world_population_smartphone() -> f64 {
+    all_regions().iter()
+        .map(|r| { let s = region_stats(*r); s.population_2026 * s.smartphone_penetration * 1e6 })
+        .sum()
+}
+
+/// Per-region tier mix derived from real penetration data. Server
+/// tier is gated by home_server_capable; proxy tier scales with
+/// broadband_penetration; client tier picks up the smartphone
+/// remainder. Returns (client_frac, proxy_frac, server_frac)
+/// normalized to the smartphone-having population.
+fn region_tier_mix(r: Region) -> (f64, f64, f64) {
+    let s = region_stats(r);
+    // Server: home_server_capable share of smartphone owners
+    let server_frac = (s.home_server_capable / s.smartphone_penetration.max(0.01)).min(0.15);
+    // Proxy: broadband-having smartphone owners who AREN'T servers
+    let proxy_frac = ((s.broadband_penetration / s.smartphone_penetration.max(0.01)) - server_frac).max(0.0).min(0.80);
+    // Client: the rest of smartphone owners
+    let client_frac = (1.0 - proxy_frac - server_frac).max(0.0);
+    (client_frac, proxy_frac, server_frac)
+}
+
+// ─── Connectivity tiers ──────────────────────────────────────────────
+//
+// Smartphones aren't all equally connected. A 5G phone in Seoul has a
+// different substrate role than a 3G phone in rural Uttar Pradesh.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+enum ConnectivityTier {
+    Fiber,         // 100+ Mbps symmetric uplink
+    Cable5g,       // 100+ Mbps DL, 10+ Mbps UL
+    MobileLte,     // 25+ Mbps DL, 5+ Mbps UL (typical 4G)
+    Mobile3g,      // 1-5 Mbps DL, <1 Mbps UL
+    Mobile2g,      // sub-1 Mbps; voice + SMS feasible only
+    Sparse,        // intermittent / satellite / no persistent connection
+}
+
+#[allow(dead_code)]
+fn connectivity_uplink_mbps(t: ConnectivityTier) -> f64 {
+    match t {
+        ConnectivityTier::Fiber => 1000.0,
+        ConnectivityTier::Cable5g => 100.0,
+        ConnectivityTier::MobileLte => 10.0,
+        ConnectivityTier::Mobile3g => 1.0,
+        ConnectivityTier::Mobile2g => 0.1,
+        ConnectivityTier::Sparse => 0.02,
+    }
+}
+
+// ─── Environmental footprint ─────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+struct Footprint {
+    datacenters: f64,
+    power_mw: f64,
+    electricity_twh_per_year: f64,
+    co2_mt_per_year: f64,
+    marginal_power_mw: f64,
+    new_buildout_power_mw: f64,
+    useful_work_per_watt: f64,
+    by_class: Vec<(DeviceClass, f64, f64, bool)>, // (class, count, power_MW, net_new)
+}
+
+fn envelope(power_mw: f64, grid_co2: f64) -> (f64, f64) {
+    let twh = (power_mw * 1000.0 * HOURS_PER_YEAR) / 1e9;
+    let co2 = twh * grid_co2;
+    (twh, co2)
+}
+
+fn internet_footprint(n_users: f64) -> Footprint {
+    let dcs = DC_FLOOR.max((n_users / 5e9) * TODAY_DC_COUNT_AT_5B);
+    let power_mw = dcs * HYPERSCALE_DC_AVG_MW;
+    let (twh, co2) = envelope(power_mw, GLOBAL_GRID_CO2_KG_PER_KWH);
+    Footprint {
+        datacenters: dcs, power_mw,
+        electricity_twh_per_year: twh, co2_mt_per_year: co2,
+        marginal_power_mw: 0.0,
+        new_buildout_power_mw: power_mw,
+        useful_work_per_watt: 1.0,
+        by_class: Vec::new(),
+    }
+}
+
+fn tier_power(count: f64, mix: &DeviceMix) -> (f64, f64, f64, f64, Vec<(DeviceClass, f64, f64, bool)>) {
+    let mut power_mw = 0.0;
+    let mut marginal_mw = 0.0;
+    let mut new_buildout_mw = 0.0;
+    let mut weighted_eff = 0.0;
+    let mut mix_sum = 0.0;
+    let mut by_class = Vec::new();
+    for (cls, frac) in &mix.items {
+        if *frac <= 0.0 { continue; }
+        let spec = device_spec(*cls);
+        let tier_count = count * frac;
+        let tier_w = tier_count * spec.idle_w * spec.marginal_share;
+        let tier_mw = tier_w / 1e6;
+        power_mw += tier_mw;
+        if spec.marginal_share < 1.0 || !spec.net_new { marginal_mw += tier_mw; }
+        if spec.net_new && spec.marginal_share >= 0.5 { new_buildout_mw += tier_mw; }
+        weighted_eff += frac * spec.efficiency_factor;
+        mix_sum += frac;
+        by_class.push((*cls, tier_count, tier_mw, spec.net_new));
+    }
+    let efficiency = if mix_sum > 0.0 { weighted_eff / mix_sum } else { 1.0 };
+    (power_mw, marginal_mw, new_buildout_mw, efficiency, by_class)
+}
+
+fn cewp_footprint(s: &Scenario, style: FleetStyle, grid_co2: f64) -> Footprint {
+    let n_cli = s.n_users * s.tier_mix.client;
+    let n_prx = s.n_users * s.tier_mix.proxy;
+    let n_srv = s.n_users * s.tier_mix.server;
+    let cli = tier_power(n_cli, &fleet_mix(style, Tier::Client));
+    let prx = tier_power(n_prx, &fleet_mix(style, Tier::Proxy));
+    let srv = tier_power(n_srv, &fleet_mix(style, Tier::Server));
+    let power_mw = cli.0 + prx.0 + srv.0;
+    let marginal_mw = cli.1 + prx.1 + srv.1;
+    let new_buildout_mw = cli.2 + prx.2 + srv.2;
+    let efficiency = if power_mw > 0.0 {
+        (cli.3 * cli.0 + prx.3 * prx.0 + srv.3 * srv.0) / power_mw
+    } else { 1.0 };
+    let (twh, co2) = envelope(power_mw, grid_co2);
+    let mut by_class = cli.4;
+    by_class.extend(prx.4);
+    by_class.extend(srv.4);
+    by_class.retain(|(_, _, p, _)| *p > 0.0);
+    Footprint {
+        datacenters: 0.0, power_mw,
+        electricity_twh_per_year: twh, co2_mt_per_year: co2,
+        marginal_power_mw: marginal_mw,
+        new_buildout_power_mw: new_buildout_mw,
+        useful_work_per_watt: efficiency,
+        by_class,
+    }
+}
+
+/// CEWP footprint summed across all regions, using each region's own
+/// grid CO2 intensity rather than the global average. The truer
+/// number: South Asia's grid is dirtier than Europe's; CEWP power
+/// spent in Latin America is greener than in MENA. Caller supplies a
+/// base scenario (typically `full_internet_v1`); we override n_users
+/// + tier_mix per region from the regional realism data.
+fn cewp_regional_footprint(base: &Scenario, style: FleetStyle) -> (Footprint, Vec<(Region, f64, f64)>) {
+    let total_smartphone_pop = realistic_world_population_smartphone();
+    let mut total_power_mw = 0.0;
+    let mut total_marginal_mw = 0.0;
+    let mut total_new_buildout_mw = 0.0;
+    let mut total_co2_mt = 0.0;
+    let mut total_twh = 0.0;
+    let mut weighted_eff = 0.0;
+    let mut by_class_agg: std::collections::HashMap<DeviceClass, (f64, f64, bool)> = std::collections::HashMap::new();
+    let mut per_region = Vec::new();
+    for r in all_regions() {
+        let stats = region_stats(r);
+        let region_smartphone_pop = stats.population_2026 * stats.smartphone_penetration * 1e6;
+        let region_user_share = base.n_users * (region_smartphone_pop / total_smartphone_pop);
+        let (cli_f, prx_f, srv_f) = region_tier_mix(r);
+        let mut region_scenario = base.clone();
+        region_scenario.name = stats.label;
+        region_scenario.n_users = region_user_share;
+        region_scenario.tier_mix = TierMix { client: cli_f, proxy: prx_f, server: srv_f };
+        let fp = cewp_footprint(&region_scenario, style, stats.grid_co2_kg_per_kwh);
+        total_power_mw += fp.power_mw;
+        total_marginal_mw += fp.marginal_power_mw;
+        total_new_buildout_mw += fp.new_buildout_power_mw;
+        total_twh += fp.electricity_twh_per_year;
+        total_co2_mt += fp.co2_mt_per_year;
+        weighted_eff += fp.useful_work_per_watt * fp.power_mw;
+        for (cls, count, p_mw, net_new) in &fp.by_class {
+            let entry = by_class_agg.entry(*cls).or_insert((0.0, 0.0, *net_new));
+            entry.0 += count;
+            entry.1 += p_mw;
+        }
+        per_region.push((r, fp.power_mw, fp.co2_mt_per_year));
+    }
+    let efficiency = if total_power_mw > 0.0 { weighted_eff / total_power_mw } else { 1.0 };
+    let by_class: Vec<(DeviceClass, f64, f64, bool)> = by_class_agg
+        .into_iter()
+        .map(|(k, (count, p_mw, net_new))| (k, count, p_mw, net_new))
+        .collect();
+    let fp = Footprint {
+        datacenters: 0.0,
+        power_mw: total_power_mw,
+        electricity_twh_per_year: total_twh,
+        co2_mt_per_year: total_co2_mt,
+        marginal_power_mw: total_marginal_mw,
+        new_buildout_power_mw: total_new_buildout_mw,
+        useful_work_per_watt: efficiency,
+        by_class,
+    };
+    (fp, per_region)
+}
+
+// ─── Latency model (CEWP vs centralized internet) ────────────────────
+//
+// First-order RTT estimate driven by the same sliders that drive
+// storage and bandwidth. Numbers come from measured residential ISP
+// RTTs, CDN edge cache RTTs, and great-circle backbone delays — not
+// from the substrate benchmarks. Shifts with cohort + cache + depth.
+
+const L_CACHE_LOCAL_MS: f64 = 2.0;
+const L_LOCAL_HOP_MS: f64 = 18.0;
+const L_REGIONAL_MS: f64 = 55.0;
+const L_GLOBAL_MS: f64 = 195.0;
+const L_TRUST_HOP_MS: f64 = 14.0;
+const L_CDN_EDGE_MS: f64 = 28.0;
+const L_ORIGIN_FETCH_MS: f64 = 180.0;
+
+#[derive(Debug, Clone)]
+struct LatencyEstimate {
+    cewp_p50_ms: f64,
+    internet_p50_ms: f64,
+    cewp_from_cache_ms: f64,
+    cewp_from_local_ms: f64,
+    cewp_from_regional_ms: f64,
+    cewp_from_global_ms: f64,
+    cewp_trust_hop_ms: f64,
+}
+
+fn estimate_latency(s: &Scenario) -> LatencyEstimate {
+    let cache = s.cache_hit_rate;
+    let miss = 1.0 - cache;
+    let local_scope = s.cohort.self_ + s.cohort.family + s.cohort.community;
+    let regional_scope = s.cohort.affiliations;
+    let global_scope = s.cohort.species + s.cohort.planet + s.cohort.federation;
+    let trust_hop = s.trust_depth_avg * L_TRUST_HOP_MS;
+    let users_per_server = 1.0 / s.tier_mix.server.max(0.001);
+    let sparseness_penalty = (users_per_server / 10.0).log10().max(0.0) * 5.0;
+
+    let from_cache = cache * L_CACHE_LOCAL_MS;
+    let from_local = miss * local_scope * (L_LOCAL_HOP_MS + sparseness_penalty);
+    let from_regional = miss * regional_scope * L_REGIONAL_MS;
+    let from_global = miss * global_scope * L_GLOBAL_MS;
+    let trust_hop_penalty = miss * trust_hop;
+    let cewp = from_cache + from_local + from_regional + from_global + trust_hop_penalty;
+    let internet = cache * L_CDN_EDGE_MS + miss * L_ORIGIN_FETCH_MS;
+
+    LatencyEstimate {
+        cewp_p50_ms: cewp,
+        internet_p50_ms: internet,
+        cewp_from_cache_ms: from_cache,
+        cewp_from_local_ms: from_local,
+        cewp_from_regional_ms: from_regional,
+        cewp_from_global_ms: from_global,
+        cewp_trust_hop_ms: trust_hop_penalty,
+    }
+}
 
 // ─── Topology ────────────────────────────────────────────────────────
 
@@ -808,6 +1338,79 @@ fn scenarios() -> Vec<Scenario> {
             agent_decisions_per_day: 200.0,
             trace_publishable_fraction: 0.10,
         },
+        // ── Regional scenarios — phones as primary, real penetration data ──
+        //
+        // These use real per-region tier mixes (region_tier_mix) and
+        // regional sub-population (smartphone_penetration × pop). They
+        // surface what the substrate looks like when the dominant
+        // device class is a phone with mobile-LTE connectivity, not a
+        // desktop with home fiber.
+        Scenario {
+            name: "south_asia_dense", // India + Pakistan + Bangladesh, 61% smartphone, 42% broadband
+            n_users: (region_stats(Region::SouthAsia).population_2026
+                * region_stats(Region::SouthAsia).smartphone_penetration * 1e6),
+            tier_mix: {
+                let (c, p, s) = region_tier_mix(Region::SouthAsia);
+                TierMix { client: c, proxy: p, server: s }
+            },
+            trust_radius: 120.0, // dense kinship + neighborhood graphs
+            trust_depth_avg: 1.0,
+            daily_bytes: 8.0 * MB, // lower bytes/day given mobile-LTE uplinks
+            avg_envelope_bytes: 30.0 * KB,
+            disk_budget_client: 128.0 * GB, // phones at low end
+            disk_budget_proxy: 256.0 * GB,
+            disk_budget_server: 1.0 * TB,
+            cohort: CohortDist::default_model(),
+            daily_fetch_bytes: 800.0 * MB,
+            cache_hit_rate: 0.6,
+            external_fetch_fraction: 0.85,
+            agent_decisions_per_day: 150.0,
+            trace_publishable_fraction: 0.10,
+        },
+        Scenario {
+            name: "sub_saharan_bootstrap", // 52% smartphone, 28% broadband, 12% L1-capable
+            n_users: (region_stats(Region::SubSaharanAfrica).population_2026
+                * region_stats(Region::SubSaharanAfrica).smartphone_penetration * 1e6),
+            tier_mix: {
+                let (c, p, s) = region_tier_mix(Region::SubSaharanAfrica);
+                TierMix { client: c, proxy: p, server: s }
+            },
+            trust_radius: 60.0, // smaller direct-trust set early
+            trust_depth_avg: 1.0,
+            daily_bytes: 4.0 * MB,
+            avg_envelope_bytes: 20.0 * KB,
+            disk_budget_client: 64.0 * GB,
+            disk_budget_proxy: 256.0 * GB,
+            disk_budget_server: 1.0 * TB,
+            cohort: CohortDist::default_model(),
+            daily_fetch_bytes: 300.0 * MB,
+            cache_hit_rate: 0.55,
+            external_fetch_fraction: 0.85,
+            agent_decisions_per_day: 80.0,
+            trace_publishable_fraction: 0.10,
+        },
+        Scenario {
+            name: "north_america_realistic", // 85% smartphone, 82% broadband, 0.38 grid CO2
+            n_users: (region_stats(Region::NorthAmerica).population_2026
+                * region_stats(Region::NorthAmerica).smartphone_penetration * 1e6),
+            tier_mix: {
+                let (c, p, s) = region_tier_mix(Region::NorthAmerica);
+                TierMix { client: c, proxy: p, server: s }
+            },
+            trust_radius: 200.0,
+            trust_depth_avg: 1.0,
+            daily_bytes: 15.0 * MB, // higher bytes/day given fiber/cable uplinks
+            avg_envelope_bytes: 50.0 * KB,
+            disk_budget_client: 256.0 * GB,
+            disk_budget_proxy: 256.0 * GB,
+            disk_budget_server: 1.0 * TB,
+            cohort: CohortDist::default_model(),
+            daily_fetch_bytes: 1500.0 * MB,
+            cache_hit_rate: 0.6,
+            external_fetch_fraction: 0.88,
+            agent_decisions_per_day: 250.0,
+            trace_publishable_fraction: 0.10,
+        },
     ]
 }
 
@@ -929,11 +1532,136 @@ fn print_scenario(s: &Scenario, r: &FedRollup) {
     println!("    CPU @ 5% util    {} cores",
         fmt_count(r.aggregate_cpu_cores_full_util / 0.05));
 
-    if feas.storage_ok && feas.bandwidth_ok && feas.cpu_ok {
+    // Retention floor: if the trust pool churns faster than 2 days,
+    // the server is mostly a pass-through cache and the federation
+    // has lost the persistence the trust gate was supposed to give it.
+    let retention_ok = srv.effective_retention_days >= RETENTION_FLOOR_DAYS;
+    println!("    {} retention {:>5.0} days (floor {:.0} days)",
+        fmt_check(retention_ok),
+        srv.effective_retention_days,
+        RETENTION_FLOOR_DAYS);
+
+    if feas.storage_ok && feas.bandwidth_ok && feas.cpu_ok && retention_ok {
         println!();
         println!("  ✓ v1 feasible per-server. {} servers globally.",
             fmt_count(s.n_users * s.tier_mix.server));
     }
+
+    // Latency comparison
+    let lat = estimate_latency(s);
+    println!();
+    println!("  Latency p50 (RTT, derived from cohort + cache + depth + tier mix):");
+    println!("    CEWP      {:>6.1} ms   (cache {:.1} + local {:.1} + regional {:.1} + global {:.1} + trust-hop {:.1})",
+        lat.cewp_p50_ms,
+        lat.cewp_from_cache_ms, lat.cewp_from_local_ms,
+        lat.cewp_from_regional_ms, lat.cewp_from_global_ms,
+        lat.cewp_trust_hop_ms);
+    println!("    Internet  {:>6.1} ms   (CDN edge cache + hyperscale origin fetch)",
+        lat.internet_p50_ms);
+    let savings = lat.internet_p50_ms - lat.cewp_p50_ms;
+    if savings > 0.0 {
+        println!("    ↓ CEWP saves {:.1} ms p50 ({:.0}% reduction)",
+            savings, savings / lat.internet_p50_ms * 100.0);
+    } else {
+        println!("    ↑ Internet faster by {:.1} ms p50", -savings);
+    }
+}
+
+/// Print energy + CO2 footprint comparison — CEWP vs centralized
+/// internet substrate, with regional breakdown for the realistic case.
+fn print_footprint(s: &Scenario) {
+    println!();
+    println!("══ Environmental footprint — {} ══", s.name);
+    let internet = internet_footprint(s.n_users);
+    println!();
+    println!("  Centralized internet substrate (today):");
+    println!("    datacenters       {}", fmt_count(internet.datacenters));
+    println!("    power             {:.1} MW", internet.power_mw);
+    println!("    electricity       {:.1} TWh/yr", internet.electricity_twh_per_year);
+    println!("    CO2               {:.1} Mt/yr (grid avg {:.2} kg/kWh)",
+        internet.co2_mt_per_year, GLOBAL_GRID_CO2_KG_PER_KWH);
+    println!();
+    println!("  CEWP substrate (fleet styles, no datacenters):");
+    for style in [FleetStyle::PhoneFirst, FleetStyle::Realistic2026, FleetStyle::Homelab] {
+        let label = match style {
+            FleetStyle::PhoneFirst => "phone-first    ",
+            FleetStyle::Realistic2026 => "realistic 2026 ",
+            FleetStyle::Homelab => "homelab        ",
+        };
+        let fp = cewp_footprint(s, style, GLOBAL_GRID_CO2_KG_PER_KWH);
+        let ratio = internet.power_mw / fp.power_mw.max(0.001);
+        println!("    [{}] {:>7.1} MW  (marginal {:>6.1} / new-build {:>5.1})  {:>5.1} TWh/yr  {:>5.1} Mt CO2/yr  ({}× less)",
+            label,
+            fp.power_mw,
+            fp.marginal_power_mw,
+            fp.new_buildout_power_mw,
+            fp.electricity_twh_per_year,
+            fp.co2_mt_per_year,
+            fmt_count(ratio));
+    }
+}
+
+/// Print per-region CEWP footprint using each region's real grid CO2 +
+/// real population × smartphone penetration share. The truer number
+/// than a single global average. Direction Eric asked for: phones,
+/// by region/capability/availability, as a class.
+fn print_regional_breakdown(base: &Scenario, style: FleetStyle) {
+    println!();
+    println!("══ Regional CEWP footprint — base scenario: {} ══", base.name);
+    println!("    Fleet style: {}", match style {
+        FleetStyle::PhoneFirst => "phone-first",
+        FleetStyle::Realistic2026 => "realistic 2026",
+        FleetStyle::Homelab => "homelab",
+    });
+    println!();
+    println!("    Per-region realism (UN 2024 pop / GSMA 2024 smartphone / ITU 2024 broadband / IEA 2024 grid):");
+    println!("    {:<22} {:>9}  {:>5}  {:>5}  {:>5}  {:>6}  {:>10}  {:>10}",
+        "region", "pop (M)", "smart", "bband", "L1cap", "gridCO2",
+        "power MW", "CO2 Mt/yr");
+    for r in all_regions() {
+        let stats = region_stats(r);
+        let (_, fp_mw, fp_co2) = {
+            let total_pop = realistic_world_population_smartphone();
+            let region_smartphone_pop = stats.population_2026 * stats.smartphone_penetration * 1e6;
+            let region_user_share = base.n_users * (region_smartphone_pop / total_pop);
+            let (cli_f, prx_f, srv_f) = region_tier_mix(r);
+            let mut sc = base.clone();
+            sc.n_users = region_user_share;
+            sc.tier_mix = TierMix { client: cli_f, proxy: prx_f, server: srv_f };
+            let fp = cewp_footprint(&sc, style, stats.grid_co2_kg_per_kwh);
+            (r, fp.power_mw, fp.co2_mt_per_year)
+        };
+        println!("    {:<22} {:>9.0}  {:>4.0}%  {:>4.0}%  {:>4.0}%   {:>4.2}  {:>10.1}  {:>10.2}",
+            stats.label,
+            stats.population_2026,
+            stats.smartphone_penetration * 100.0,
+            stats.broadband_penetration * 100.0,
+            stats.home_server_capable * 100.0,
+            stats.grid_co2_kg_per_kwh,
+            fp_mw, fp_co2);
+    }
+    let (fp_total, _) = cewp_regional_footprint(base, style);
+    let internet = internet_footprint(base.n_users);
+    println!();
+    println!("    ─────────────────────────────────────────────────────────────────────────────────────────");
+    println!("    Federation total (regional realism):");
+    println!("      power               {:.1} MW", fp_total.power_mw);
+    println!("      ├─ marginal         {:.1} MW  (rides existing phones/laptops — zero net buildout)",
+        fp_total.marginal_power_mw);
+    println!("      └─ new buildout     {:.1} MW  (ARM mini-PCs + home x86 — new hardware)",
+        fp_total.new_buildout_power_mw);
+    println!("      electricity         {:.1} TWh/yr", fp_total.electricity_twh_per_year);
+    println!("      CO2                 {:.2} Mt/yr  (regional grids, NOT global avg)",
+        fp_total.co2_mt_per_year);
+    println!("      useful work/watt    {:.2}× (relative to hyperscale baseline 1.0)",
+        fp_total.useful_work_per_watt);
+    println!();
+    println!("    Internet substrate baseline at same N users: {} MW / {:.0} TWh/yr / {:.0} Mt CO2/yr",
+        fmt_count(internet.power_mw), internet.electricity_twh_per_year, internet.co2_mt_per_year);
+    let power_ratio = internet.power_mw / fp_total.power_mw.max(0.001);
+    let co2_ratio = internet.co2_mt_per_year / fp_total.co2_mt_per_year.max(0.001);
+    println!("    CEWP is {}× lower power, {}× lower CO2 vs centralized internet substrate.",
+        fmt_count(power_ratio), fmt_count(co2_ratio));
 }
 
 /// Run the same scenario at three cache-hit-rate assumptions to
@@ -976,9 +1704,10 @@ fn print_cache_sensitivity(base: &Scenario) {
 }
 
 fn main() {
-    println!("CIRIS Federation Scaling Model — toy v0.3 (single-pool, CEG-organic)");
-    println!("Empirical baseline: Verify v2.8.0 + Edge v0.10.0 + Persist v3.3.0");
+    println!("CIRIS Federation Scaling Model — toy v0.4 (device classes + 9-region realism)");
+    println!("Empirical baseline : Verify v2.8.0 + Edge v0.10.0 + Persist v3.3.0");
     println!("Substrate triple   : keyring v4.4.2 + persist v3.6.4 + edge v1.0.1 (multimedia tier landed)");
+    println!("Regional realism   : UN WPP 2024 + GSMA Mobile Economy 2024 + ITU 2024 + IEA 2024");
     println!();
     println!("Discipline:");
     println!("  • Replication: trust(source) ≥ threshold AND capacity_available");
@@ -997,6 +1726,14 @@ fn main() {
     // Sensitivity sweep on the v1 target scenario.
     if let Some(v1) = all_scenarios.iter().find(|s| s.name == "full_internet_v1") {
         print_cache_sensitivity(v1);
+
+        // Environmental footprint comparison at v1 target.
+        print_footprint(v1);
+
+        // Per-region realism breakdown at v1 target — the direction
+        // beyond the website's uniform-global model. Uses real GSMA /
+        // UN / ITU / IEA 2024-2026 data.
+        print_regional_breakdown(v1, FleetStyle::Realistic2026);
     }
 
     println!();
@@ -1007,10 +1744,21 @@ fn main() {
     println!("  what an operator configures. The only knobs are workload +");
     println!("  topology + disk size.");
     println!();
+    println!("  Environmental footprint compares CEWP against a hyperscale");
+    println!("  baseline calibrated to ~10K facilities × 5 MW (IEA 2024 ≈");
+    println!("  415 TWh/yr at 5 B users). CEWP power is per-device-class,");
+    println!("  marginal-share-discounted (phones spend ~5% of their idle");
+    println!("  draw on substrate work); the regional breakdown uses each");
+    println!("  region's real grid CO2 (Iceland 0.05, India 0.71 kg/kWh).");
+    println!();
     println!("── Design search knobs ──");
     println!("  trust_radius            — direct peers admitted past the gate");
     println!("  cohort.publishable()    — what fraction crosses the wire at all");
     println!("  disk_budget_server      — the only hard storage limit");
     println!("  daily_bytes, daily_fetch_bytes — workload");
+    println!("  FleetStyle              — phone_first / realistic_2026 / homelab");
+    println!("  Region                  — 9 GSMA-aligned regions with real");
+    println!("                            population × smartphone × broadband ×");
+    println!("                            grid CO2 from 2024-2026 sources");
     println!();
 }
