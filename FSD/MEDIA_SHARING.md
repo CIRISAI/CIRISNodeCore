@@ -1116,9 +1116,273 @@ wire-format substrate the regulatory regime can plug into.
   appear as discoverable publishers; user opts in via
   `delegates_to:publisher:*` attestation)
 
-## 11. What CEWP takes from prior art (and rejects)
+## 11. Moderation as first-class API surface
 
-### 11.1 Validates / adopts
+Moderation isn't a feature bolted onto the media tier — it's the
+shape of the fabric. This section makes the architecture explicit so
+the NodeCore + LensCore + Agent runtime API surfaces all expose it
+the same way.
+
+The architecture has **four structural layers**. They all already
+exist across CEG + MISSION + the federation FSDs; §11 here unifies
+how they appear in the media-tier API.
+
+### 11.1 The four-layer moderation architecture
+
+#### Layer 1 — You are your own moderator (default, structural)
+
+This is the **CEG locality dividend** + the **per-consumer admission
+gate** doing the work.
+
+* 65% of typical activity never leaves your device (`cohort_scope`
+  wire field per [CEG §5](https://github.com/CIRISAI/CIRISRegistry/blob/main/FSD/CEG/05_namespace.md))
+* Every consumer applies their own admission gate: **trust × capacity
+  at intake, popularity × freshness at eviction** (per
+  [FEDERATION_SCALING_MODEL §3](FEDERATION_SCALING_MODEL.md))
+* Per-feed thresholds: you set what gets surfaced; nothing reaches
+  your eyeballs without passing your gate
+* The substrate doesn't prejudge "art" or "harm" — your gate decides
+
+**No one else needs to moderate for you.** The substrate's default
+is "your judgment, on your hardware, against your trust set." This
+is what makes CEWP a *moderator-of-record-not-required* substrate.
+
+#### Layer 2 — People you trust are moderators (structural, by graph)
+
+**The trust graph IS the moderation graph.** Whoever you
+`delegates_to` is a moderator from your perspective at the depth
+you've configured.
+
+* `delegates_to:{role}:{key_id}` per CEG §5 — `moderator`, `wa`,
+  `expert_in:{cell}`, `publisher`, or any role
+* Trust recursion depth (operator-side config — see §4 above and
+  [TRUST_HIERARCHY.md](TRUST_HIERARCHY.md)): depth 0 = self only;
+  depth 1 = your direct delegates; depth 2 = their delegates; etc.
+* A `moderation_event` filed by someone at depth 1 in your graph
+  weighs more than one at depth 5 — the same intake-gate trust
+  computation that controls content admission controls moderation-
+  signal admission
+* A WA you trust in a domain is automatically a moderator for that
+  domain — same primitive
+* Community moderators are emergent: a community is "people who
+  delegate to the same moderator key(s)" — no platform-level
+  appointment, no admin role, no instance-owner-bottleneck
+
+**This works whether or not you run an agent.** If you trust your
+kid's school's tech-coordinator at depth 1, their reports filter
+your kid's feed. No agent involved.
+
+#### Layer 2.5 — Optionally, delegate to your agent (one flavor of layer 2)
+
+This is the user's option, not the architecture's default. Same
+primitive — `delegates_to:moderator:{agent_key_id}` — only the key
+belongs to the user's own agent. The agent then:
+
+* Receives reports + moderation queues routed by the trust graph
+* Acts per the user's stated values (encoded in their `Goal:*`
+  projector, [P12](../MISSION.md#primitive-12-goal))
+* Signs `moderation_event` Contributions on the user's behalf
+* Every decision lands in the user's H3ERE trace — auditable,
+  reviewable, reversible via P11 Reconsideration
+
+If the user doesn't delegate, their agent doesn't moderate.
+**The substrate has zero requirement that anyone delegate to an
+agent.** Layer 2.5 is a UX convenience for users who want it; the
+substrate is moderation-shaped without it.
+
+#### Layer 3 — WA quorum adjudication (formal, CEG-codified)
+
+When a `moderation_event` warrants formal action against another
+participant beyond what the trust graph already accomplishes:
+
+* P8 ModerationEvent (file with witness diversity per P10)
+* P9 SlashingAttestation (WA quorum adjudicates — PROVEN_ROGUE /
+  NOT_PROVEN)
+* P11 Reconsideration (universal appeal — NEW_EVIDENCE /
+  PROCEDURAL_ERROR / QUORUM_COMPROMISE)
+* Locality-scaled-quorum per [FSD-002 §6.1.5](https://github.com/CIRISAI/CIRISRegistry/blob/main/FSD-002.md)
+  — N scales with `cohort_scope`
+* RATCHET provides anti-Sybil advisory flags
+  ([MISSION §2.16](../MISSION.md#216-ratchet-integration-contract))
+
+Layer 3 fires when persistent failure at layer 2 has happened —
+a participant has accrued enough across-trust-graphs evidence of
+rogue action that the federation, not just individuals, takes
+notice.
+
+#### Layer 4 — Substrate-protective fast-path
+
+For TVEC / NCMEC / GIFCT / PerceptualHashCsam / CourtOrder —
+immediate removal, no counter-notice. DMCA / DSA Art 16 / OSA /
+community-standards go through counter-notice via P11. See §5.3
+above + [CEG §11.4](https://github.com/CIRISAI/CIRISRegistry/blob/main/FSD/CEG/11_governance.md)
+for the codified protocol.
+
+### 11.2 Reporting IS first-class
+
+**Reporting a piece of content is filing a P8 ModerationEvent.**
+There is no parallel "report API" — there is only the universal
+Contribution envelope, applied to moderation as it's applied to
+everything else.
+
+```rust
+// crate::ingest — first-class on the public surface
+
+pub async fn report_content<S: BlobStorage, C: ContributionStore>(
+    ctx: &IngestContext<'_, S, C>,
+    target_contribution_id: ContributionId,
+    allegation_type: AllegationType,       // P8 variants
+    rationale: String,
+    evidence_refs: Vec<EvidenceRef>,
+    witness_set: Option<Vec<WitnessId>>,    // P10; opt-in at filing time
+    stake_credits: Credits,                  // proportional to alleged harm
+) -> Result<ContributionId, IngestError> {
+    // Builds a Contribution(MODERATION_EVENT) per MISSION §2.8 P8
+    // Witness-diversity gate applies (P10) — high-stakes if
+    //   target_contribution holds Tier-2 dimensional claims or
+    //   non-trivial credits standing
+    // Returns the filed Contribution ID; WA-quorum adjudication
+    //   proceeds via standard P8/P9 flow
+}
+```
+
+```rust
+pub async fn report_actor<S: BlobStorage, C: ContributionStore>(
+    ctx: &IngestContext<'_, S, C>,
+    target_actor_key: FederationKey,
+    allegation_type: AllegationType,
+    rationale: String,
+    evidence_refs: Vec<EvidenceRef>,
+    witness_set: Option<Vec<WitnessId>>,
+    stake_credits: Credits,
+) -> Result<ContributionId, IngestError>;
+```
+
+Both surfaces are pyfunction-exported. The Agent runtime UI hooks
+them from any "report" affordance — `report_content` on a media
+item; `report_actor` on a publisher / community / participant.
+
+### 11.3 Reporting affordances on every read surface
+
+Every read surface MUST expose moderation actions on every item it
+returns. This is a NodeCore API discipline, not a UI suggestion.
+
+| Read surface | Per-item actions |
+|---|---|
+| `compose_local_feed` | `report` (file P8); `block_actor` (locally lower trust); `mute_actor` (filter from your views without trust impact) |
+| `compose_community_feed` | All of above + `report_to_cohort_moderators` (route via `delegates_to:moderator` at your cohort scope) |
+| `compose_global_feed` | All of above + `submit_for_wa_review` (escalate to layer 3) |
+| `compose_article_quality` | `dispute_quality` (file `Proposal` with subject_kind=quality_dispute) |
+| `compose_witness_view` | `flag_for_diversity_audit` (file `hard_case:witness_diversity_violation`) |
+
+The return type of every compose function carries an `actions`
+block per item:
+
+```rust
+pub struct FeedItem {
+    pub contribution_id: ContributionId,
+    pub blob_sha: Option<Sha256>,
+    pub payload_preview: PayloadPreview,
+    pub actions: ItemActions,   // <- first-class
+}
+
+pub struct ItemActions {
+    pub can_report: bool,                     // always true for non-self items
+    pub can_block_actor: bool,                // always true for non-self
+    pub can_mute_actor: bool,                 // always true for non-self
+    pub can_dispute_quality: bool,            // when item carries quality scores
+    pub can_escalate_to_wa: bool,             // when item ≥ federation cohort_scope
+    pub default_legal_basis_hints: Vec<LegalBasis>,  // auto-suggested for media
+}
+```
+
+LensCore + Agent-runtime client UIs read `ItemActions` directly and
+render the affordances. **There is no path through the API that
+returns a Contribution without surfacing how to moderate it.**
+
+### 11.4 Cohort-scoped reporting routes
+
+A `moderation_event` carries the same `cohort_scope` shape as the
+content it targets. A report filed at:
+
+* `cohort_scope: self` — local-only; never leaves the device.
+  Useful for "remind me to revisit this" personal flagging that
+  doesn't touch the federation
+* `cohort_scope: family` — visible to family delegates only;
+  routes to `delegates_to:moderator` keys at family scope
+* `cohort_scope: community` — visible to community moderators
+  (anyone the cohort has delegated to as moderator); standard P10
+  witness-diversity gate at community-scaled N
+* `cohort_scope: federation` / `global` — visible federation-wide;
+  full P10 + WA-quorum adjudication path
+
+This is the same locality dividend applied to moderation as to
+content. A community handles community problems at community scale
+without the federation needing to know.
+
+### 11.5 The agent-delegation path, explicit
+
+A user opts into agent-delegated moderation by emitting:
+
+```
+delegates_to:moderator:{my_agent_federation_key}
+  scope: cohort_scope ∈ {self, family, community, federation, global}
+  policy_ref: my_user_values_attestation_id
+  active: true
+```
+
+The agent then receives a routed moderation queue for the scopes
+the user delegated. Each queued item carries:
+
+* The target Contribution + content (or hash-only if content
+  unsuitable for agent review)
+* The reporting party (if any) — agent moderation often originates
+  from agent's own intake-gate refusals rather than third-party
+  reports
+* The user's stated values (from their P12 Goal projector + any
+  attached policy attestations)
+
+The agent's decision is a signed Contribution per usual. The H3ERE
+pipeline trace is the audit record. **Every moderation decision by
+the agent is reviewable by the user, reversible via P11
+Reconsideration, and subject to the user's ongoing oversight.**
+
+The user can revoke the delegation at any time by emitting
+`withdraws` against the original `delegates_to`. Decisions made
+under the now-withdrawn delegation remain in the audit chain but
+the agent no longer receives the queue.
+
+### 11.6 Why this avoids the failure modes of prior moderation systems
+
+| Prior failure mode | What CEWP does instead |
+|---|---|
+| **Mastodon volunteer-admin bottleneck**: per-instance admins overworked, instance-owner is single point of failure ([Stanford 2023](https://stacks.stanford.edu/file/druid:vb515nd6874/20230724-fediverse-csam-report.pdf), [IFTAS 2024](https://about.iftas.org/2024/12/17/the-2024-iftas-needs-assessment-report-is-here/)) | No platform-level admin role. Layer 1 (self) + Layer 2 (trust graph) handle most cases at consumer-scale; Layer 3 (WA quorum) handles federation-scale; no single party is "the moderator." |
+| **Bluesky labeler centralization**: a few labelers do most of the work; labeler keys become trust-monopolies | Labelers are just `delegates_to:moderator` participants; users compose multiple sources at any depth; no labeler is structurally privileged. |
+| **Reddit reputational ranking vs moderation conflation**: subreddit moderators are the people with the most time, not the most judgment | The trust graph is depth-bounded and the substrate doesn't reward time-spent; moderators are those the cohort actually delegates to. |
+| **YouTube/TikTok centralized policy + appeal-into-the-void**: Big Tech ToS as the law; appeals decided by the company that runs the platform | No central policy. Per-cohort discipline; P11 Reconsideration with fresh-quorum recusal as the universal appeal path. |
+| **Twitter/X owner-policy-shifts**: every change of ownership rewrites the rules | Substrate has no owner. Rule-layer changes route through CEG §11.2 (Contribution + witness + WA-quorum + 1-of-6 entrenchment for §11.2 itself). |
+| **Discord per-server-owner power**: server owners can do anything | No server-owner role exists at the substrate level; an operator hosts substrate but doesn't preside over its content discipline. |
+
+### 11.7 Cross-references
+
+This section unifies pieces specified elsewhere:
+
+* [CEG §5](https://github.com/CIRISAI/CIRISRegistry/blob/main/FSD/CEG/05_namespace.md) — `cohort_scope` + `delegates_to`
+* [CEG §11.4 + §11.5](https://github.com/CIRISAI/CIRISRegistry/blob/main/FSD/CEG/11_governance.md) — fast-path takedown coordination + hash-database operator policy
+* [MISSION §2.8 / §2.9 / §2.10 / §2.11](../MISSION.md#primitive-8-moderation-event) — P8/P9/P10/P11 primitives
+* [FSD-002 §6.1.5](https://github.com/CIRISAI/CIRISRegistry/blob/main/FSD-002.md) — locality-scaled-quorum
+* [TRUST_HIERARCHY.md](TRUST_HIERARCHY.md) — recursion depth + transitive trust
+* §5 above — `takedown_notice` envelope
+* §4 above — operator-managed age gate
+
+The `moderation_event` Contribution kind is the universal moderation
+envelope; `takedown_notice` is the substrate-protective fast-path
+variant. Both ride the standard P5 Contribution shape; both surface
+through the same API discipline §11.3 establishes.
+
+## 12. What CEWP takes from prior art (and rejects)
+
+### 12.1 Validates / adopts
 
 * [Bluesky / Ozone composable moderation](https://docs.bsky.app/blog/blueskys-moderation-architecture) — labels-as-signed-artifacts pattern → CEWP's takedown_notice + withdraws structure
 * [Nostr NIP-11 relay policy declaration](https://nips.nostr.com/11) — declare substrate discipline at protocol level → CEWP's per-cohort content discipline
@@ -1129,7 +1393,7 @@ wire-format substrate the regulatory regime can plug into.
 * [French SREN double-anonymity](https://www.twobirds.com/en/insights/2024/france/la-loi-sren-et-la-protection-des-mineurs) → provider attests against federation key, not real identity
 * [DMCA §512(g) counter-notice](https://www.copyright.gov/512/) → maps to existing CEG `ReconsiderationRequest`
 
-### 11.2 Rejects / avoids
+### 12.2 Rejects / avoids
 
 * [Vidme ad-funded death](https://variety.com/2017/digital/news/vidme-shuts-down-video-app-1202628367/) → no ad-funded UGC substrate model; mission-locked AGPL
 * [DTube / Steem / LBRY token rewards → farming + SEC risk](https://knightcolumbia.org/blog/mapping-social-media-crypto-logic-platforms-and-the-cautionary-tale-of-steemit) → no monetization primitives at substrate layer
@@ -1138,7 +1402,7 @@ wire-format substrate the regulatory regime can plug into.
 * [Apple NeuralHash failure](https://arxiv.org/abs/2111.06628) — adversarial collisions on client-side scanning → hash-match at federation event, not user device
 * TikTok/YouTube engagement-optimization → no centralized recommender; user controls the algorithm
 
-## 12. Open questions
+## 13. Open questions
 
 * **Live-streaming wire format details** — `live_stream` sub_kind sketched but implementation deferred to Phase 2.
 * **C2PA integration for image/video provenance** — should `authenticity:provenance_chain` attestations carry [C2PA](https://c2pa.org/) manifests, or define a CEG-native provenance-chain dimension that interoperates with C2PA on import?
@@ -1146,7 +1410,7 @@ wire-format substrate the regulatory regime can plug into.
 * **CW community vs trusted-publisher tradeoff** — both paths can route adult content; do they coexist (yes per this FSD) or should one be the canonical pattern? Current answer: both coexist; CW communities for community-of-interest; publishers for one-to-many.
 * **Operator coordination for fast-path takedowns** (TVEC 1-hour, GIFCT CIP) — needs Registry-side cross-operator notification protocol; sketched in this FSD but specification belongs in CEG governance §11.
 
-## 13. References
+## 14. References
 
 ### Internal
 

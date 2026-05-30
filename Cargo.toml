@@ -89,6 +89,10 @@ pyo3 = { version = "0.28", features = ["extension-module", "abi3-py310"], option
 [dev-dependencies]
 proptest = "1.4"
 uuid = { version = "1", features = ["v4"] }
+# ciris-keyring is reached via the BlobStorage trait surface
+# (evict_actor takes `&dyn ciris_keyring::HardwareSigner`); only the
+# in-memory test mocks need it directly.
+ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v4.3.0", version = "4" }
 
 [features]
 default = []

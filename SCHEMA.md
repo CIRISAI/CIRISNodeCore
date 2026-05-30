@@ -443,6 +443,43 @@ policy-tunable threshold.
 
 Per `MISSION.md` §4.7 / §5.6. Witness set always required.
 
+The `moderation_event` is the **universal reporting envelope**:
+filing a report on any Contribution or actor is filing a P8
+moderation_event Contribution. There is no separate "report API" —
+this is it. Per `FSD/MEDIA_SHARING.md` §11, every read surface
+exposes affordances that compose with this envelope.
+
+Payload:
+
+```json
+{
+  "target_kind": "contribution",
+  "target_id": "01HZ...",
+  "allegation_type": "rogue_vote",
+  "rationale": "Vote subsequently shown to be bribed per the linked external evidence.",
+  "evidence_refs": [
+    { "kind": "signed_contribution", "ref": "01HZ..." },
+    { "kind": "external_url", "ref": "https://..." }
+  ],
+  "stake_credits": 100,
+  "cohort_scope": "community"
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `target_kind` | enum | yes | `contribution` \| `voter` \| `attester` (per MISSION §4.7). |
+| `target_id` | string | yes | ULID of the targeted Contribution / actor. |
+| `allegation_type` | enum | yes | One of `rogue_vote`, `coordinated_voting`, `out_of_distribution_attestation`, `external_inducement_evidence`, `expertise_fraud` (per MISSION §2.8 / §4.7). Media-specific reports — content-class-misclassification, content-rating-disputes, takedown-eligible content — file under `out_of_distribution_attestation` or `external_inducement_evidence` depending on the specifics; substrate-protective fast-path takedowns ride the separate `takedown_notice` subject_kind (`FSD/MEDIA_SHARING.md` §5). |
+| `rationale` | string | yes | Free-text justification recorded on the audit chain. |
+| `evidence_refs` | array | yes | At least one evidence reference. Each `{kind, ref}` per the `Citation` shape (§4.29). |
+| `stake_credits` | int | yes | CommonsCredits staked, proportional to alleged harm. Per MISSION §4.7 / §5.6.4. |
+| `cohort_scope` | enum | optional | Routing scope for the moderation_event — defaults to the target's cohort_scope. Per `FSD/MEDIA_SHARING.md` §11.4 (locality-scaled reporting routes). |
+
+WA-quorum adjudicates per P9 SlashingAttestation; P11
+Reconsideration provides the universal appeal path. RATCHET flags
+inform the adjudicating quorum but do not autonomously slash.
+
 ### 4.12 `reconsideration_request`
 
 Per `MISSION.md` §4.10 / §5.7. Witness set always required. Subject
@@ -1091,7 +1128,7 @@ publisher-specific fields:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `sub_kind` | enum | yes | `encyclopedia_article` \| `news_article` \| `accord_data` \| `local_data` \| `chat_message` \| `blog_post` (open; future kinds via §4.9.2 amendment). |
+| `sub_kind` | enum | yes | `encyclopedia_article` \| `news_article` \| `accord_data` \| `local_data` \| `chat_message` \| `blog_post` \| `image` \| `audio` \| `video` \| `film` \| `model_3d` (open; future kinds via §4.9.2 amendment). Multimedia sub_kinds spec'd in [`FSD/MEDIA_SHARING.md`](FSD/MEDIA_SHARING.md) §2. |
 | `cohort_scope` | enum | yes | One of `self` / `family` / `community` / `affiliations` / `species` / `planet` / `federation` (mirrors FSD-002 §1.7 envelope axis; carried in payload for v0.1 until persist's ContributionEnvelope exposes the envelope-level field). Drives the three-tier UI sectioning: `self` → Local; `family`/`community`/`affiliations` → Community commons; `species`/`planet`/`federation` → Global commons. Promotion = re-attest at wider scope citing same `content_sha256` (no body re-upload). |
 | `entity_key_id` | string | yes | Stable federation key_id for the article entity. Pattern: `{kind_prefix}:article:{slug}` (encyclopedia) or `news:article:{publisher}:{date}:{slug}` (news). Cited by all subsequent quality / accuracy / link attestations. |
 | `language` | ISO 639-1 | yes | The article's natural language. |
@@ -1110,6 +1147,54 @@ publisher-specific fields:
 - `local_data` — ALWAYS `cohort_scope: self`; self-attested only; no peer review at this scope. `local_kind` ∈ {`notes` (personal journal / research drafts), `draft` (heading toward encyclopedia/news promotion), `bookmark` (tracked external content), `observation` (heading toward `notification` or news promotion)}. Optional `promote_hint` field signals user intent to widen scope; the actual promotion is an explicit `crate::ingest::promote_payload` operation that emits a new Contribution at wider scope citing the same `content_sha256`. Sub_kind morphing supported on promotion (a `local_data` `draft` becomes `encyclopedia_article` at `community` scope, or `news_article` at `federation` scope).
 - `chat_message` — conversational message imported from a chat platform (`platform` ∈ {`discord`, `slack`, `twitter`, `imessage`, `sms`, `xmpp`, `irc`, `matrix`, or custom}). Each message is a Contribution; reply chains form via `topical_relation:replies_to:{target_message_entity_key_id}` citing the prior message. Required: `platform`, `conversation_id` (channel / thread / DM identifier), `message_id` (platform-specific), `sender_handle`, `sent_at`, `message_index` (sequence within conversation). Optional: `sender_key_id` (federation identity bridge when sender has a CIRIS key). Cohort scope defaults are tighter than articles — typically `family` (household chat), `community` (group channels), `affiliations` (professional chats), or `self` (private DMs the user wants only their own runtime to see). `valid_until` typically set (chat decays faster than articles; per-deployment retention policy). Consumer policy should downweight chat in cross-cohort aggregation given privacy sensitivity.
 - `blog_post` — single-author published commentary imported from a blog platform (`platform` ∈ {`medium`, `substack`, `wordpress`, `ghost`, `personal`, `tumblr`, or custom}). Distinct from `news_article` (no publisher editorial), from `encyclopedia_article` (no peer-consensus editing), from `chat_message` (long-form, slower). Required: `platform`, `blog_id` (the blog identifier — e.g. `@ericmoore` for Medium handle, subdomain for Substack), `author_handle`, `published_at`, `post_title`, `post_url` (canonical URL). Optional: `author_key_id` (federation identity bridge), `tags[]` (source-platform categorization). Comments on blog posts are themselves Contributions (typically `chat_message` sub_kind with the blog's comment platform identifier) citing the post via `topical_relation:comments_on:{blog_post_entity_key_id}`. Reply threads within comments use `topical_relation:replies_to`. Cohort scope typically `federation` (public blog), `community` (community-internal blog), or `affiliations` (org-internal posts). `valid_until` typically unset (blog posts have long shelf life unless explicitly time-bound).
+
+#### Multimedia sub_kinds (spec'd in MEDIA_SHARING.md §2)
+
+The five multimedia sub_kinds share the `external_content` envelope.
+Each adds source-shape requirements plus mandatory `content_class:*`
++ `content_rating:*` dimensions (per MEDIA_SHARING §3). All multimedia
+ingest paths require `cohort_scope` validation against the
+content-discipline matrix (MEDIA_SHARING §1.1); ingestion at
+`community` or wider for adult content fails unless either a CW
+community route (MEDIA_SHARING §3.4) or trusted-publisher route
+(MEDIA_SHARING §1.2.1) applies.
+
+- `image` — static visual content (still photography, illustration, generative art). Required `source`: `format` (jpeg / png / webp / avif / heic / svg / gif), `width_px`, `height_px`, optional `camera_make` / `camera_model` / `captured_at` / `geolocation_redacted`. Required `accessibility_text` (substrate rejects images at `community+` without alt-text per WCAG 2.2 + EU AVMSD inclusivity guidance). Required `content_class` per MEDIA_SHARING §3.3. Default cohort_scope: `community` for personal photos; `self` for private. AI-generated images MUST carry `authenticity:ai_generated` per MEDIA_SHARING §8 + EU AI Act Article 50.
+- `audio` — sound content (music, podcast, voice message, ambient recording). Required `source`: `format` (mp3 / aac / opus / flac / wav), `duration_seconds`, optional `sample_rate_hz`, `channels`, `recorded_at`, `transcript_sha256` (for podcast / spoken-word; substrate prefers transcripted audio). Optional but RECOMMENDED `transcript_sha256` for spoken-word at `community+` (accessibility + searchability). Required `content_class`. Default cohort_scope: `community` for music / podcasts; `family` for voice messages.
+- `video` — moving image content shorter-form (vlog / short clip / livestream archive). Required `source`: `format` (mp4 / webm / mkv), `duration_seconds`, `width_px`, `height_px`, `framerate_fps`, optional `subtitles_sha256[]` (per language; substrate prefers subtitled video at `community+`). Required `content_class`. AI-generated video MUST carry `authenticity:ai_generated`. Default cohort_scope: `community` for vlogs; `self` for private recordings.
+- `film` — cinematic / art-bearing video distinguished from `video` by the `art_class` attribute on `content_class`. Carries the same source-shape as `video` plus required `cinematic_attestation`: `director_key_id`, `producer_key_id` (optional), `country_of_origin`, `original_language`, `release_year`. Films at X / NC-17 / R retain federation scope on the **cinema-is-art** exception per MEDIA_SHARING §1.3; the substrate routes them through the same trust-graph but doesn't apply the porn-content-class gate. `content_class` MUST be one of `Film` / `ShortFilm` / `Documentary` / `ArtPiece` / `Theatre` / `Performance` / `Animation` / `Experimental` for this sub_kind. Default cohort_scope: `federation`.
+- `model_3d` — three-dimensional content (CAD / scan / VR/AR asset / sculpture digitization / 3D-printable model). Required `source`: `format` (glb / gltf / obj / stl / usdz / fbx / blend), `polygon_count`, optional `bounding_box_meters` (real-world scale for printables / AR), `texture_count`, `rigged` (bool — has skeleton). Required `content_class`. AI-generated 3D content MUST carry `authenticity:ai_generated`. Default cohort_scope: `community` for hobbyist designs; `affiliations` for org-internal CAD; `self` for private scans.
+
+**Inline vs external for multimedia bodies.** MEDIA_SHARING §2.6
+specifies: bodies ≤ 16 MiB are `BlobBody::Inline` (substrate holds
+the bytes); larger bodies are `BlobBody::External(ExternalRef)`
+(substrate holds an addressable pointer + holder set). **No chunking
+primitive** — the choice is binary per `content_size_bytes`. The
+demand-driven replication pattern (MEDIA_SHARING §2.7) applies
+uniformly: every successful fetch creates a new holder regardless of
+inline/external.
+
+**Multimedia dimension families** (NodeCore-owned namespace slice;
+NodeCore#19 amendment surface):
+
+- `image:*` / `audio:*` / `video:*` / `film:*` / `model_3d:*` — per-medium quality / accuracy / craft dimensions
+- `content_class:*` — content classification taxonomy (MEDIA_SHARING §3.3)
+- `content_rating:*` — multi-scheme rating mapping (MPAA / BBFC / PEGI / ESRB / IFCO / CSM / operator-defined; MEDIA_SHARING §3.1)
+- `cw_class:*` — content-warning community declaration (MEDIA_SHARING §3.4)
+- `authenticity:*` — AI-disclosure + provenance attestation (MEDIA_SHARING §8; EU AI Act Article 50)
+- `age_assurance:*` — operator-managed age gate attestations (MEDIA_SHARING §4)
+
+**Takedown notices for multimedia.** The `takedown_notice`
+subject_kind (additive per MEDIA_SHARING §5; CEG §11.4 fast-path)
+applies uniformly to all multimedia sub_kinds. Per-`legal_basis`
+hold-window schedule per MEDIA_SHARING §5.5.
+
+**Encryption for restricted-distribution multimedia.** Three
+postures per MEDIA_SHARING §6: public (no encryption), restricted-
+group (CW community + group DEK), subscription (publisher route +
+per-subscriber wrap). `key_grant` subject_kind (additive) carries
+per-subscriber wraps using HPKE base mode (X25519 + AES-256-GCM +
+HKDF-SHA256) per MEDIA_SHARING §6.3.
 
 **Promotion mechanism** (the three-tier UI's "contribute to commons" action):
 

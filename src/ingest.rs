@@ -1879,7 +1879,7 @@ fn compute_sha256(bytes: &[u8]) -> [u8; 32] {
 /// Lowercase hex encoding for the 32-byte SHA-256 — content_sha256
 /// wire format per SCHEMA §4.29. Tiny inline impl to avoid pulling
 /// in the `hex` crate for one call site.
-fn hex_encode(bytes: &[u8; 32]) -> String {
+pub fn hex_encode(bytes: &[u8; 32]) -> String {
     let mut out = String::with_capacity(64);
     for b in bytes {
         out.push(char::from_digit((b >> 4) as u32, 16).unwrap());

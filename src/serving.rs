@@ -261,6 +261,34 @@ mod tests {
         ) -> impl std::future::Future<Output = Result<Vec<String>, BlobError>> + Send {
             async { Ok(Vec::new()) }
         }
+
+        // v3.5.0+ (CIRISPersist#125 + #130) — identity-aware storage
+        // trait extensions. Not exercised in compute_serving_response
+        // tests; stubs only.
+        fn list_local_holders(
+            &self,
+            _sha256: &[u8; 32],
+        ) -> impl std::future::Future<Output = Result<Vec<String>, BlobError>> + Send {
+            async { Ok(Vec::new()) }
+        }
+
+        fn list_held_by(
+            &self,
+            _attesting_key_id: &str,
+        ) -> impl std::future::Future<Output = Result<Vec<[u8; 32]>, BlobError>> + Send {
+            async { Ok(Vec::new()) }
+        }
+
+        fn evict_actor<'s>(
+            &'s self,
+            _attesting_key_id: &'s str,
+            _signer: &'s dyn ciris_keyring::HardwareSigner,
+            _now: chrono::DateTime<chrono::Utc>,
+        ) -> impl std::future::Future<Output = Result<ciris_persist::federation::EvictActorReport, BlobError>>
+                 + Send
+                 + 's {
+            async { Ok(ciris_persist::federation::EvictActorReport::default()) }
+        }
     }
 
     fn sha(byte: u8) -> [u8; 32] {

@@ -630,11 +630,285 @@ fn admits_at_depth(
     .map_err(|e| PyRuntimeError::new_err(format!("admits_at_depth: {e}")))
 }
 
+// =============================================================
+// Phase 4 — multimedia payload builders + moderation surface
+// (NodeCore multimedia tier per FSD/MEDIA_SHARING.md;
+//  moderation-as-first-class API per FSD/MEDIA_SHARING.md §11)
+//
+// All six builders are pure JSON-in / JSON-out and stack on top of
+// `build_contribution_envelope`. Wire idiom matches Phase 1.
+//
+// Multimedia builders return: `{ "payload": {...}, "content_sha256": "hex" }`
+// Moderation + delegation builders return: `{ "payload": {...} }`
+// =============================================================
+
+fn build_multimedia_result(
+    payload: serde_json::Value,
+    sha256: [u8; 32],
+) -> PyResult<String> {
+    let result = serde_json::json!({
+        "payload": payload,
+        "content_sha256": crate::ingest::hex_encode(&sha256),
+    });
+    serde_json::to_string(&result).map_err(|e| json_err("serialize multimedia result", e))
+}
+
+fn ingest_err(field: &str, e: crate::ingest::IngestError) -> PyErr {
+    PyValueError::new_err(format!("{field}: {e}"))
+}
+
+/// Build the canonical payload + content_sha256 for an `image`
+/// external_content Contribution. Per `FSD/MEDIA_SHARING.md` §2.1 +
+/// SCHEMA §4.29.
+///
+/// `source_json` deserializes to `crate::ingest::ImageSource`.
+#[pyfunction]
+fn build_image_payload(source_json: String) -> PyResult<String> {
+    let source: crate::ingest::ImageSource =
+        serde_json::from_str(&source_json).map_err(|e| json_err("source_json", e))?;
+    let (payload, sha256) = crate::ingest::build_image_payload(&source)
+        .map_err(|e| ingest_err("build_image_payload", e))?;
+    build_multimedia_result(payload, sha256)
+}
+
+/// Build the canonical payload + content_sha256 for an `audio`
+/// external_content Contribution. Per `FSD/MEDIA_SHARING.md` §2.2.
+#[pyfunction]
+fn build_audio_payload(source_json: String) -> PyResult<String> {
+    let source: crate::ingest::AudioSource =
+        serde_json::from_str(&source_json).map_err(|e| json_err("source_json", e))?;
+    let (payload, sha256) = crate::ingest::build_audio_payload(&source)
+        .map_err(|e| ingest_err("build_audio_payload", e))?;
+    build_multimedia_result(payload, sha256)
+}
+
+/// Build the canonical payload + content_sha256 for a `video`
+/// external_content Contribution. Per `FSD/MEDIA_SHARING.md` §2.3.
+#[pyfunction]
+fn build_video_payload(source_json: String) -> PyResult<String> {
+    let source: crate::ingest::VideoSource =
+        serde_json::from_str(&source_json).map_err(|e| json_err("source_json", e))?;
+    let (payload, sha256) = crate::ingest::build_video_payload(&source)
+        .map_err(|e| ingest_err("build_video_payload", e))?;
+    build_multimedia_result(payload, sha256)
+}
+
+/// Build the canonical payload + content_sha256 for a `film`
+/// external_content Contribution. Per `FSD/MEDIA_SHARING.md` §2.4 —
+/// the cinema-is-art carve-out: X/NC-17/R retained at federation
+/// scope when `content_class.art_class()` holds.
+#[pyfunction]
+fn build_film_payload(source_json: String) -> PyResult<String> {
+    let source: crate::ingest::FilmSource =
+        serde_json::from_str(&source_json).map_err(|e| json_err("source_json", e))?;
+    let (payload, sha256) = crate::ingest::build_film_payload(&source)
+        .map_err(|e| ingest_err("build_film_payload", e))?;
+    build_multimedia_result(payload, sha256)
+}
+
+/// Build the canonical payload + content_sha256 for a `model_3d`
+/// external_content Contribution. Per `FSD/MEDIA_SHARING.md` §2.5.
+#[pyfunction]
+fn build_model_3d_payload(source_json: String) -> PyResult<String> {
+    let source: crate::ingest::Model3dSource =
+        serde_json::from_str(&source_json).map_err(|e| json_err("source_json", e))?;
+    let (payload, sha256) = crate::ingest::build_model_3d_payload(&source)
+        .map_err(|e| ingest_err("build_model_3d_payload", e))?;
+    build_multimedia_result(payload, sha256)
+}
+
+/// Build the payload JSON for a `moderation_event` Contribution —
+/// the **universal reporting envelope** per `FSD/MEDIA_SHARING.md`
+/// §11.2 + SCHEMA §4.11.
+///
+/// Filing this against any Contribution_id or actor key is the
+/// load-bearing report-content / report-actor surface. Witness-set
+/// is required at envelope-build time; pass a `witness_set_json` to
+/// `build_contribution_envelope`.
+///
+/// Arguments:
+/// - `target_kind`: `"contribution"` | `"voter"` | `"attester"`
+/// - `target_id`: ULID of the target
+/// - `allegation_type`: per SCHEMA §4.11 enum
+/// - `rationale`: free-text justification
+/// - `evidence_refs_json`: JSON array of `{kind, ref}` objects
+/// - `stake_credits`: CommonsCredits proportional to alleged harm
+/// - `cohort_scope`: optional routing scope; defaults applied downstream
+///
+/// Returns: `{ "payload": {...} }` JSON string ready to hand to
+/// `build_contribution_envelope` with `contribution_type="moderation_event"`.
+#[pyfunction]
+#[pyo3(signature = (
+    target_kind,
+    target_id,
+    allegation_type,
+    rationale,
+    evidence_refs_json,
+    stake_credits,
+    cohort_scope=None,
+))]
+fn build_moderation_event_payload(
+    target_kind: String,
+    target_id: String,
+    allegation_type: String,
+    rationale: String,
+    evidence_refs_json: String,
+    stake_credits: u64,
+    cohort_scope: Option<String>,
+) -> PyResult<String> {
+    let allowed_kinds = ["contribution", "voter", "attester"];
+    if !allowed_kinds.contains(&target_kind.as_str()) {
+        return Err(PyValueError::new_err(format!(
+            "target_kind must be one of {allowed_kinds:?}, got {target_kind:?}"
+        )));
+    }
+    let allowed_allegations = [
+        "rogue_vote",
+        "coordinated_voting",
+        "out_of_distribution_attestation",
+        "external_inducement_evidence",
+        "expertise_fraud",
+    ];
+    if !allowed_allegations.contains(&allegation_type.as_str()) {
+        return Err(PyValueError::new_err(format!(
+            "allegation_type must be one of {allowed_allegations:?}, got {allegation_type:?}"
+        )));
+    }
+    if rationale.trim().is_empty() {
+        return Err(PyValueError::new_err("rationale must not be empty"));
+    }
+    let evidence_refs: serde_json::Value = serde_json::from_str(&evidence_refs_json)
+        .map_err(|e| json_err("evidence_refs_json", e))?;
+    if !matches!(evidence_refs, serde_json::Value::Array(ref a) if !a.is_empty()) {
+        return Err(PyValueError::new_err(
+            "evidence_refs must be a non-empty JSON array",
+        ));
+    }
+    let mut payload = serde_json::json!({
+        "target_kind": target_kind,
+        "target_id": target_id,
+        "allegation_type": allegation_type,
+        "rationale": rationale,
+        "evidence_refs": evidence_refs,
+        "stake_credits": stake_credits,
+    });
+    if let Some(scope) = cohort_scope {
+        payload["cohort_scope"] = serde_json::Value::String(scope);
+    }
+    let result = serde_json::json!({ "payload": payload });
+    serde_json::to_string(&result).map_err(|e| json_err("serialize moderation payload", e))
+}
+
+/// Build the payload JSON for an **optional** moderator delegation —
+/// per `FSD/MEDIA_SHARING.md` §11.5. Rides the existing `trust_grant`
+/// subject_kind (SCHEMA §4.14); the `scope` field encodes
+/// `moderator:{cohort_scope}` per the trust-grant scope grammar.
+///
+/// Use `build_contribution_envelope` with
+/// `contribution_type="proposal"` and `cell` carrying
+/// `subject_kind="trust_grant"`.
+///
+/// This is the user's option. The substrate has zero requirement
+/// that anyone delegate moderation. Layer 1 (self) + Layer 2
+/// (trust-graph) handle moderation by default; this builder is for
+/// the user who additionally wants to delegate moderation queues to
+/// an agent or a trusted human moderator at a specified cohort scope.
+///
+/// Arguments:
+/// - `moderator_key_id`: the federation key of the delegated moderator (agent or human)
+/// - `cohort_scope`: one of `self`, `family`, `community`, `affiliations`, `species`, `planet`, `federation`, `global`
+/// - `policy_ref`: optional Contribution_id pointing at the user's stated values / policy attestation
+/// - `expires_at`: optional ISO-8601 timestamp; `None` = open-ended
+/// - `rationale`: free-text justification
+///
+/// Returns: `{ "payload": {...} }` JSON string.
+#[pyfunction]
+#[pyo3(signature = (
+    moderator_key_id,
+    cohort_scope,
+    policy_ref=None,
+    expires_at=None,
+    rationale=None,
+))]
+fn build_moderator_delegation_payload(
+    moderator_key_id: String,
+    cohort_scope: String,
+    policy_ref: Option<String>,
+    expires_at: Option<String>,
+    rationale: Option<String>,
+) -> PyResult<String> {
+    let allowed_scopes = [
+        "self",
+        "family",
+        "community",
+        "affiliations",
+        "species",
+        "planet",
+        "federation",
+        "global",
+    ];
+    if !allowed_scopes.contains(&cohort_scope.as_str()) {
+        return Err(PyValueError::new_err(format!(
+            "cohort_scope must be one of {allowed_scopes:?}, got {cohort_scope:?}"
+        )));
+    }
+    if moderator_key_id.trim().is_empty() {
+        return Err(PyValueError::new_err("moderator_key_id must not be empty"));
+    }
+    let mut payload = serde_json::json!({
+        "grantee_key": moderator_key_id,
+        "purpose": "contribution",
+        "scope": format!("moderator:{}", cohort_scope),
+        "rationale": rationale.unwrap_or_else(|| {
+            format!("Optional moderation delegation at cohort_scope={cohort_scope}")
+        }),
+    });
+    if let Some(ts) = expires_at {
+        payload["expires_at"] = serde_json::Value::String(ts);
+    }
+    if let Some(p) = policy_ref {
+        payload["policy_ref"] = serde_json::Value::String(p);
+    }
+    let result = serde_json::json!({ "payload": payload });
+    serde_json::to_string(&result).map_err(|e| json_err("serialize delegation payload", e))
+}
+
+/// Build the payload JSON for **revoking** a prior moderator
+/// delegation per `FSD/MEDIA_SHARING.md` §11.5. The user emits a new
+/// `trust_grant` with the same `(grantee_key, purpose, scope)` and
+/// `expires_at = now()` per SCHEMA §4.14 author-only-revocation
+/// discipline.
+///
+/// Arguments:
+/// - `moderator_key_id`: the federation key from the original delegation
+/// - `cohort_scope`: must match the original delegation's cohort_scope
+/// - `now_iso`: current ISO-8601 timestamp (caller passes; pyfunctions stay pure)
+#[pyfunction]
+fn build_moderator_revocation_payload(
+    moderator_key_id: String,
+    cohort_scope: String,
+    now_iso: String,
+) -> PyResult<String> {
+    if moderator_key_id.trim().is_empty() {
+        return Err(PyValueError::new_err("moderator_key_id must not be empty"));
+    }
+    let payload = serde_json::json!({
+        "grantee_key": moderator_key_id,
+        "purpose": "contribution",
+        "scope": format!("moderator:{}", cohort_scope),
+        "expires_at": now_iso,
+        "rationale": "Revocation of prior moderation delegation",
+    });
+    let result = serde_json::json!({ "payload": payload });
+    serde_json::to_string(&result).map_err(|e| json_err("serialize revocation payload", e))
+}
+
 /// The `ciris_node_core` Python module — Phase 1 client surface +
 /// Phase 2 read-composition (CIRISNodeCore#12) + external-content
 /// feeds (CIRISNodeCore#19) + Phase 3 cohabitation install
 /// (CIRISNodeCore#11) + trust-depth admission oracle
-/// (CIRISNodeCore#21).
+/// (CIRISNodeCore#21) + Phase 4 multimedia + moderation-first-class
+/// (CIRISNodeCore multimedia tier per `FSD/MEDIA_SHARING.md`).
 #[pymodule]
 fn ciris_node_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Phase 1
@@ -659,5 +933,14 @@ fn ciris_node_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Trust depth admission oracle (CIRISNodeCore#21 / Conformance)
     m.add_function(wrap_pyfunction!(effective_trust_set, m)?)?;
     m.add_function(wrap_pyfunction!(admits_at_depth, m)?)?;
+    // Phase 4 (multimedia + moderation-first-class per MEDIA_SHARING.md)
+    m.add_function(wrap_pyfunction!(build_image_payload, m)?)?;
+    m.add_function(wrap_pyfunction!(build_audio_payload, m)?)?;
+    m.add_function(wrap_pyfunction!(build_video_payload, m)?)?;
+    m.add_function(wrap_pyfunction!(build_film_payload, m)?)?;
+    m.add_function(wrap_pyfunction!(build_model_3d_payload, m)?)?;
+    m.add_function(wrap_pyfunction!(build_moderation_event_payload, m)?)?;
+    m.add_function(wrap_pyfunction!(build_moderator_delegation_payload, m)?)?;
+    m.add_function(wrap_pyfunction!(build_moderator_revocation_payload, m)?)?;
     Ok(())
 }
