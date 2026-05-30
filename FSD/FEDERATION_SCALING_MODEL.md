@@ -143,6 +143,28 @@ conservative-by-design baseline. Dev-host CPUs run 2–3× faster.
 | Software signer | ~100 µs/sign |
 | H3ERE trace per agent decision | ~14 KB |
 
+### 2.4 Multimedia primitives (Persist v3.6.x)
+
+| Op | Cost / shape |
+|---|---|
+| `put_blob_signing` (16 MiB inline cap; matcher off) | per-row write + hybrid_sign, ~1.6 ms |
+| Perceptual-hash check at `put_blob_signing` (matcher on) | matcher-dependent; PDQ ~1 ms / image, fails closed if unreachable per operator policy |
+| `takedown_notice` Contribution write + propagation | ~1.5 ms write + `withdraws` emission against matched `holds_bytes` rows |
+| `key_grant` Contribution write | ~1.5 ms write + per-subscriber wrap (~10 µs HKDF-SHA256 + ~10 µs AES-256-GCM + ~250 µs X25519) |
+| `list_held_by(actor_key)` (identity-aware-storage seam) | indexed read |
+| `evict_actor(actor_key)` (per-actor eviction + `withdraws` emission) | linear in actor's holdings; fail-honest contract |
+| `list_local_holders` (local-truth bypass of CEG §10.1.2 TTL) | indexed read |
+
+**Triple currency note.** Empirical inputs §2.1-§2.3 reference the
+substrate baselines circa Verify v2.8.0 / Edge v0.10.0 / Persist
+v3.3.0. The model now ships at the substrate triple keyring v4.4.2 /
+persist v3.6.4 / edge v1.0.1 (FY2026 spring federation triple).
+Underlying op costs (hybrid_sign, envelope_canonicalize, SQLite row
+write) are within noise of the baselines; the §2.4 multimedia
+primitives are net-new since CEG 0.3. Refresh cadence is per
+substrate release per [NodeCore#23](https://github.com/CIRISAI/CIRISNodeCore/issues/23)
+living-document audit.
+
 ---
 
 ## 3. v1 tier model (L0 / L1 server gradient)

@@ -977,7 +977,8 @@ fn print_cache_sensitivity(base: &Scenario) {
 
 fn main() {
     println!("CIRIS Federation Scaling Model — toy v0.3 (single-pool, CEG-organic)");
-    println!("Empirical inputs: Verify v2.8.0 + Edge v0.10.0 + Persist v3.3.0");
+    println!("Empirical baseline: Verify v2.8.0 + Edge v0.10.0 + Persist v3.3.0");
+    println!("Substrate triple   : keyring v4.4.2 + persist v3.6.4 + edge v1.0.1 (multimedia tier landed)");
     println!();
     println!("Discipline:");
     println!("  • Replication: trust(source) ≥ threshold AND capacity_available");
