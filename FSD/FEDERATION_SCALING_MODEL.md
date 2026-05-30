@@ -223,6 +223,29 @@ configured.
 | `full_internet_global_heavy` | 5×10⁹ | 30/55/15 | 250 | 1K | 50 MB | 60% | 743 GB / 109 KB/s / 73 s/d | ✓ 22 d |
 | `village_dense` | 10³ | 40/40/20 | 50 | 200 | 30 MB | 30% | 721 GB / 8 KB/s / 27 s/d | ✓ ~1.1 yr |
 
+**Multimedia / video-replacement scenarios** (added per
+[FSD/MEDIA_SHARING.md §2.6-2.7](MEDIA_SHARING.md) inline/external
+split + real-world traffic anchors from
+Sandvine/DataReportal/Ericsson Mobility Report):
+
+| Scenario | N | Tier (c/p/s) | R | env | D/user | fetch/u | ext_frac | Storage / BW / CPU |
+|---|---|---|---|---|---|---|---|---|
+| `tiktok_replacement` | 5×10⁹ | 40/55/5 | 250 | 15 MB | 0.5 MB | 95 MB | 0.0 (all inline) | 788 GB / 3 KB/s / 0.5 s/d |
+| `youtube_replacement` | 5×10⁹ | 40/55/5 | 200 | 30 MB | 0.5 MB | 1 GB | 0.75 (mix) | 788 GB / 7 KB/s / 0.5 s/d |
+| `netflix_replacement` | 5×10⁹ | 40/55/5 | 100 | 5 KB | 1 KB | 1.5 GB | 1.0 (all external) | 133 GB / 13 KB/s / 1 s/d |
+| **`full_internet_with_video`** | **5×10⁹** | **35/55/10** | **250** | **50 KB** | **11 MB** | **1.7 GB** | **0.88** | **743 GB / 55 KB/s / 40 s/d** |
+
+The `full_internet_with_video` numbers (11 MB/user/day produced,
+1.7 GB/user/day consumed — combined TikTok + YouTube + Netflix +
+text + photos + everything) **all fit per-server at v1**.
+Netflix-class streaming is *the easiest scenario* — at 13% of disk
+because external_fetch_fraction=1.0 means the substrate routes
+metadata and the bytes ride the publisher's CDN (Netflix's own Open
+Connect / studio S3 / community film co-op MinIO). The substrate's
+"no datacenters required" claim holds for streaming because
+*publishers' existing storage IS the substrate's storage tier for
+that content* — we compose with what already exists.
+
 ### 5.1 What the numbers say
 
 **Compute and bandwidth never gate.** Even at 5 B users with depth 1

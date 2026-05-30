@@ -206,6 +206,15 @@ struct Scenario {
     /// `print_cache_sensitivity()` runs the v1 target scenario at
     /// all three to surface the trade-off.
     cache_hit_rate: f64,
+    /// **Fraction of daily_fetch_bytes that's external_ref pointers**
+    /// to off-substrate object stores (S3-class) — per FSD/MEDIA_
+    /// SHARING.md §2.6-2.7. External fetches contribute to bandwidth
+    /// but NOT to bytes_held in the substrate (the publisher's own
+    /// S3 is the effective storage). For TikTok-class short-form
+    /// video (≤ 16 MiB), this is 0 (all inline). For Netflix-class
+    /// streaming, this is ~1.0 (all external). Default 0 for
+    /// existing scenarios.
+    external_fetch_fraction: f64,
     /// Agent decisions per user per day.
     agent_decisions_per_day: f64,
     /// Fraction of agent traces that pass trust+scope to cross
@@ -325,11 +334,17 @@ fn per_actor(tier: Tier, s: &Scenario) -> ActorCosts {
             let admitted_trust_held = (daily_admitted * effective_days).min(trust_budget);
 
             let cache_hit_rate = (s.cache_hit_rate - 0.1).max(0.1);
-            let cache_inbound = s.daily_fetch_bytes * (1.0 - cache_hit_rate);
+            // Inline fetch contributes to bandwidth AND cache; external
+            // fetch contributes to bandwidth ONLY (bytes ride the
+            // publisher's S3, not the substrate) per FSD/MEDIA_SHARING
+            // §2.7. inbound is total bandwidth (full daily_fetch);
+            // cache_inbound is only the inline share that grows held bytes.
+            let inline_fetch = s.daily_fetch_bytes * (1.0 - s.external_fetch_fraction);
+            let cache_inbound = inline_fetch * (1.0 - cache_hit_rate);
             let cache_held = cache_inbound.min(cache_budget);
 
             let verify = (daily_admitted + cache_inbound) / s.avg_envelope_bytes;
-            let inbound = daily_admitted + cache_inbound;
+            let inbound = daily_admitted + s.daily_fetch_bytes * (1.0 - cache_hit_rate);
 
             // Same outbound fanout shape as server — proxy is a
             // federation participant.
@@ -378,12 +393,19 @@ fn per_actor(tier: Tier, s: &Scenario) -> ActorCosts {
 
             // Cache holds the hot-fetch tail; effective_days for cache
             // is the same since both ride the same eviction sweeper.
-            // Hit rate per scenario — see `Scenario::cache_hit_rate`.
+            // Inline fetch grows the cache; external fetch is bandwidth-
+            // only (publisher's S3 holds the bytes) per FSD/MEDIA_SHARING
+            // §2.7. Hit rate per scenario — see `Scenario::cache_hit_rate`.
             let cache_hit_rate = s.cache_hit_rate;
-            let cache_inbound = s.daily_fetch_bytes * (1.0 - cache_hit_rate);
+            let inline_fetch = s.daily_fetch_bytes * (1.0 - s.external_fetch_fraction);
+            let cache_inbound = inline_fetch * (1.0 - cache_hit_rate);
             let cache_held = cache_inbound.min(cache_budget);
+            // Bandwidth includes BOTH inline and external fetch.
+            let total_fetch_bw = s.daily_fetch_bytes * (1.0 - cache_hit_rate);
 
-            // Total verify load: admitted-trust + cache misses + own traces.
+            // Total verify load: admitted-trust + inline cache misses
+            // + own traces. External fetches don't verify in our substrate
+            // (publisher's S3 handles its own auth).
             let verify_envs = (daily_admitted_plus_traces + cache_inbound) / s.avg_envelope_bytes;
             // Scrub: replicated agent traces (scrubbed at admission).
             let scrub_bytes = traces_in_per_day;
@@ -392,7 +414,7 @@ fn per_actor(tier: Tier, s: &Scenario) -> ActorCosts {
             let narrow = s.cohort.community + s.cohort.affiliations;
             let fanout = 1.0 + narrow * 4.0 + wide * 64.0;
 
-            let inbound_total = daily_admitted_plus_traces + cache_inbound;
+            let inbound_total = daily_admitted_plus_traces + total_fetch_bw;
             let traces_total = replicated_traces_held;
             // Bundle traces into the trust slice for storage column.
             (
@@ -502,6 +524,7 @@ fn scenarios() -> Vec<Scenario> {
             cohort,
             daily_fetch_bytes: 5.0 * MB,
             cache_hit_rate: 0.5,
+            external_fetch_fraction: 0.0,
             agent_decisions_per_day: 20.0,
             trace_publishable_fraction: 0.15,
         },
@@ -519,6 +542,7 @@ fn scenarios() -> Vec<Scenario> {
             cohort,
             daily_fetch_bytes: 50.0 * MB,
             cache_hit_rate: 0.6,
+            external_fetch_fraction: 0.0,
             agent_decisions_per_day: 50.0,
             trace_publishable_fraction: 0.15,
         },
@@ -536,6 +560,7 @@ fn scenarios() -> Vec<Scenario> {
             cohort,
             daily_fetch_bytes: 200.0 * MB,
             cache_hit_rate: 0.65,
+            external_fetch_fraction: 0.0,
             agent_decisions_per_day: 100.0,
             trace_publishable_fraction: 0.15,
         },
@@ -553,6 +578,7 @@ fn scenarios() -> Vec<Scenario> {
             cohort,
             daily_fetch_bytes: 20.0 * MB,
             cache_hit_rate: 0.7,
+            external_fetch_fraction: 0.0,
             agent_decisions_per_day: 30.0,
             trace_publishable_fraction: 0.10,
         },
@@ -570,6 +596,7 @@ fn scenarios() -> Vec<Scenario> {
             cohort,
             daily_fetch_bytes: 100.0 * MB,
             cache_hit_rate: 0.65,
+            external_fetch_fraction: 0.0,
             agent_decisions_per_day: 50.0,
             trace_publishable_fraction: 0.15,
         },
@@ -587,6 +614,7 @@ fn scenarios() -> Vec<Scenario> {
             cohort,
             daily_fetch_bytes: 1.0 * GB,
             cache_hit_rate: 0.6,
+            external_fetch_fraction: 0.0,
             agent_decisions_per_day: 200.0,
             trace_publishable_fraction: 0.10,
         },
@@ -604,6 +632,7 @@ fn scenarios() -> Vec<Scenario> {
             cohort: CohortDist::local_heavy(),
             daily_fetch_bytes: 1.0 * GB,
             cache_hit_rate: 0.75,
+            external_fetch_fraction: 0.0,
             agent_decisions_per_day: 200.0,
             trace_publishable_fraction: 0.05,
         },
@@ -621,6 +650,7 @@ fn scenarios() -> Vec<Scenario> {
             cohort: CohortDist::global_heavy(),
             daily_fetch_bytes: 1.0 * GB,
             cache_hit_rate: 0.45,
+            external_fetch_fraction: 0.0,
             agent_decisions_per_day: 200.0,
             trace_publishable_fraction: 0.20,
         },
@@ -638,7 +668,108 @@ fn scenarios() -> Vec<Scenario> {
             cohort: CohortDist::local_heavy(),
             daily_fetch_bytes: 200.0 * MB,
             cache_hit_rate: 0.85,
+            external_fetch_fraction: 0.0,
             agent_decisions_per_day: 100.0,
+            trace_publishable_fraction: 0.10,
+        },
+        // ─── Multimedia / TikTok-YouTube-Netflix replacement scenarios ───
+        //
+        // Real-world traffic anchors (Cisco/Sandvine/DataReportal/Ericsson):
+        // • TikTok: ~95 min/day average per user × ~1 MB/min compressed
+        //   shorts = ~95 MB/user/day consumed. ~3% post daily, avg 15 MB
+        //   upload (60 sec, 1080p H.264) → ~0.5 MB/user/day produced.
+        // • YouTube: 1B+ hours watched/day globally / 2.5B MAU = ~24 min/day
+        //   consumed. Mix of inline shorts (~20 MB) and external long-form
+        //   (100 MB - 2 GB). 0.1% upload daily.
+        // • Netflix-class streaming: ~2 hours/day at HD = ~1.5 GB/day per
+        //   active viewer. 0% UGC. Pure external_ref (publisher's CDN /
+        //   Open Connect-equivalent).
+        //
+        // FSD/MEDIA_SHARING.md §2.6-2.7: inline content (≤ 16 MiB) rides
+        // federation natively; external content rides BlobBody::External
+        // pointing to publisher's S3-class store; replication is demand-
+        // driven (every successful fetch creates a new holder).
+
+        // TikTok replacement — all inline short-form video.
+        // 5B users, 95 MB/day consumed, ~0.5 MB/day produced (avg).
+        Scenario {
+            name: "tiktok_replacement",
+            n_users: 5_000_000_000.0,
+            tier_mix: TierMix { client: 0.40, proxy: 0.55, server: 0.05 },
+            trust_radius: 250.0,
+            trust_depth_avg: 1.0,
+            daily_bytes: 500.0 * KB, // averaged producer rate: 3% × 15 MB
+            avg_envelope_bytes: 15.0 * MB, // short-form video envelope
+            disk_budget_client: 256.0 * GB,
+            disk_budget_proxy: 256.0 * GB,
+            disk_budget_server: 1.0 * TB,
+            cohort: CohortDist::default_model(), // social-graph driven
+            daily_fetch_bytes: 95.0 * MB,
+            cache_hit_rate: 0.70, // viral short-form clusters hard
+            external_fetch_fraction: 0.0, // ALL inline; ≤ 16 MiB per clip
+            agent_decisions_per_day: 50.0,
+            trace_publishable_fraction: 0.05,
+        },
+        // YouTube replacement — mix of inline shorts + external long-form.
+        // 5B users, ~30 min watch/day across mix, ~0.5 MB/day produced.
+        Scenario {
+            name: "youtube_replacement",
+            n_users: 5_000_000_000.0,
+            tier_mix: TierMix { client: 0.40, proxy: 0.55, server: 0.05 },
+            trust_radius: 200.0,
+            trust_depth_avg: 1.0,
+            daily_bytes: 500.0 * KB, // averaged producer rate
+            avg_envelope_bytes: 30.0 * MB, // mixed: shorts inline, long-form metadata
+            disk_budget_client: 256.0 * GB,
+            disk_budget_proxy: 256.0 * GB,
+            disk_budget_server: 1.0 * TB,
+            cohort: CohortDist::default_model(),
+            daily_fetch_bytes: 1000.0 * MB, // 30 min consumed × ~30 MB/min avg
+            cache_hit_rate: 0.55,
+            external_fetch_fraction: 0.75, // 75% long-form (external_ref); 25% shorts (inline)
+            agent_decisions_per_day: 50.0,
+            trace_publishable_fraction: 0.05,
+        },
+        // Netflix/Hulu/streaming replacement — pure external_ref pointers.
+        // 5B users (assume universal), ~2 hours/day HD streaming = 1.5 GB/d.
+        // Publisher (studio) holds the bytes; federation routes metadata.
+        Scenario {
+            name: "netflix_replacement",
+            n_users: 5_000_000_000.0,
+            tier_mix: TierMix { client: 0.40, proxy: 0.55, server: 0.05 },
+            trust_radius: 100.0, // narrower trust set for studio publishers
+            trust_depth_avg: 1.0,
+            daily_bytes: 1.0 * KB, // negligible UGC
+            avg_envelope_bytes: 5.0 * KB, // metadata-only envelope
+            disk_budget_client: 256.0 * GB,
+            disk_budget_proxy: 256.0 * GB,
+            disk_budget_server: 1.0 * TB,
+            cohort: CohortDist::default_model(),
+            daily_fetch_bytes: 1500.0 * MB, // 2 hours HD × 750 MB/hour
+            cache_hit_rate: 0.30, // long-form less popularity-clustered than shorts
+            external_fetch_fraction: 1.0, // ALL external; substrate routes metadata only
+            agent_decisions_per_day: 30.0,
+            trace_publishable_fraction: 0.05,
+        },
+        // Full internet with video — combined: text + shorts + long-form +
+        // streaming + everything. The realistic "we replaced everything"
+        // scenario. Per-user daily ~1.7 GB consumed, ~11 MB produced.
+        Scenario {
+            name: "full_internet_with_video",
+            n_users: 5_000_000_000.0,
+            tier_mix: TierMix { client: 0.35, proxy: 0.55, server: 0.10 },
+            trust_radius: 250.0,
+            trust_depth_avg: 1.0,
+            daily_bytes: 11.0 * MB, // combined produced rate
+            avg_envelope_bytes: 50.0 * KB, // weighted-avg across content types
+            disk_budget_client: 256.0 * GB,
+            disk_budget_proxy: 256.0 * GB,
+            disk_budget_server: 1.0 * TB,
+            cohort: CohortDist::default_model(),
+            daily_fetch_bytes: 1700.0 * MB, // 95 MB tiktok + 100 MB youtube inline + 1.5 GB netflix external + 5 MB misc
+            cache_hit_rate: 0.55,
+            external_fetch_fraction: 0.88, // 1500 MB external out of 1700 MB total fetch
+            agent_decisions_per_day: 200.0,
             trace_publishable_fraction: 0.10,
         },
     ]
