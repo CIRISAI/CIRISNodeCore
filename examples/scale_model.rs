@@ -751,6 +751,42 @@ fn scenarios() -> Vec<Scenario> {
             agent_decisions_per_day: 30.0,
             trace_publishable_fraction: 0.05,
         },
+        // AdultHUB-class verified-adult publisher.
+        // Real-world anchors: PornHub ~100M subscribers, ~1M verified
+        // creators (post Dec-2020 verified-uploader purge); OnlyFans
+        // ~2M creators, ~210M registered users (~50M active).
+        //
+        // Substrate profile: publisher runs canonical S3-class storage
+        // for the full video catalog (their existing business model);
+        // subscribers admit content via delegates_to:publisher:adulthub
+        // (the trusted-publisher trust-graph path per FSD/MEDIA_SHARING
+        // §1.2); content carries content_rating:mpaa:NC-17 attestations
+        // + content_class:adult; substrate refuses to amplify into
+        // community/global feeds (per §1.1 discipline). Federation
+        // carries metadata + ACL + per-creator-eviction surface;
+        // bytes ride external_ref pointers.
+        //
+        // 100M subscribers = a SUBSET of the federation, not all 5B
+        // users — those who explicitly opted in by emitting
+        // delegates_to:publisher attestation with age_assurance.
+        Scenario {
+            name: "adulthub_replacement",
+            n_users: 100_000_000.0,
+            tier_mix: TierMix { client: 0.45, proxy: 0.50, server: 0.05 },
+            trust_radius: 50.0, // subscribers' curated creator subset
+            trust_depth_avg: 1.0,
+            daily_bytes: 100.0 * KB, // averaged subscriber upload (most don't post)
+            avg_envelope_bytes: 50.0 * KB, // metadata-heavy envelopes (ExternalRefs)
+            disk_budget_client: 256.0 * GB,
+            disk_budget_proxy: 256.0 * GB,
+            disk_budget_server: 1.0 * TB,
+            cohort: CohortDist::default_model(),
+            daily_fetch_bytes: 1000.0 * MB, // ~30 min/day adult-video consumption
+            cache_hit_rate: 0.40, // long-tail content; less popularity clustering
+            external_fetch_fraction: 0.95, // almost all video external; thumbs inline
+            agent_decisions_per_day: 30.0,
+            trace_publishable_fraction: 0.05,
+        },
         // Full internet with video — combined: text + shorts + long-form +
         // streaming + everything. The realistic "we replaced everything"
         // scenario. Per-user daily ~1.7 GB consumed, ~11 MB produced.

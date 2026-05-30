@@ -100,6 +100,107 @@ moderation alone.
   maximizes time-on-platform — the YouTube/TikTok pathology being
   replaced
 
+### 1.2.1 The trusted-publisher path — adult content, in detail
+
+The cohort-scope matrix in §1.1 carries "trusted-publisher path" as
+the route by which content the federation refuses to amplify at
+community/global scope nonetheless reaches subscribers who've opted
+in. This is the same mechanism Netflix-class streaming uses (§4 of
+[the scaling model](FEDERATION_SCALING_MODEL.md), `netflix_replacement`
+scenario), and **the same mechanism a CEWP-native adult content
+publisher (call it `AdultHUB`, or any deployment of OnlyFans / PornHub
+shape) uses**. The substrate doesn't need a separate mechanism for
+adult content; the publisher-trust path is the canonical way any
+content provider with a subscriber model operates on CEWP.
+
+**The mechanics, end-to-end:**
+
+1. **The publisher operates an L1 (or hyperscale-equivalent) server**
+   carrying their content catalog. Their content envelopes carry:
+   * `author_id` = the publisher's federation key (verified-business
+     identity; via `delegates_to:business_verifier:adulthub_inc` and
+     equivalent for OnlyFans, PornHub, Netflix, a community film
+     festival, etc.)
+   * `content_rating` attestations per the established schemes
+     (`content_rating:mpaa:NC-17`, `content_rating:bbfc:R18`, etc.)
+   * `content_class:adult` (or `content_class:film` for cinema, etc.)
+   * For UGC-class publishers (OnlyFans, PornHub): per-creator
+     identity attestations via `delegates_to:creator:{creator_key_id}`
+     where each creator went through Ondato/Persona-class
+     identity-verification, mirroring the
+     [OnlyFans Ondato pattern](https://ondato.com/case-studies/onlyfans-case-study/)
+     and [PornHub's December 2020 verified-uploader purge](https://www.eff.org/deeplinks/2020/12/visa-and-mastercard-are-trying-dictate-what-you-can-watch-pornhub)
+   * For large videos: `BlobBody::External(ExternalRef)` pointing to
+     the publisher's own S3-class store; federation carries metadata
+     + ACL only (§2.6)
+
+2. **The subscriber opts in** by emitting `delegates_to:publisher:
+   adulthub` from their federation key, where the attestation
+   declares:
+   * `age_assurance:provider:{verifier_key}:adult` is present on
+     subscriber's key (operator-required for adult publisher trust;
+     §4 of this FSD; UK OSA / French SREN compliance)
+   * Subscriber consents to the publisher's content classification
+     (the `cw_class:adult` warning is wire-format-mandatory; §3.4)
+
+3. **The substrate routes content** via the standard trust × capacity
+   intake gate. Publisher's content reaches subscribers whose trust
+   graphs admit it; never propagates into community / global feeds
+   because the cohort-scope-content-discipline (§1.1) refuses
+   non-CW community content above PG-13. Subscribers' substrates
+   admit it because the *trust path* qualifies, not because the
+   *cohort scope* would otherwise admit it. This is the same
+   bilateral mechanism Signal uses for sealed-sender messaging —
+   content delivery is permissioned by the recipient's intake gate,
+   not by federation-wide propagation.
+
+4. **Per-creator eviction is native**: if a specific creator violates
+   terms (NCII, copyright, takedown_notice from third party), the
+   substrate evicts via `evict_actor(creator_key)` (CIRISPersist
+   v3.5.0 #125). The §9 identity-aware-storage thesis is what makes
+   this trivial — the publisher's substrate knows whose bytes it's
+   holding; can drop one creator's entire content set as a single
+   operation; doesn't have to discover-then-purge.
+
+5. **Children never see it.** Children's federation keys lack the
+   `age_assurance:provider:adult` attestation, so they cannot
+   emit a `delegates_to:publisher:adulthub` (operator-config refuses
+   to admit the delegation), so the publisher's content never
+   reaches their substrate, so the substrate-level "I am not a
+   child" gate is enforced by the trust-graph admission mechanism
+   itself. No separate content-filtering layer required.
+
+**What this means structurally:** the substrate is not a CSAM-
+distribution platform because (a) `self`/`family`-scope content is
+never federation-discoverable (§1.1 self/family row — the Signal
+position), and (b) federation-discoverable content at community/
+global scope is gated by content_rating + content_class + trust path,
+none of which CSAM can pass. **Adult content with proper publisher
+identity + per-creator verification + age-gated subscribers + content
+rating + content class IS distributable on the substrate — without
+any of the moderation pathologies BitChute / DTube / LBRY hit by
+positioning as "free speech" amplification engines**.
+
+The publisher operates inside the substrate's discipline. The
+substrate's discipline is what makes the publisher's compliance
+posture legible to consumers (subscribers know what they're getting
+because the cryptographic provenance + attestation graph proves it).
+This is OnlyFans-class identity-aware-publishing operationalized in
+CEG-native terms.
+
+**Operator-config knobs for adult publishers:**
+
+* Required `age_assurance` level (self / provider / government)
+* Required `delegates_to:business_verifier` chain (compliance
+  certifications: 2257 records, KYC creator verification, etc.)
+* Geographic restrictions (per-jurisdiction admission rules; e.g.,
+  refuse subscribers whose `key_id` claims a jurisdiction where
+  the content is illegal)
+* Per-content-class CW requirements (members must explicitly opt
+  into specific CW classes; granular consent)
+* Takedown response SLA (DSA Art. 16 timeliness; substrate-mandatory
+  for NCII / CSAM-hash-match / TVEC bases)
+
 ### 1.3 The "cinema is art" exception (and why it doesn't generalize to porn)
 
 R/X-rated cinema circulates at federation scope because it carries
@@ -634,7 +735,193 @@ defensible line: at the federation handoff, hash-match is
 substrate-protective; at the user's device, scanning is
 surveillance.
 
-## 6. The user-controlled algorithm — operationalized
+## 6. Content encryption + key distribution
+
+The substrate is intentionally agnostic about content encryption — it
+provides **identity** (federation keys) + **atomic delivery**
+(`put_blob_signing` + Contributions). Content-level encryption is an
+application-layer pattern that rides on top of the substrate's
+identity surface, parameterized by *who's authorized to read*.
+
+### 6.1 Three encryption postures, by content class
+
+| Content class | Encryption model | Substrate surface used |
+|---|---|---|
+| **Public** (encyclopedia, news, generally-published, PG-13 community/global) | **None at content level.** Bytes are hash-addressed cleartext. Substrate encrypts at rest via persist's AES-GCM (5.45 GiB/s; protects against disk theft). Access control = discovery + admission, not decryption. | put_blob_signing + holds_bytes; persist's at-rest encryption |
+| **Restricted-group** (CW community, family chat, members-only research) | **Group DEK + per-member-wrapped DEK**. Content body encrypted with random DEK; DEK wrapped under each member's federation pubkey. DEK rotates on membership change. | put_blob_signing for ciphertext + `key_grant` Contributions (§6.2) for wrapped DEKs |
+| **Subscription / publisher-routed** (AdultHUB, OnlyFans, Netflix, paid community) | **Per-content DEK + per-subscriber-wrapped DEK**. Publisher generates DEK per content; wraps for each subscriber's pubkey when they're authorized; revocation = stop wrapping for revoked subscribers. | Same as restricted-group; usually with `BlobBody::External` for the ciphertext + key_grants for the DEKs |
+| **Person-to-person** (direct messages, self-scope addressed delivery) | **Ephemeral X25519 + AES-GCM** (Signal-class E2E). Single recipient, no DEK distribution needed beyond the sealed-envelope wrap. | Edge's `inline_text_pipeline` (Classify + Scrub + AES-GCM) extended for content carriage |
+
+### 6.2 The `key_grant` subject_kind (additive — 1+4 stays locked)
+
+A new Contribution subject_kind, additive to SCHEMA §3.1 (same shape
+as `takedown_notice` added in §5.1). **No new structural attestation
+primitive** — `key_grant` is a payload variant, not a 6th member of
+the 1+4 wire-format lockdown.
+
+**Payload schema:**
+
+```
+{
+  "subject_kind": "key_grant",
+  "recipient_key_id": "<grantee federation pubkey b64>",
+  "content_sha256": "<sha256 of the ciphertext blob>",
+  "wrapped_dek": "<base64 — see §6.3>",
+  "wrap_algorithm": "x25519-aes256-gcm-hkdf-sha256",
+  "ratchet_version": 1,
+  "key_validity_window": {
+    "not_before": "<RFC 3339 datetime>",
+    "not_after":  "<RFC 3339 datetime or null>"
+  },
+  "scope": "single_content" | "group_member" | "subscription_tier",
+  "scope_id": "<group_id or subscription_id, optional>",
+  "rotation_chain": ["<prior key_grant content_sha?>"]
+}
+```
+
+The Contribution envelope itself is signed by the grantor (publisher
+/ group admin / sender) with their federation key. The substrate
+admits the grant via the standard trust × capacity gate; the recipient
+fetches it via `ContentFetch` (or it's pushed via `Contribution{Submit}`
+addressed to recipient); the recipient's application unwraps the DEK
+locally and decrypts the referenced content.
+
+### 6.3 The wrap algorithm — `x25519-aes256-gcm-hkdf-sha256`
+
+The wrap is hybrid (ephemeral DH key agreement + AEAD encryption of
+the DEK). Identical pattern to NaCl `crypto_box_seal` / libsodium
+sealed boxes / [HPKE RFC 9180](https://datatracker.ietf.org/doc/html/rfc9180)
+base mode.
+
+```
+For each (recipient_pubkey, DEK):
+  ephemeral_priv = random 32 bytes (curve25519 scalar)
+  ephemeral_pub  = X25519_basepoint × ephemeral_priv
+  shared        = X25519(ephemeral_priv, recipient_pubkey)
+  kek           = HKDF-SHA256(shared, salt = ephemeral_pub || recipient_pubkey, info = "cewp-key-grant/v1")
+  nonce         = random 12 bytes
+  ciphertext    = AES-256-GCM(kek, nonce, DEK)
+  wrapped_dek   = ephemeral_pub || nonce || ciphertext
+```
+
+**Why this primitive set:**
+
+* X25519 is in [CIRISVerify](https://github.com/CIRISAI/CIRISVerify)
+  already (the Curve25519 ECDH that Reticulum uses at the transport
+  layer); reuses one primitive across substrate + content layers
+* AES-256-GCM is in CIRISVerify's `ring`-backed crypto crate at
+  5.45 GiB/s; wrapping cost is dominated by the X25519 op (~50 µs)
+* HKDF-SHA256 is shipped (548 ns per derivation)
+* No pairing-based or lattice primitives required at the wrap layer;
+  the structural attack surface is exactly the same as Signal sealed
+  sender / HPKE base mode (well-studied, deployed at scale)
+* **Substrate signature stays hybrid PQC (Ed25519 + ML-DSA-65)** —
+  the wrap is for the DEK; the Contribution carrying the wrap is
+  signed by the grantor's full hybrid key; long-term provenance is
+  PQC-secure
+
+**A note on PQC wrap:** v1 uses X25519 for the wrap because adding
+ML-KEM (FIPS 203) at the content-encryption layer is substantial new
+substrate work and the ciphertext-stealing horizon (the time after
+which past wraps could be retroactively decrypted by future quantum
+attackers) is much further out than the signature-forging horizon
+(which is why the substrate already signs hybrid). Wrap algorithm
+identifier in `wrap_algorithm` is versioned (`v1` = X25519; future
+`v2` could be hybrid X25519 + ML-KEM or pure ML-KEM); the
+substrate's existing primitive-rotation discipline (CEG §0.x → 0.(x+1)
+wire-breaks enumerated) handles future migration.
+
+### 6.4 Group key rotation for CW communities
+
+CW community uses a **shared symmetric group DEK** rotated on
+membership change. The rotation pattern:
+
+```
+T=0   Community admin generates DEK_0; emits key_grants to all
+      initial members under DEK_0. Past content (none) uses DEK_0.
+T=k   New member M joins. Admin emits a key_grant to M for the
+      CURRENT DEK_0 (admitting them to existing content) and
+      simultaneously generates DEK_1, emits key_grants to ALL
+      members (including M) under DEK_1. All NEW content from T=k+ε
+      onward uses DEK_1.
+T=l   Member X leaves / is removed. Admin generates DEK_2, emits
+      key_grants to remaining members under DEK_2. New content uses
+      DEK_2. X retains DEK_0 and DEK_1 for content they were
+      authorized for; cannot decrypt DEK_2 content.
+```
+
+**Forward-secrecy posture:** X (the leaver) can still decrypt
+content they had legitimate access to under DEK_0 / DEK_1. This is
+the same posture as Signal group messaging (departed members keep
+past message keys). For **full forward secrecy** (X cannot decrypt
+ANY past content after leaving), [MLS (RFC 9420)](https://datatracker.ietf.org/doc/html/rfc9420)
+tree-based ratcheting is the application-layer composition —
+implementable on top of the `key_grant` primitive but not required
+at the substrate level. Operators can choose: simple rotation
+(this FSD's v1) or MLS (a community-attestation extension layer).
+
+### 6.5 Per-subscriber wrap for publisher routes (AdultHUB / OnlyFans / Netflix)
+
+Subscription-routed content uses **per-content DEK with per-
+subscriber wrap**:
+
+```
+For each content C:
+  Publisher generates DEK_C; encrypts content with DEK_C; stores
+  ciphertext at BlobBody::External (publisher's S3) OR BlobBody::Inline
+  if ≤ 16 MiB.
+  Publisher emits the content Contribution with content_sha256 = SHA(ciphertext).
+
+For each active subscriber S (at content publish time):
+  Publisher emits a key_grant Contribution to S under DEK_C with
+  scope = "subscription_tier", scope_id = "<their subscription tier>".
+
+For each NEW subscriber S' (joining after content publish):
+  Publisher's substrate processes their delegates_to:publisher attestation;
+  enumerates content they're now authorized for (per their tier);
+  emits key_grants for accessible back-catalog content.
+
+For revoked subscriber R:
+  Publisher's substrate stops emitting NEW key_grants for R.
+  R retains key_grants already emitted (can decrypt content authorized
+  during their active subscription window — same as Netflix
+  downloaded-while-active titles remaining playable; deliberate UX
+  posture for revocation).
+```
+
+**At AdultHUB scale (100M subscribers, 1K new videos/day, ~1 KB per
+key_grant):** ~100B key_grants/day federation-aggregate = ~100 GB/day
+federation-aggregate. Spread across the publisher's L1 server fleet,
+this is bounded by the scaling-model toy's existing federation
+bandwidth budget. (`adulthub_replacement` scenario in
+[FEDERATION_SCALING_MODEL.md §5](FEDERATION_SCALING_MODEL.md) shows
+the publisher-side load fits per-server.)
+
+### 6.6 Revocation, per-actor eviction, and the substrate's identity-aware-storage thesis
+
+The §9 identity-aware-storage property of CEWP
+([scaling model §9](FEDERATION_SCALING_MODEL.md))
+makes per-actor revocation of key_grants trivial — the substrate
+knows which key_grants were issued to which grantee key. Persist
+v3.5.0's `evict_actor(key_id)` (CIRISPersist#125) handles the
+case of mass-revocation (e.g., a subscriber's key is compromised
+and the publisher needs to invalidate all outstanding grants to
+that key in one operation).
+
+This is the cryptographic enforcement complement to the trust-graph
+admission gate. Together:
+* Trust gate refuses new admission of content from / to revoked
+  parties
+* `evict_actor` retires existing key_grants to revoked parties
+* `withdraws`-against-`holds_bytes` propagates the content-side
+  eviction
+* `ReconsiderationRequest` reverses if the revocation was wrong
+
+The substrate provides the complete revocation surface — at the
+discoverability layer, the admission layer, the eviction layer, and
+the reconsideration layer — using primitives that already exist.
+
+## 7. The user-controlled algorithm — operationalized
 
 The user's "for you" surface is computed locally from these
 already-shipped + this-FSD-extended primitives:
@@ -661,7 +948,7 @@ This is the "composable moderation" pattern Bluesky / Ozone
 pioneered ([Bluesky's Moderation Architecture](https://docs.bsky.app/blog/blueskys-moderation-architecture)),
 generalized to the full algorithm rather than just labeling.
 
-## 7. AI-generated content disclosure
+## 8. AI-generated content disclosure
 
 [EU AI Act Article 50](https://artificialintelligenceact.eu/article/50/)
 requires AI-generated media to be marked as such. This is a
@@ -679,7 +966,7 @@ or equivalent metadata indicates AI generation but no
 substrate-level enforcement of the EU AI Act disclosure
 requirement.
 
-## 8. International standards mapping (full coverage)
+## 9. International standards mapping (full coverage)
 
 | Regulation | What it requires | CEG-native mechanism |
 |---|---|---|
@@ -700,9 +987,9 @@ requirement.
 The substrate doesn't replace any regulation. It provides the
 wire-format substrate the regulatory regime can plug into.
 
-## 9. What this requires across the stack
+## 10. What this requires across the stack
 
-### 9.1 NodeCore (this repo)
+### 10.1 NodeCore (this repo)
 
 * Five new `external_content` sub_kind ingest paths
   (`ingest_image`, `ingest_audio`, `ingest_video`, `ingest_film`,
@@ -719,7 +1006,7 @@ wire-format substrate the regulatory regime can plug into.
 * SCHEMA.md new section for `takedown_notice` + `age_assurance:*`
   attestation classes
 
-### 9.2 Persist
+### 10.2 Persist
 
 * Substrate-level perceptual-hash check at `put_blob_signing` for
   CSAM-class content (operator-config which hash databases to
@@ -728,20 +1015,20 @@ wire-format substrate the regulatory regime can plug into.
 * `withdraws`-against-`holds_bytes` propagation already exists
   (CEG §10.1.2); just wired up at the takedown_notice handler
 
-### 9.3 Edge
+### 10.3 Edge
 
 * MessageType for takedown_notice dispatch + counter-notice
 * No new transport work — rides existing Contribution MessageType
   family
 
-### 9.4 LensCore
+### 10.4 LensCore
 
 * AI-generation detection model (helps enforce `authenticity:
   ai_generated` even when content lacks self-disclosure)
 * Detection events for content-class-misclassification (porn
   claiming to be "art")
 
-### 9.5 Registry
+### 10.5 Registry
 
 * CEG §X.Y addition codifying the multimedia sub_kinds + content
   classification + takedown_notice + age_assurance attestation
@@ -749,7 +1036,7 @@ wire-format substrate the regulatory regime can plug into.
 * 1+4 wire-format lockdown survives — this is all dimension
   additions + new subject_kinds, NOT new structural primitives
 
-### 9.6 Agent runtime
+### 10.6 Agent runtime
 
 * Default user-algorithm presets (PG-13 family / standard adult /
   news-only / academic-only / horror-CW / art-cinema-CW)
@@ -760,9 +1047,9 @@ wire-format substrate the regulatory regime can plug into.
   appear as discoverable publishers; user opts in via
   `delegates_to:publisher:*` attestation)
 
-## 10. What CEWP takes from prior art (and rejects)
+## 11. What CEWP takes from prior art (and rejects)
 
-### 10.1 Validates / adopts
+### 11.1 Validates / adopts
 
 * [Bluesky / Ozone composable moderation](https://docs.bsky.app/blog/blueskys-moderation-architecture) — labels-as-signed-artifacts pattern → CEWP's takedown_notice + withdraws structure
 * [Nostr NIP-11 relay policy declaration](https://nips.nostr.com/11) — declare substrate discipline at protocol level → CEWP's per-cohort content discipline
@@ -773,7 +1060,7 @@ wire-format substrate the regulatory regime can plug into.
 * [French SREN double-anonymity](https://www.twobirds.com/en/insights/2024/france/la-loi-sren-et-la-protection-des-mineurs) → provider attests against federation key, not real identity
 * [DMCA §512(g) counter-notice](https://www.copyright.gov/512/) → maps to existing CEG `ReconsiderationRequest`
 
-### 10.2 Rejects / avoids
+### 11.2 Rejects / avoids
 
 * [Vidme ad-funded death](https://variety.com/2017/digital/news/vidme-shuts-down-video-app-1202628367/) → no ad-funded UGC substrate model; mission-locked AGPL
 * [DTube / Steem / LBRY token rewards → farming + SEC risk](https://knightcolumbia.org/blog/mapping-social-media-crypto-logic-platforms-and-the-cautionary-tale-of-steemit) → no monetization primitives at substrate layer
@@ -782,7 +1069,7 @@ wire-format substrate the regulatory regime can plug into.
 * [Apple NeuralHash failure](https://arxiv.org/abs/2111.06628) — adversarial collisions on client-side scanning → hash-match at federation event, not user device
 * TikTok/YouTube engagement-optimization → no centralized recommender; user controls the algorithm
 
-## 11. Open questions
+## 12. Open questions
 
 * **Live-streaming wire format details** — `live_stream` sub_kind sketched but implementation deferred to Phase 2.
 * **C2PA integration for image/video provenance** — should `authenticity:provenance_chain` attestations carry [C2PA](https://c2pa.org/) manifests, or define a CEG-native provenance-chain dimension that interoperates with C2PA on import?
@@ -790,7 +1077,7 @@ wire-format substrate the regulatory regime can plug into.
 * **CW community vs trusted-publisher tradeoff** — both paths can route adult content; do they coexist (yes per this FSD) or should one be the canonical pattern? Current answer: both coexist; CW communities for community-of-interest; publishers for one-to-many.
 * **Operator coordination for fast-path takedowns** (TVEC 1-hour, GIFCT CIP) — needs Registry-side cross-operator notification protocol; sketched in this FSD but specification belongs in CEG governance §11.
 
-## 12. References
+## 13. References
 
 ### Internal
 
