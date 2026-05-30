@@ -1128,7 +1128,7 @@ publisher-specific fields:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `sub_kind` | enum | yes | `encyclopedia_article` \| `news_article` \| `accord_data` \| `local_data` \| `chat_message` \| `blog_post` \| `image` \| `audio` \| `video` \| `film` \| `model_3d` (open; future kinds via §4.9.2 amendment). Multimedia sub_kinds spec'd in [`FSD/MEDIA_SHARING.md`](FSD/MEDIA_SHARING.md) §2. |
+| `sub_kind` | enum | yes | `encyclopedia_article` \| `news_article` \| `accord_data` \| `local_data` \| `chat_message` \| `blog_post` \| `image` \| `audio` \| `video` \| `film` \| `model_3d` \| `event_listing` (open; future kinds via §4.9.2 amendment). Multimedia sub_kinds spec'd in [`FSD/MEDIA_SHARING.md`](FSD/MEDIA_SHARING.md) §2; `event_listing` spec'd at NodeCore#25 Gap 1 (composes from existing primitives end-to-end). |
 | `cohort_scope` | enum | yes | One of `self` / `family` / `community` / `affiliations` / `species` / `planet` / `federation` (mirrors FSD-002 §1.7 envelope axis; carried in payload for v0.1 until persist's ContributionEnvelope exposes the envelope-level field). Drives the three-tier UI sectioning: `self` → Local; `family`/`community`/`affiliations` → Community commons; `species`/`planet`/`federation` → Global commons. Promotion = re-attest at wider scope citing same `content_sha256` (no body re-upload). |
 | `entity_key_id` | string | yes | Stable federation key_id for the article entity. Pattern: `{kind_prefix}:article:{slug}` (encyclopedia) or `news:article:{publisher}:{date}:{slug}` (news). Cited by all subsequent quality / accuracy / link attestations. |
 | `language` | ISO 639-1 | yes | The article's natural language. |
@@ -1164,6 +1164,47 @@ community route (MEDIA_SHARING §3.4) or trusted-publisher route
 - `video` — moving image content shorter-form (vlog / short clip / livestream archive). Required `source`: `format` (mp4 / webm / mkv), `duration_seconds`, `width_px`, `height_px`, `framerate_fps`, optional `subtitles_sha256[]` (per language; substrate prefers subtitled video at `community+`). Required `content_class`. AI-generated video MUST carry `authenticity:ai_generated`. Default cohort_scope: `community` for vlogs; `self` for private recordings.
 - `film` — cinematic / art-bearing video distinguished from `video` by the `art_class` attribute on `content_class`. Carries the same source-shape as `video` plus required `cinematic_attestation`: `director_key_id`, `producer_key_id` (optional), `country_of_origin`, `original_language`, `release_year`. Films at X / NC-17 / R retain federation scope on the **cinema-is-art** exception per MEDIA_SHARING §1.3; the substrate routes them through the same trust-graph but doesn't apply the porn-content-class gate. `content_class` MUST be one of `Film` / `ShortFilm` / `Documentary` / `ArtPiece` / `Theatre` / `Performance` / `Animation` / `Experimental` for this sub_kind. Default cohort_scope: `federation`.
 - `model_3d` — three-dimensional content (CAD / scan / VR/AR asset / sculpture digitization / 3D-printable model). Required `source`: `format` (glb / gltf / obj / stl / usdz / fbx / blend), `polygon_count`, optional `bounding_box_meters` (real-world scale for printables / AR), `texture_count`, `rigged` (bool — has skeleton). Required `content_class`. AI-generated 3D content MUST carry `authenticity:ai_generated`. Default cohort_scope: `community` for hobbyist designs; `affiliations` for org-internal CAD; `self` for private scans.
+
+#### `event_listing` (state-bearing — Eventbrite / Meetup / Lu.ma / calendar / ticketing)
+
+Per NodeCore#25 Gap 1. Calendar / event / RSVP / ticketing content. The
+event listing is the announcement; **all state transitions ride
+existing structural primitives**:
+
+- RSVPs → `scores` from attendee key_ids on `entity_key_id`
+- Cancellation → `withdraws` against the event Contribution
+- Reschedule → `supersedes` with `differs_in: ["start_time", "venue"]`
+- Ticket transfer → `delegates_to` (parallel to `key_grant`'s `rotation_chain`)
+- Lifecycle state — `event:lifecycle:{state}` scores attestation (`open` / `cancelled` / `completed` / `superseded`); initial admission implicitly `open`
+
+The 1+4 wire-format lockdown holds. No new structural primitives
+required.
+
+Source-shape requirements:
+
+- `platform` ∈ `eventbrite` / `meetup` / `luma` / `partiful` / `gcal` / `outlook` / `ics` / `custom`
+- `event_id` — platform-specific identifier
+- `title` — human-readable event title
+- `starts_at` — RFC 3339 canonical UTC
+- `ends_at` — optional (open-ended events allowed)
+- `venue` — `Physical {name, address, geo?}` / `Virtual {url}` / `Hybrid {physical_name, physical_address, geo?, virtual_url}`
+- `capacity` — optional integer; `None` = unlimited / unstated
+- `ticket_grant_policy` — `open` / `approval_required` / `invitation_only` / `paid`
+- `organizer_key_id` — optional federation key_id of the organizer
+
+Event-listing dimension families (NodeCore-owned namespace slice):
+
+- `event:lifecycle:{state}` — state transitions emitted independently of the listing Contribution
+- `event:rsvp_count` — published RSVP tally (scalar)
+- `event:attendance` — post-event attestation by organizer key_id
+
+Default `cohort_scope`: `community` for local meetups; `affiliations`
+for organization-internal; `federation` for public conferences;
+`family` for household / personal events; `self` for private
+calendar entries.
+
+CEG codification follow-up tracked at CIRISRegistry#40 (CEG 0.4
+codification — downstream-demand-pulls-CEG pattern).
 
 **Inline vs external for multimedia bodies.** MEDIA_SHARING §2.6
 specifies: bodies ≤ 16 MiB are `BlobBody::Inline` (substrate holds

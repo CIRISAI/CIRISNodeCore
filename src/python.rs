@@ -718,6 +718,21 @@ fn build_model_3d_payload(source_json: String) -> PyResult<String> {
     build_multimedia_result(payload, sha256)
 }
 
+/// Build the canonical payload + content_sha256 for an
+/// `event_listing` external_content Contribution. Per NodeCore#25
+/// Gap 1 — Eventbrite / Meetup / Lu.ma / calendar / RSVP / ticketing.
+/// Composes from existing primitives; no new substrate work needed.
+///
+/// `source_json` deserializes to `crate::ingest::EventListingSource`.
+#[pyfunction]
+fn build_event_listing_payload(source_json: String) -> PyResult<String> {
+    let source: crate::ingest::EventListingSource =
+        serde_json::from_str(&source_json).map_err(|e| json_err("source_json", e))?;
+    let (payload, sha256) = crate::ingest::build_event_listing_payload(&source)
+        .map_err(|e| ingest_err("build_event_listing_payload", e))?;
+    build_multimedia_result(payload, sha256)
+}
+
 /// Build the payload JSON for a `moderation_event` Contribution —
 /// the **universal reporting envelope** per `FSD/MEDIA_SHARING.md`
 /// §11.2 + SCHEMA §4.11.
@@ -940,6 +955,7 @@ fn ciris_node_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_video_payload, m)?)?;
     m.add_function(wrap_pyfunction!(build_film_payload, m)?)?;
     m.add_function(wrap_pyfunction!(build_model_3d_payload, m)?)?;
+    m.add_function(wrap_pyfunction!(build_event_listing_payload, m)?)?;
     m.add_function(wrap_pyfunction!(build_moderation_event_payload, m)?)?;
     m.add_function(wrap_pyfunction!(build_moderator_delegation_payload, m)?)?;
     m.add_function(wrap_pyfunction!(build_moderator_revocation_payload, m)?)?;

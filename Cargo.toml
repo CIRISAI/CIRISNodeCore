@@ -38,7 +38,7 @@ crate-type = ["cdylib", "rlib"]
 # DEPLOYMENT NOTE: persist's ciris-keyring `tpm` feature unification
 # still forces system `libtss2` (`libtss2-dev` for builds) onto every
 # co-resident Linux build / host. See CIRISEdge#12.
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v3.6.3", version = "3", features = ["cirisnode", "cirisaudit", "postgres", "sqlite"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v3.6.4", version = "3", features = ["cirisnode", "cirisaudit", "postgres", "sqlite"] }
 
 # Edge v0.13.1 — cohabitation triple anchor. Consumed surface:
 #  - `Edge` runtime + `MessageType` registry (federation-consensus

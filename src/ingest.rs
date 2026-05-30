@@ -869,6 +869,123 @@ pub struct BlogPostSource {
 }
 
 // ───────────────────────────────────────────────────────────────────────
+// State-bearing sub_kind — event_listing
+//
+// Per NodeCore#25 Gap 1. Eventbrite / Meetup / Lu.ma / calendar /
+// RSVPs / ticketing. Composes from existing structural primitives
+// end-to-end:
+//   - The event listing itself rides external_content:event_listing
+//     with body bytes (the event description) in federation_blobs.
+//   - RSVPs are `scores` from attendee key_ids on the event's
+//     entity_key_id.
+//   - Cancellation is `withdraws` against the event Contribution.
+//   - Reschedule is `supersedes` with `differs_in: [start_time, venue]`.
+//   - Ticket transfer is `delegates_to` (parallel to key_grant's
+//     rotation_chain pattern).
+//
+// The lifecycle state — open / cancelled / completed / superseded —
+// is emitted as `event:lifecycle:{state}` scores attestations on the
+// event's entity_key_id. The initial event_listing Contribution does
+// not carry lifecycle (implicitly `open` at admission). Subsequent
+// state transitions are independent Contributions. 1+4 holds.
+// ───────────────────────────────────────────────────────────────────────
+
+/// Venue shape for an event listing. Physical / virtual / hybrid
+/// covers the three real-world cases.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(missing_docs)]
+pub enum EventVenue {
+    Physical {
+        name: String,
+        address: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        geo: Option<(f64, f64)>,
+    },
+    Virtual {
+        url: String,
+    },
+    Hybrid {
+        physical_name: String,
+        physical_address: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        geo: Option<(f64, f64)>,
+        virtual_url: String,
+    },
+}
+
+/// Ticket-grant policy declaring how attendance is admitted.
+/// Composes with the `delegates_to` ticket transfer pattern at
+/// runtime — the policy is on the listing; the per-grant
+/// Contribution carries the actual grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(missing_docs)]
+pub enum TicketGrantPolicy {
+    Open,
+    ApprovalRequired,
+    InvitationOnly,
+    Paid,
+}
+
+/// Event-listing source. Calendar / event / RSVP / ticketing
+/// content. Per NodeCore#25 Gap 1.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct EventListingSource {
+    /// Stable key_id. Pattern: `event:{platform}:{event_id}` — e.g.
+    /// `event:eventbrite:1234567890` or `event:custom:my-meetup-2026-q2`.
+    pub entity_key_id: String,
+    /// ISO 639-1 language code for the event description.
+    pub language: String,
+    /// The event description body bytes (the prose / markdown the
+    /// organizer publishes).
+    pub body_bytes: Vec<u8>,
+    /// RFC 6838 media type. Typical: `text/markdown`, `text/html`,
+    /// `text/plain`.
+    pub body_media_type: String,
+    /// Event platform tag (`eventbrite`, `meetup`, `luma`, `partiful`,
+    /// `gcal`, `outlook`, `ics`, `custom`).
+    pub platform: String,
+    /// Platform-specific event identifier.
+    pub event_id: String,
+    /// Human-readable event title.
+    pub title: String,
+    /// When the event starts (RFC 3339 canonical UTC).
+    pub starts_at: DateTime<Utc>,
+    /// When the event ends. Optional — some events are open-ended or
+    /// fluid (vigils, exhibits).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ends_at: Option<DateTime<Utc>>,
+    /// Where the event happens. Physical / virtual / hybrid.
+    pub venue: EventVenue,
+    /// Maximum attendance. `None` = unlimited / unstated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<u64>,
+    /// How attendance gets admitted (open / approval / invitation / paid).
+    pub ticket_grant_policy: TicketGrantPolicy,
+    /// Cohort scope at which this listing is being asserted.
+    pub cohort_scope: String,
+    /// Organizer's federation key_id (if known).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organizer_key_id: Option<String>,
+    /// Topical relations — e.g. `topical_relation:see_also` to the
+    /// venue / organization / prior occurrence, or `replaces` for a
+    /// reschedule (which also rides `supersedes` structurally).
+    #[serde(default)]
+    pub topical_relations: Vec<TopicalRelation>,
+    /// External citations — e.g. links to the original event page, a
+    /// venue map, a sponsorship doc.
+    #[serde(default)]
+    pub citations: Vec<Citation>,
+    /// Optional staleness contract. Events typically set this to
+    /// `ends_at + grace_window` so the listing decays naturally after
+    /// the event concludes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_until: Option<DateTime<Utc>>,
+}
+
+// ───────────────────────────────────────────────────────────────────────
 // Multimedia sub_kinds (FSD/MEDIA_SHARING.md §2.1-2.5)
 //
 // Five additions extending external_content with image / audio / video /
@@ -1692,6 +1809,87 @@ pub fn build_blog_payload(
     Ok((payload, sha256))
 }
 
+/// Build the canonical `payload` JSON for an event listing per
+/// NodeCore#25 Gap 1. Pure builder — no I/O.
+pub fn build_event_listing_payload(
+    source: &EventListingSource,
+) -> Result<(serde_json::Value, [u8; 32]), IngestError> {
+    if source.entity_key_id.is_empty() {
+        return Err(IngestError::EmptyKeyId);
+    }
+    if source.language.is_empty() {
+        return Err(IngestError::EmptyLanguage);
+    }
+    if source.body_bytes.is_empty() {
+        return Err(IngestError::EmptyBody);
+    }
+    if source.platform.is_empty() {
+        return Err(IngestError::EmptyPlatform);
+    }
+    if source.event_id.is_empty() {
+        return Err(IngestError::EmptyEventId);
+    }
+    if source.title.trim().is_empty() {
+        return Err(IngestError::EmptyEventTitle);
+    }
+    if !is_promotable_scope(&source.cohort_scope) {
+        return Err(IngestError::UnknownPromotionScope(source.cohort_scope.clone()));
+    }
+    if let Some(end) = source.ends_at {
+        if end < source.starts_at {
+            return Err(IngestError::InvalidEventTimeRange);
+        }
+    }
+    let sha256 = compute_sha256(&source.body_bytes);
+
+    let mut source_block = serde_json::json!({
+        "kind": "event",
+        "platform": source.platform,
+        "event_id": source.event_id,
+        "title": source.title,
+        "starts_at": source.starts_at,
+        "venue": source.venue,
+        "ticket_grant_policy": source.ticket_grant_policy,
+    });
+    if let Some(end) = source.ends_at {
+        source_block["ends_at"] = serde_json::json!(end);
+    }
+    if let Some(cap) = source.capacity {
+        source_block["capacity"] = serde_json::json!(cap);
+    }
+    if let Some(ref org) = source.organizer_key_id {
+        source_block["organizer_key_id"] = serde_json::Value::String(org.clone());
+    }
+
+    let mut payload = serde_json::json!({
+        "sub_kind": "event_listing",
+        "entity_key_id": source.entity_key_id,
+        "language": source.language,
+        "cohort_scope": source.cohort_scope,
+        "content_sha256": hex_encode(&sha256),
+        "content_media_type": source.body_media_type,
+        "content_size_bytes": source.body_bytes.len(),
+        "source": source_block,
+        "topical_relations": source.topical_relations.iter().map(|tr| {
+            serde_json::json!({
+                "target_key_id": tr.target_key_id,
+                "relation": tr.relation.as_str(),
+            })
+        }).collect::<Vec<_>>(),
+        "citations": source.citations.iter().map(|c| {
+            serde_json::json!({
+                "kind": c.kind.as_str(),
+                "ref": c.ref_string,
+            })
+        }).collect::<Vec<_>>(),
+    });
+    if let Some(vu) = source.valid_until {
+        payload["valid_until"] = serde_json::json!(vu);
+    }
+
+    Ok((payload, sha256))
+}
+
 /// Build the canonical `payload` JSON for a scope-promotion of an
 /// existing `external_content` Contribution.
 ///
@@ -1836,6 +2034,15 @@ pub enum IngestError {
     /// Blog requires a non-empty post_title.
     #[error("post_title must be non-empty for blog_post")]
     EmptyPostTitle,
+    /// Event listing requires a non-empty event_id.
+    #[error("event_id must be non-empty for event_listing")]
+    EmptyEventId,
+    /// Event listing requires a non-empty title.
+    #[error("title must be non-empty for event_listing")]
+    EmptyEventTitle,
+    /// Event listing requires `ends_at` >= `starts_at` when ends_at is set.
+    #[error("ends_at must be >= starts_at for event_listing")]
+    InvalidEventTimeRange,
     /// Image / video require non-empty alt text or captions for
     /// `cohort_scope ≥ community` (accessibility, per FSD/MEDIA_SHARING
     /// §2.1 + §2.3).
@@ -2203,6 +2410,32 @@ where
     N: NodeCoreService,
 {
     let (payload, content_sha) = build_blog_payload(&source)?;
+    finalize_external_content_ingest(
+        payload,
+        content_sha,
+        source.body_bytes,
+        source.body_media_type,
+        cell,
+        ctx,
+    )
+    .await
+}
+
+/// Ingest an event listing (SCHEMA §4.29 `sub_kind: event_listing`)
+/// per NodeCore#25 Gap 1. Same I/O discipline. State transitions
+/// (cancellation / reschedule / completion) ride independent
+/// Contributions per the four structural primitives + the
+/// `event:lifecycle:{state}` dimension family.
+pub async fn ingest_event_listing<B, N>(
+    source: EventListingSource,
+    cell: Cell,
+    ctx: &IngestContext<'_, B, N>,
+) -> Result<IngestOutcome, IngestError>
+where
+    B: BlobStorage + Sync,
+    N: NodeCoreService,
+{
+    let (payload, content_sha) = build_event_listing_payload(&source)?;
     finalize_external_content_ingest(
         payload,
         content_sha,
@@ -2883,6 +3116,180 @@ mod tests {
         };
         let (payload, _) = build_chat_payload(&comment_src).unwrap();
         assert_eq!(payload["topical_relations"][0]["relation"], "comments_on");
+    }
+
+    #[test]
+    fn event_listing_minimal_shape_round_trips() {
+        let src = EventListingSource {
+            entity_key_id: "event:meetup:rust-nyc-2026-q3".into(),
+            language: "en".into(),
+            body_bytes: "Quarterly Rust meetup. Talks + pizza.".as_bytes().to_vec(),
+            body_media_type: "text/markdown".into(),
+            platform: "meetup".into(),
+            event_id: "meetup-12345".into(),
+            title: "Rust NYC Q3 Meetup".into(),
+            starts_at: parse_dt("2026-09-15T18:00:00Z"),
+            ends_at: Some(parse_dt("2026-09-15T21:00:00Z")),
+            venue: EventVenue::Physical {
+                name: "Brooklyn Hangar".into(),
+                address: "123 Wythe Ave, Brooklyn NY".into(),
+                geo: Some((40.7211, -73.9577)),
+            },
+            capacity: Some(80),
+            ticket_grant_policy: TicketGrantPolicy::Open,
+            cohort_scope: "community".into(),
+            organizer_key_id: Some("organizer-rust-nyc-key".into()),
+            topical_relations: vec![],
+            citations: vec![],
+            valid_until: None,
+        };
+        let (payload, _) = build_event_listing_payload(&src).unwrap();
+        assert_eq!(payload["sub_kind"], "event_listing");
+        assert_eq!(payload["entity_key_id"], "event:meetup:rust-nyc-2026-q3");
+        assert_eq!(payload["source"]["platform"], "meetup");
+        assert_eq!(payload["source"]["event_id"], "meetup-12345");
+        assert_eq!(payload["source"]["title"], "Rust NYC Q3 Meetup");
+        assert_eq!(payload["source"]["venue"]["kind"], "physical");
+        assert_eq!(payload["source"]["venue"]["name"], "Brooklyn Hangar");
+        assert_eq!(payload["source"]["capacity"], 80);
+        assert_eq!(payload["source"]["ticket_grant_policy"], "open");
+        assert_eq!(payload["source"]["organizer_key_id"], "organizer-rust-nyc-key");
+    }
+
+    #[test]
+    fn event_listing_virtual_venue_serializes() {
+        let src = EventListingSource {
+            entity_key_id: "event:luma:online-talk-2026".into(),
+            language: "en".into(),
+            body_bytes: "Virtual talk on coherence dynamics.".as_bytes().to_vec(),
+            body_media_type: "text/plain".into(),
+            platform: "luma".into(),
+            event_id: "luma-evt-67890".into(),
+            title: "Coherence Dynamics — Virtual Talk".into(),
+            starts_at: parse_dt("2026-06-01T19:00:00Z"),
+            ends_at: Some(parse_dt("2026-06-01T20:00:00Z")),
+            venue: EventVenue::Virtual {
+                url: "https://lu.ma/abc-zoom".into(),
+            },
+            capacity: None,
+            ticket_grant_policy: TicketGrantPolicy::ApprovalRequired,
+            cohort_scope: "federation".into(),
+            organizer_key_id: None,
+            topical_relations: vec![],
+            citations: vec![],
+            valid_until: None,
+        };
+        let (payload, _) = build_event_listing_payload(&src).unwrap();
+        assert_eq!(payload["source"]["venue"]["kind"], "virtual");
+        assert_eq!(payload["source"]["venue"]["url"], "https://lu.ma/abc-zoom");
+        assert_eq!(payload["source"]["ticket_grant_policy"], "approval_required");
+        assert!(payload["source"]["capacity"].is_null());
+    }
+
+    #[test]
+    fn event_listing_hybrid_venue_serializes() {
+        let src = EventListingSource {
+            entity_key_id: "event:custom:conf-2026".into(),
+            language: "en".into(),
+            body_bytes: "Hybrid annual conference.".as_bytes().to_vec(),
+            body_media_type: "text/markdown".into(),
+            platform: "custom".into(),
+            event_id: "conf-2026-main".into(),
+            title: "CIRIS 2026 Annual Conference".into(),
+            starts_at: parse_dt("2026-10-15T09:00:00Z"),
+            ends_at: Some(parse_dt("2026-10-15T18:00:00Z")),
+            venue: EventVenue::Hybrid {
+                physical_name: "MIT Stata Center".into(),
+                physical_address: "32 Vassar St, Cambridge MA".into(),
+                geo: Some((42.3618, -71.0911)),
+                virtual_url: "https://stream.ciris.ai/conf-2026".into(),
+            },
+            capacity: Some(500),
+            ticket_grant_policy: TicketGrantPolicy::Paid,
+            cohort_scope: "federation".into(),
+            organizer_key_id: None,
+            topical_relations: vec![],
+            citations: vec![],
+            valid_until: None,
+        };
+        let (payload, _) = build_event_listing_payload(&src).unwrap();
+        assert_eq!(payload["source"]["venue"]["kind"], "hybrid");
+        assert_eq!(payload["source"]["venue"]["physical_name"], "MIT Stata Center");
+        assert_eq!(
+            payload["source"]["venue"]["virtual_url"],
+            "https://stream.ciris.ai/conf-2026"
+        );
+        assert_eq!(payload["source"]["ticket_grant_policy"], "paid");
+    }
+
+    #[test]
+    fn event_listing_rejects_empty_required_fields() {
+        fn ok_src() -> EventListingSource {
+            EventListingSource {
+                entity_key_id: "event:meetup:rust-nyc".into(),
+                language: "en".into(),
+                body_bytes: "Desc".as_bytes().to_vec(),
+                body_media_type: "text/plain".into(),
+                platform: "meetup".into(),
+                event_id: "12345".into(),
+                title: "Meetup".into(),
+                starts_at: parse_dt("2026-09-15T18:00:00Z"),
+                ends_at: None,
+                venue: EventVenue::Virtual { url: "https://example".into() },
+                capacity: None,
+                ticket_grant_policy: TicketGrantPolicy::Open,
+                cohort_scope: "community".into(),
+                organizer_key_id: None,
+                topical_relations: vec![],
+                citations: vec![],
+                valid_until: None,
+            }
+        }
+        let mut empty_event_id = ok_src();
+        empty_event_id.event_id = "".into();
+        assert!(matches!(
+            build_event_listing_payload(&empty_event_id),
+            Err(IngestError::EmptyEventId)
+        ));
+        let mut empty_title = ok_src();
+        empty_title.title = "   ".into();
+        assert!(matches!(
+            build_event_listing_payload(&empty_title),
+            Err(IngestError::EmptyEventTitle)
+        ));
+        let mut empty_platform = ok_src();
+        empty_platform.platform = "".into();
+        assert!(matches!(
+            build_event_listing_payload(&empty_platform),
+            Err(IngestError::EmptyPlatform)
+        ));
+    }
+
+    #[test]
+    fn event_listing_rejects_inverted_time_range() {
+        let src = EventListingSource {
+            entity_key_id: "event:meetup:broken".into(),
+            language: "en".into(),
+            body_bytes: "Desc".as_bytes().to_vec(),
+            body_media_type: "text/plain".into(),
+            platform: "meetup".into(),
+            event_id: "12345".into(),
+            title: "Inverted".into(),
+            starts_at: parse_dt("2026-09-15T18:00:00Z"),
+            ends_at: Some(parse_dt("2026-09-15T17:00:00Z")), // before starts_at
+            venue: EventVenue::Virtual { url: "https://x".into() },
+            capacity: None,
+            ticket_grant_policy: TicketGrantPolicy::Open,
+            cohort_scope: "community".into(),
+            organizer_key_id: None,
+            topical_relations: vec![],
+            citations: vec![],
+            valid_until: None,
+        };
+        assert!(matches!(
+            build_event_listing_payload(&src),
+            Err(IngestError::InvalidEventTimeRange)
+        ));
     }
 
     #[test]
