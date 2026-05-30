@@ -675,28 +675,73 @@ and maps to the international standards landscape:
 | `avmsd_age_inappropriate` | [EU AVMSD](https://digital-strategy.ec.europa.eu/en/policies/audiovisual-and-media-services) | Age-gate enforcement |
 | `court_order` | Jurisdiction-specific court order | Per-jurisdiction handling |
 
-### 5.3 The propagation mechanism
+### 5.3 Substrate-protective vs third-party-claim discipline (NodeCore#24)
 
-1. Claimant signs `takedown_notice` Contribution. Federation
-   admits it via standard trust × capacity gate.
-2. Recipients (substrate operators holding the content) evaluate
-   per their operator policy:
-   * For substrate-mandatory bases (CSAM / TVEC-terrorist /
-     GIFCT-CIP): immediate eviction; emit
-     `withdraws:holds_bytes:sha256:{prefix}` attestation against
-     the content; no counter-notice path
-   * For copyright/DSA bases: expeditious removal pending
-     counter-notice window; emit conditional `withdraws` with
-     scheduled restoration if uncontested
-3. The `withdraws` propagation rides the existing CEG §10.1.2
+Two structurally distinct emit paths. Per the answer to
+[NodeCore#24](https://github.com/CIRISAI/CIRISNodeCore/issues/24)
+(which unblocks CIRISPersist#134's takedown_handler):
+
+**Owner-side enforcement (bypasses the standard trust × capacity
+admission gate):**
+
+* The operator's own substrate emitting a takedown against content
+  in its OWN holds. The operator can always evict their own
+  holdings — this is just a `withdraws` against their own
+  `holds_bytes` and doesn't depend on third-party trust
+* Operator-configured trusted clearinghouses (NCMEC, GIFCT-CIP,
+  regional equivalents: IWF, Project Arachnid, INHOPE national
+  hotlines). These are pre-trusted via operator config, NOT via
+  runtime trust-graph admission. Their takedowns are treated as
+  substrate-trusted by configuration assertion
+* Substrate-emitted auto-detection at `put_blob_signing` (perceptual
+  hash match per §5.6). The substrate signs these with its own
+  operator key; the takedown enters as an owner-side artifact
+
+**Third-party claims (full trust × capacity gate applies):**
+
+* DMCA §512 claimant notices
+* DSA Article 16 third-party reports
+* Community standards reports
+* Any claim where `claimant_key_id` is an arbitrary federation key
+
+**Why this split:** substrate operators have legal liability for
+content held under their own keys (NCMEC reporting obligation; TVEC
+1-hour deadline; OSA illegal-content duty). The operator's
+authority to police their own holdings doesn't depend on whether
+the federation's trust graph says someone with sufficient trust
+score "told them to." A fresh edge with no trusted-clearinghouse
+keys still has the operator's own key — they can hash-match against
+their own configured databases and emit owner-side takedowns
+immediately. The trust gate remains the chokepoint for
+*third-party claims to ACT on someone else's substrate*.
+
+### 5.4 The propagation mechanism
+
+1. **Owner-side enforcement** (§5.3 first category): operator's
+   substrate emits the `takedown_notice` + the `withdraws` against
+   own `holds_bytes` in one transaction. No federation admission
+   gate; this is policing own holdings.
+2. **Third-party claim** (§5.3 second category): claimant signs
+   `takedown_notice` Contribution. Federation admits it via standard
+   trust × capacity gate; recipients (substrate operators holding
+   the content) evaluate per their operator policy.
+3. Recipients (in both cases above) apply per-LegalBasis discipline:
+   * For substrate-mandatory bases (NcmecCsam, PerceptualHashCsam,
+     TvecTerrorist, GifctCip): immediate eviction; emit
+     `withdraws:holds_bytes:sha256:{prefix}` against the content;
+     no counter-notice path
+   * For copyright/DSA/OSA/AVMSD/community bases: expeditious removal
+     pending the configurable hold window (§5.5); emit conditional
+     `withdraws` with scheduled restoration if uncontested
+4. The `withdraws` propagation rides the existing CEG §10.1.2
    ContentMiss feedback loop. Other operators receive the
    `withdraws` against the prior `holds_bytes`, drop their copies,
    emit their own `withdraws` if they had advertised holding.
-4. Federation-wide eviction is structural: per-actor `evict_actor`
+5. Federation-wide eviction is structural: per-actor `evict_actor`
    (persist v3.5.0) enforces the bulk-eviction case (slashed
    actor's entire content set).
 
-### 5.4 Counter-notice / reconsideration
+### 5.5 Counter-notice / reconsideration + hold-window schedule
 
 The existing CEG `ReconsiderationRequest` structural primitive (1+4
 lockdown member) handles counter-notices. The party whose content
@@ -705,10 +750,34 @@ takedown_notice; if WA-quorum adjudicates in their favor, a
 `ReconsiderationAttestation` reverses the takedown and restores
 the content's `holds_bytes` advertisements.
 
+Per-LegalBasis hold window (configurable; defaults shipped):
+
+| LegalBasis | Default hold | Counter-notice path | Discipline source |
+|---|---|---|---|
+| `NcmecCsam` / `PerceptualHashCsam` | Immediate (no hold) | None (mandatory reporting) | NCMEC CyberTipline |
+| `TvecTerrorist` / `GifctCip` | Immediate (no hold) | None (1-hour regulatory deadline) | TVEC + Christchurch Call |
+| `Dmca512` | 14 calendar days | `ReconsiderationRequest` (§512(g)) | DMCA §512 safe harbor |
+| `DsaArticle16` | 7 calendar days | `ReconsiderationRequest` (Art. 20) | DSA |
+| `OsaIllegalContent` | 14 calendar days | `ReconsiderationRequest` | UK OSA Ofcom guidance |
+| `AvmsdAgeInappropriate` | 7 calendar days | `ReconsiderationRequest` | EU AVMSD |
+| `CommunityStandards` | Per-cohort policy (default immediate) | `ReconsiderationRequest` | Per-cohort discipline |
+| `CourtOrder` | Immediate (default) | Jurisdiction-specific appeal | Per-jurisdiction |
+
+**Business-day mapping note:** DMCA §512(g) specifies "10-14 *business*
+days" between counter-notice and restoration. The substrate ships
+"14 *calendar* days" as the default DMCA hold to provide safe-harbor
+coverage in all jurisdictions without requiring per-jurisdiction
+business-calendar tracking (an operator concern, not a substrate
+concern). Operators with strict business-day requirements MAY lower
+their hold window to 10 calendar days; with strict counter-notice
+windows MAY raise to 21 calendar days. The substrate enforces the
+operator's configured value uniformly; operators choose strictness
+appropriate to their jurisdiction.
+
 This is structurally identical to the DMCA §512(g) restoration
 protocol but with federation-cryptographic provenance throughout.
 
-### 5.5 Substrate-level hash-matching
+### 5.6 Substrate-level hash-matching
 
 For CSAM specifically, PhotoDNA-class perceptual hash matching
 happens at the federation propagation event (the moment

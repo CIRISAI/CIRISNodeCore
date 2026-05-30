@@ -73,6 +73,13 @@ pub mod scope {
 
 /// Wikipedia-shape article source. Populated by an importer that walks
 /// a Wikipedia XML dump / API response / mirror archive.
+#[allow(missing_docs)]
+#[allow(missing_docs)]
+#[allow(missing_docs)]
+#[allow(missing_docs)]
+#[allow(missing_docs)]
+#[allow(missing_docs)]
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncyclopediaArticleSource {
     /// Stable key_id for the article entity. Pattern:
@@ -861,6 +868,684 @@ pub struct BlogPostSource {
     pub valid_until: Option<DateTime<Utc>>,
 }
 
+// ───────────────────────────────────────────────────────────────────────
+// Multimedia sub_kinds (FSD/MEDIA_SHARING.md §2.1-2.5)
+//
+// Five additions extending external_content with image / audio / video /
+// film / model_3d sub_kinds. Each follows the same Phase 2B pattern as
+// the six text-class sub_kinds: Source struct → pure build_*_payload →
+// async ingest_* function using the shared finalize_external_content_ingest
+// tail. No new substrate primitives.
+// ───────────────────────────────────────────────────────────────────────
+
+/// Multi-scheme content rating attestation declaration.
+/// Per FSD/MEDIA_SHARING.md §3.1. Multiple ratings from different
+/// schemes can coexist on the same content; consumer algorithms pick
+/// which scheme to honor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct ContentRating {
+    /// The rating scheme name: `mpaa`, `bbfc`, `pegi`, `esrb`, `ifco`,
+    /// `csm` (Common Sense Media), or operator-defined.
+    pub scheme: String,
+    /// The rating value within that scheme: e.g. `PG-13`, `R`, `NC-17`
+    /// for MPAA; `12A`, `18`, `R18` for BBFC; etc.
+    pub rating: String,
+}
+
+/// Mechanism-descriptive declaration of *what kind of content this is*.
+/// Per FSD/MEDIA_SHARING.md §3.3. Multi-class content allowed (a
+/// documentary-art-piece carries both).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(missing_docs)]
+pub enum ContentClass {
+    Film,
+    ShortFilm,
+    Documentary,
+    ArtPiece,
+    Theatre,
+    Performance,
+    Animation,
+    Experimental,
+    Educational,
+    Tutorial,
+    Lecture,
+    Talk,
+    News,
+    CurrentEvents,
+    Journalism,
+    Entertainment,
+    Vlog,
+    SocialVideo,
+    Gameplay,
+    Commentary,
+    Adult,
+    Generated,
+    Photograph,
+    Illustration,
+    Screenshot,
+    Meme,
+    Infographic,
+    Music,
+    Podcast,
+    Audiobook,
+    Soundscape,
+    StaticObject,
+    Scene,
+    Character,
+    VolumetricCapture,
+}
+
+impl ContentClass {
+    /// True if the class can carry R/X-rated content at species+
+    /// scope per FSD/MEDIA_SHARING.md §3.3.
+    pub fn art_class(&self) -> bool {
+        matches!(
+            self,
+            Self::Film | Self::ShortFilm | Self::Documentary | Self::ArtPiece
+                | Self::Theatre | Self::Performance | Self::Animation | Self::Experimental
+        )
+    }
+    /// True if the class is news-editorial-framing (current-events
+    /// path for adult-relevance material).
+    pub fn news_class(&self) -> bool {
+        matches!(self, Self::News | Self::CurrentEvents | Self::Journalism)
+    }
+}
+
+/// Image source — photo / illustration / screenshot / meme / infographic.
+/// FSD/MEDIA_SHARING.md §2.1.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct ImageSource {
+    pub entity_key_id: String,
+    pub body_bytes: Vec<u8>,
+    /// MIME type: image/jpeg, image/png, image/webp, image/avif,
+    /// image/svg+xml, image/gif.
+    pub body_media_type: String,
+    pub cohort_scope: String,
+    /// Multi-scheme rating declarations. At least one required for
+    /// federation-scope publication.
+    #[serde(default)]
+    pub content_rating: Vec<ContentRating>,
+    /// Content classification. Required for federation-scope.
+    pub content_class: Option<ContentClass>,
+    /// Pixel dimensions.
+    pub width_px: u32,
+    pub height_px: u32,
+    /// Alt-text. Mandatory for federation scope (accessibility).
+    pub alt_text: String,
+    pub captured_at: Option<DateTime<Utc>>,
+    /// Creator's federation key_id (if known + different from
+    /// federation submitter).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_key_id: Option<String>,
+    /// AI-generation declaration. EU AI Act Article 50 mandatory.
+    #[serde(default)]
+    pub is_ai_generated: bool,
+    /// AI model name (when is_ai_generated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_by: Option<String>,
+    #[serde(default)]
+    pub topical_relations: Vec<TopicalRelation>,
+    #[serde(default)]
+    pub citations: Vec<Citation>,
+}
+
+/// Audio source — music, podcast, lecture, audiobook chapter,
+/// sound sample, generated audio. FSD/MEDIA_SHARING.md §2.2.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct AudioSource {
+    pub entity_key_id: String,
+    pub body_bytes: Vec<u8>,
+    /// MIME type: audio/opus, audio/mpeg, audio/flac, audio/aac,
+    /// audio/ogg.
+    pub body_media_type: String,
+    pub cohort_scope: String,
+    #[serde(default)]
+    pub content_rating: Vec<ContentRating>,
+    pub content_class: Option<ContentClass>,
+    /// Duration in seconds.
+    pub duration_seconds: f64,
+    pub sample_rate_hz: Option<u32>,
+    pub bit_rate_kbps: Option<u32>,
+    /// Transcript text. Required for cohort_scope ≥ community
+    /// (accessibility).
+    pub transcript: String,
+    /// ISO 639-1 language of the audio + transcript.
+    pub language: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_key_id: Option<String>,
+    /// License: cc0 / cc-by / cc-by-sa / cc-by-nc / proprietary /
+    /// public_domain.
+    pub license: String,
+    #[serde(default)]
+    pub is_ai_generated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_by: Option<String>,
+    #[serde(default)]
+    pub topical_relations: Vec<TopicalRelation>,
+    #[serde(default)]
+    pub citations: Vec<Citation>,
+}
+
+/// Video source — general video (vlog, tutorial, social, gameplay,
+/// screen recording, talking head). For cinema/art-bearing video,
+/// use FilmSource. FSD/MEDIA_SHARING.md §2.3.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct VideoSource {
+    pub entity_key_id: String,
+    pub body_bytes: Vec<u8>,
+    /// MIME type: video/mp4, video/webm, video/x-matroska, video/av1.
+    pub body_media_type: String,
+    pub cohort_scope: String,
+    #[serde(default)]
+    pub content_rating: Vec<ContentRating>,
+    pub content_class: Option<ContentClass>,
+    /// Duration in seconds.
+    pub duration_seconds: f64,
+    /// Frame dimensions.
+    pub width_px: u32,
+    pub height_px: u32,
+    pub frame_rate: Option<f64>,
+    /// Captions text + format. Mandatory for cohort_scope ≥ community.
+    pub captions: String,
+    /// ISO 639-1 language(s) of the captions.
+    pub language: String,
+    /// SHA-256 hex of the thumbnail blob (separate Contribution).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_key_id: Option<String>,
+    pub license: String,
+    #[serde(default)]
+    pub is_ai_generated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_by: Option<String>,
+    #[serde(default)]
+    pub topical_relations: Vec<TopicalRelation>,
+    #[serde(default)]
+    pub citations: Vec<Citation>,
+}
+
+/// Film source — cinematic / art-bearing video. Full-length cinema,
+/// short films, documentaries, theatre recordings, performance art.
+/// Distinguished from general `video` by the content_class +
+/// distributor attestation chain that adjudicates the art-bearing
+/// nature. FSD/MEDIA_SHARING.md §2.4.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct FilmSource {
+    pub entity_key_id: String,
+    pub body_bytes: Vec<u8>,
+    pub body_media_type: String,
+    pub cohort_scope: String,
+    #[serde(default)]
+    pub content_rating: Vec<ContentRating>,
+    /// MANDATORY for film sub_kind. Must be art-bearing (art_class()).
+    pub content_class: ContentClass,
+    pub duration_seconds: f64,
+    pub width_px: u32,
+    pub height_px: u32,
+    pub frame_rate: Option<f64>,
+    /// Captions mandatory.
+    pub captions: String,
+    pub language: String,
+    pub languages_available: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail_sha256: Option<String>,
+    /// Distributor federation key (Disney / A24 / Criterion / Studio
+    /// Ghibli / a community film festival / etc.). Drives the
+    /// trust-graph adjudication of the art-claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distributor_key_id: Option<String>,
+    /// External canonical IDs for cross-reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imdb_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmdb_id: Option<String>,
+    pub release_year: Option<u16>,
+    /// Production credits — director, writer, cinematographer, etc.
+    /// JSON object freeform; structure per industry convention.
+    #[serde(default)]
+    pub production_credits: serde_json::Value,
+    pub license: String,
+    #[serde(default)]
+    pub is_ai_generated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_by: Option<String>,
+    #[serde(default)]
+    pub topical_relations: Vec<TopicalRelation>,
+    #[serde(default)]
+    pub citations: Vec<Citation>,
+}
+
+/// 3D content source. Static models, scenes, volumetric video,
+/// scanned environments, character rigs.
+/// FSD/MEDIA_SHARING.md §2.5.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct Model3dSource {
+    pub entity_key_id: String,
+    pub body_bytes: Vec<u8>,
+    /// MIME type: model/gltf+json, model/gltf-binary, model/vnd.usdz+zip,
+    /// model/obj, model/ply, application/x-gaussian-splat (proposed).
+    pub body_media_type: String,
+    pub cohort_scope: String,
+    #[serde(default)]
+    pub content_rating: Vec<ContentRating>,
+    pub content_class: Option<ContentClass>,
+    /// Vertex count (for mesh-based formats).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertex_count: Option<u64>,
+    /// Triangle count (for mesh-based formats).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triangle_count: Option<u64>,
+    /// Includes animations.
+    #[serde(default)]
+    pub has_animations: bool,
+    /// Highest texture resolution (longest side in pixels).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_texture_resolution: Option<u32>,
+    /// Intended renderer class: webgl / webgpu / vr / ar / mobile /
+    /// desktop / cinema.
+    pub intended_renderer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_key_id: Option<String>,
+    pub license: String,
+    #[serde(default)]
+    pub is_ai_generated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_by: Option<String>,
+    #[serde(default)]
+    pub topical_relations: Vec<TopicalRelation>,
+    #[serde(default)]
+    pub citations: Vec<Citation>,
+}
+
+/// Shared validation hook for multimedia sources at federation scope.
+/// Per FSD/MEDIA_SHARING.md §3.3 + §8 (EU AI Act Art. 50).
+fn validate_multimedia_federation_constraints(
+    cohort_scope: &str,
+    content_class: Option<&ContentClass>,
+    is_ai_generated: bool,
+    has_authenticity_declaration: bool,
+) -> Result<(), IngestError> {
+    let is_federation_scope = matches!(
+        cohort_scope,
+        "community" | "affiliations" | "species" | "planet" | "federation"
+    );
+    if is_federation_scope && content_class.is_none() {
+        return Err(IngestError::MissingContentClass);
+    }
+    if is_ai_generated && !has_authenticity_declaration && is_federation_scope {
+        return Err(IngestError::UndisclosedAiGenerated);
+    }
+    Ok(())
+}
+
+/// Serialize ContentRating attestations into a JSON array for
+/// inclusion in payload.
+fn serialize_content_ratings(ratings: &[ContentRating]) -> Vec<serde_json::Value> {
+    ratings
+        .iter()
+        .map(|r| serde_json::json!({ "scheme": r.scheme, "rating": r.rating }))
+        .collect()
+}
+
+/// Build the canonical `payload` JSON for an image Contribution.
+pub fn build_image_payload(
+    source: &ImageSource,
+) -> Result<(serde_json::Value, [u8; 32]), IngestError> {
+    if source.entity_key_id.is_empty() {
+        return Err(IngestError::EmptyKeyId);
+    }
+    if source.body_bytes.is_empty() {
+        return Err(IngestError::EmptyBody);
+    }
+    if !is_promotable_scope(&source.cohort_scope) {
+        return Err(IngestError::UnknownPromotionScope(source.cohort_scope.clone()));
+    }
+    let is_federation_scope = matches!(
+        source.cohort_scope.as_str(),
+        "community" | "affiliations" | "species" | "planet" | "federation"
+    );
+    if is_federation_scope && source.alt_text.trim().is_empty() {
+        return Err(IngestError::MissingAccessibilityText);
+    }
+    validate_multimedia_federation_constraints(
+        &source.cohort_scope,
+        source.content_class.as_ref(),
+        source.is_ai_generated,
+        source.generated_by.is_some(), // self-declares authenticity:ai_generated
+    )?;
+    let sha256 = compute_sha256(&source.body_bytes);
+
+    let mut payload = serde_json::json!({
+        "sub_kind": "image",
+        "entity_key_id": source.entity_key_id,
+        "cohort_scope": source.cohort_scope,
+        "content_sha256": hex_encode(&sha256),
+        "content_media_type": source.body_media_type,
+        "content_size_bytes": source.body_bytes.len(),
+        "width_px": source.width_px,
+        "height_px": source.height_px,
+        "alt_text": source.alt_text,
+        "content_rating": serialize_content_ratings(&source.content_rating),
+        "is_ai_generated": source.is_ai_generated,
+        "topical_relations": source.topical_relations.iter().map(|tr| serde_json::json!({
+            "target_key_id": tr.target_key_id,
+            "relation": tr.relation.as_str(),
+        })).collect::<Vec<_>>(),
+        "citations": source.citations.iter().map(|c| serde_json::json!({
+            "kind": c.kind.as_str(),
+            "ref": c.ref_string,
+        })).collect::<Vec<_>>(),
+    });
+    if let Some(cc) = source.content_class {
+        payload["content_class"] = serde_json::json!(cc);
+    }
+    if let Some(t) = source.captured_at {
+        payload["captured_at"] = serde_json::json!(t);
+    }
+    if let Some(ref ck) = source.creator_key_id {
+        payload["creator_key_id"] = serde_json::Value::String(ck.clone());
+    }
+    if let Some(ref g) = source.generated_by {
+        payload["generated_by"] = serde_json::Value::String(g.clone());
+    }
+    Ok((payload, sha256))
+}
+
+/// Build the canonical `payload` JSON for an audio Contribution.
+pub fn build_audio_payload(
+    source: &AudioSource,
+) -> Result<(serde_json::Value, [u8; 32]), IngestError> {
+    if source.entity_key_id.is_empty() {
+        return Err(IngestError::EmptyKeyId);
+    }
+    if source.language.is_empty() {
+        return Err(IngestError::EmptyLanguage);
+    }
+    if source.body_bytes.is_empty() {
+        return Err(IngestError::EmptyBody);
+    }
+    if !is_promotable_scope(&source.cohort_scope) {
+        return Err(IngestError::UnknownPromotionScope(source.cohort_scope.clone()));
+    }
+    let is_federation_scope = matches!(
+        source.cohort_scope.as_str(),
+        "community" | "affiliations" | "species" | "planet" | "federation"
+    );
+    if is_federation_scope && source.transcript.trim().is_empty() {
+        return Err(IngestError::MissingAccessibilityText);
+    }
+    validate_multimedia_federation_constraints(
+        &source.cohort_scope,
+        source.content_class.as_ref(),
+        source.is_ai_generated,
+        source.generated_by.is_some(),
+    )?;
+    let sha256 = compute_sha256(&source.body_bytes);
+
+    let mut payload = serde_json::json!({
+        "sub_kind": "audio",
+        "entity_key_id": source.entity_key_id,
+        "language": source.language,
+        "cohort_scope": source.cohort_scope,
+        "content_sha256": hex_encode(&sha256),
+        "content_media_type": source.body_media_type,
+        "content_size_bytes": source.body_bytes.len(),
+        "duration_seconds": source.duration_seconds,
+        "transcript": source.transcript,
+        "license": source.license,
+        "content_rating": serialize_content_ratings(&source.content_rating),
+        "is_ai_generated": source.is_ai_generated,
+        "topical_relations": source.topical_relations.iter().map(|tr| serde_json::json!({
+            "target_key_id": tr.target_key_id,
+            "relation": tr.relation.as_str(),
+        })).collect::<Vec<_>>(),
+        "citations": source.citations.iter().map(|c| serde_json::json!({
+            "kind": c.kind.as_str(),
+            "ref": c.ref_string,
+        })).collect::<Vec<_>>(),
+    });
+    if let Some(cc) = source.content_class {
+        payload["content_class"] = serde_json::json!(cc);
+    }
+    if let Some(sr) = source.sample_rate_hz {
+        payload["sample_rate_hz"] = serde_json::json!(sr);
+    }
+    if let Some(br) = source.bit_rate_kbps {
+        payload["bit_rate_kbps"] = serde_json::json!(br);
+    }
+    if let Some(ref ck) = source.creator_key_id {
+        payload["creator_key_id"] = serde_json::Value::String(ck.clone());
+    }
+    if let Some(ref g) = source.generated_by {
+        payload["generated_by"] = serde_json::Value::String(g.clone());
+    }
+    Ok((payload, sha256))
+}
+
+/// Build the canonical `payload` JSON for a video Contribution.
+pub fn build_video_payload(
+    source: &VideoSource,
+) -> Result<(serde_json::Value, [u8; 32]), IngestError> {
+    if source.entity_key_id.is_empty() {
+        return Err(IngestError::EmptyKeyId);
+    }
+    if source.language.is_empty() {
+        return Err(IngestError::EmptyLanguage);
+    }
+    if source.body_bytes.is_empty() {
+        return Err(IngestError::EmptyBody);
+    }
+    if !is_promotable_scope(&source.cohort_scope) {
+        return Err(IngestError::UnknownPromotionScope(source.cohort_scope.clone()));
+    }
+    let is_federation_scope = matches!(
+        source.cohort_scope.as_str(),
+        "community" | "affiliations" | "species" | "planet" | "federation"
+    );
+    if is_federation_scope && source.captions.trim().is_empty() {
+        return Err(IngestError::MissingAccessibilityText);
+    }
+    validate_multimedia_federation_constraints(
+        &source.cohort_scope,
+        source.content_class.as_ref(),
+        source.is_ai_generated,
+        source.generated_by.is_some(),
+    )?;
+    let sha256 = compute_sha256(&source.body_bytes);
+
+    let mut payload = serde_json::json!({
+        "sub_kind": "video",
+        "entity_key_id": source.entity_key_id,
+        "language": source.language,
+        "cohort_scope": source.cohort_scope,
+        "content_sha256": hex_encode(&sha256),
+        "content_media_type": source.body_media_type,
+        "content_size_bytes": source.body_bytes.len(),
+        "duration_seconds": source.duration_seconds,
+        "width_px": source.width_px,
+        "height_px": source.height_px,
+        "captions": source.captions,
+        "license": source.license,
+        "content_rating": serialize_content_ratings(&source.content_rating),
+        "is_ai_generated": source.is_ai_generated,
+        "topical_relations": source.topical_relations.iter().map(|tr| serde_json::json!({
+            "target_key_id": tr.target_key_id,
+            "relation": tr.relation.as_str(),
+        })).collect::<Vec<_>>(),
+        "citations": source.citations.iter().map(|c| serde_json::json!({
+            "kind": c.kind.as_str(),
+            "ref": c.ref_string,
+        })).collect::<Vec<_>>(),
+    });
+    if let Some(cc) = source.content_class {
+        payload["content_class"] = serde_json::json!(cc);
+    }
+    if let Some(fr) = source.frame_rate {
+        payload["frame_rate"] = serde_json::json!(fr);
+    }
+    if let Some(ref t) = source.thumbnail_sha256 {
+        payload["thumbnail_sha256"] = serde_json::Value::String(t.clone());
+    }
+    if let Some(ref ck) = source.creator_key_id {
+        payload["creator_key_id"] = serde_json::Value::String(ck.clone());
+    }
+    if let Some(ref g) = source.generated_by {
+        payload["generated_by"] = serde_json::Value::String(g.clone());
+    }
+    Ok((payload, sha256))
+}
+
+/// Build the canonical `payload` JSON for a film Contribution.
+pub fn build_film_payload(
+    source: &FilmSource,
+) -> Result<(serde_json::Value, [u8; 32]), IngestError> {
+    if source.entity_key_id.is_empty() {
+        return Err(IngestError::EmptyKeyId);
+    }
+    if source.language.is_empty() {
+        return Err(IngestError::EmptyLanguage);
+    }
+    if source.body_bytes.is_empty() {
+        return Err(IngestError::EmptyBody);
+    }
+    if !is_promotable_scope(&source.cohort_scope) {
+        return Err(IngestError::UnknownPromotionScope(source.cohort_scope.clone()));
+    }
+    if source.captions.trim().is_empty() {
+        return Err(IngestError::MissingAccessibilityText);
+    }
+    // Film requires art_class — that's the whole point of the sub_kind.
+    if !source.content_class.art_class() {
+        return Err(IngestError::MissingContentClass);
+    }
+    if source.is_ai_generated && source.generated_by.is_none() {
+        return Err(IngestError::UndisclosedAiGenerated);
+    }
+    let sha256 = compute_sha256(&source.body_bytes);
+
+    let mut payload = serde_json::json!({
+        "sub_kind": "film",
+        "entity_key_id": source.entity_key_id,
+        "language": source.language,
+        "cohort_scope": source.cohort_scope,
+        "content_sha256": hex_encode(&sha256),
+        "content_media_type": source.body_media_type,
+        "content_size_bytes": source.body_bytes.len(),
+        "content_class": source.content_class,
+        "duration_seconds": source.duration_seconds,
+        "width_px": source.width_px,
+        "height_px": source.height_px,
+        "captions": source.captions,
+        "languages_available": source.languages_available,
+        "production_credits": source.production_credits,
+        "license": source.license,
+        "content_rating": serialize_content_ratings(&source.content_rating),
+        "is_ai_generated": source.is_ai_generated,
+        "topical_relations": source.topical_relations.iter().map(|tr| serde_json::json!({
+            "target_key_id": tr.target_key_id,
+            "relation": tr.relation.as_str(),
+        })).collect::<Vec<_>>(),
+        "citations": source.citations.iter().map(|c| serde_json::json!({
+            "kind": c.kind.as_str(),
+            "ref": c.ref_string,
+        })).collect::<Vec<_>>(),
+    });
+    if let Some(fr) = source.frame_rate {
+        payload["frame_rate"] = serde_json::json!(fr);
+    }
+    if let Some(ref t) = source.thumbnail_sha256 {
+        payload["thumbnail_sha256"] = serde_json::Value::String(t.clone());
+    }
+    if let Some(ref dk) = source.distributor_key_id {
+        payload["distributor_key_id"] = serde_json::Value::String(dk.clone());
+    }
+    if let Some(ref i) = source.imdb_id {
+        payload["imdb_id"] = serde_json::Value::String(i.clone());
+    }
+    if let Some(ref t) = source.tmdb_id {
+        payload["tmdb_id"] = serde_json::Value::String(t.clone());
+    }
+    if let Some(y) = source.release_year {
+        payload["release_year"] = serde_json::json!(y);
+    }
+    if let Some(ref g) = source.generated_by {
+        payload["generated_by"] = serde_json::Value::String(g.clone());
+    }
+    Ok((payload, sha256))
+}
+
+/// Build the canonical `payload` JSON for a 3D model Contribution.
+pub fn build_model_3d_payload(
+    source: &Model3dSource,
+) -> Result<(serde_json::Value, [u8; 32]), IngestError> {
+    if source.entity_key_id.is_empty() {
+        return Err(IngestError::EmptyKeyId);
+    }
+    if source.body_bytes.is_empty() {
+        return Err(IngestError::EmptyBody);
+    }
+    if !is_promotable_scope(&source.cohort_scope) {
+        return Err(IngestError::UnknownPromotionScope(source.cohort_scope.clone()));
+    }
+    validate_multimedia_federation_constraints(
+        &source.cohort_scope,
+        source.content_class.as_ref(),
+        source.is_ai_generated,
+        source.generated_by.is_some(),
+    )?;
+    let sha256 = compute_sha256(&source.body_bytes);
+
+    let mut payload = serde_json::json!({
+        "sub_kind": "model_3d",
+        "entity_key_id": source.entity_key_id,
+        "cohort_scope": source.cohort_scope,
+        "content_sha256": hex_encode(&sha256),
+        "content_media_type": source.body_media_type,
+        "content_size_bytes": source.body_bytes.len(),
+        "intended_renderer": source.intended_renderer,
+        "has_animations": source.has_animations,
+        "license": source.license,
+        "content_rating": serialize_content_ratings(&source.content_rating),
+        "is_ai_generated": source.is_ai_generated,
+        "topical_relations": source.topical_relations.iter().map(|tr| serde_json::json!({
+            "target_key_id": tr.target_key_id,
+            "relation": tr.relation.as_str(),
+        })).collect::<Vec<_>>(),
+        "citations": source.citations.iter().map(|c| serde_json::json!({
+            "kind": c.kind.as_str(),
+            "ref": c.ref_string,
+        })).collect::<Vec<_>>(),
+    });
+    if let Some(cc) = source.content_class {
+        payload["content_class"] = serde_json::json!(cc);
+    }
+    if let Some(v) = source.vertex_count {
+        payload["vertex_count"] = serde_json::json!(v);
+    }
+    if let Some(t) = source.triangle_count {
+        payload["triangle_count"] = serde_json::json!(t);
+    }
+    if let Some(r) = source.max_texture_resolution {
+        payload["max_texture_resolution"] = serde_json::json!(r);
+    }
+    if let Some(ref ck) = source.creator_key_id {
+        payload["creator_key_id"] = serde_json::Value::String(ck.clone());
+    }
+    if let Some(ref g) = source.generated_by {
+        payload["generated_by"] = serde_json::Value::String(g.clone());
+    }
+    Ok((payload, sha256))
+}
+
 /// Build the canonical `payload` JSON for a chat-message Contribution
 /// per SCHEMA.md §4.29.
 pub fn build_chat_payload(
@@ -1151,6 +1836,21 @@ pub enum IngestError {
     /// Blog requires a non-empty post_title.
     #[error("post_title must be non-empty for blog_post")]
     EmptyPostTitle,
+    /// Image / video require non-empty alt text or captions for
+    /// `cohort_scope ≥ community` (accessibility, per FSD/MEDIA_SHARING
+    /// §2.1 + §2.3).
+    #[error("alt_text / captions must be non-empty for accessible multimedia at federation scope")]
+    MissingAccessibilityText,
+    /// Multimedia at federation scope must declare `content_class`
+    /// (FSD/MEDIA_SHARING §3.3).
+    #[error("content_class must be declared for multimedia at federation scope")]
+    MissingContentClass,
+    /// Multimedia carrying `is_ai_generated: true` without an
+    /// `authenticity:ai_generated` attestation in the source
+    /// declarations (EU AI Act Article 50 — substrate enforces
+    /// disclosure on AI-generated content at community+ scope).
+    #[error("AI-generated content must declare authenticity:ai_generated (EU AI Act Art. 50)")]
+    UndisclosedAiGenerated,
     /// `BlobStorage::put_blob_signing` rejected the write — hash
     /// mismatch, inline size cap exceeded, FK violation on
     /// `attesting_key_id`, or signer error.
@@ -1510,6 +2210,102 @@ where
         source.body_media_type,
         cell,
         ctx,
+    )
+    .await
+}
+
+/// Ingest an image (FSD/MEDIA_SHARING.md §2.1 `sub_kind: image`).
+/// Same I/O discipline as text sub_kinds; adds federation-scope
+/// validation (alt_text mandatory at community+, content_class
+/// required, EU AI Act Art. 50 AI-disclosure check).
+pub async fn ingest_image<B, N>(
+    source: ImageSource,
+    cell: Cell,
+    ctx: &IngestContext<'_, B, N>,
+) -> Result<IngestOutcome, IngestError>
+where
+    B: BlobStorage + Sync,
+    N: NodeCoreService,
+{
+    let (payload, content_sha) = build_image_payload(&source)?;
+    finalize_external_content_ingest(
+        payload, content_sha, source.body_bytes, source.body_media_type, cell, ctx,
+    )
+    .await
+}
+
+/// Ingest audio (FSD/MEDIA_SHARING.md §2.2 `sub_kind: audio`) —
+/// music / podcast / lecture / audiobook / generated audio.
+pub async fn ingest_audio<B, N>(
+    source: AudioSource,
+    cell: Cell,
+    ctx: &IngestContext<'_, B, N>,
+) -> Result<IngestOutcome, IngestError>
+where
+    B: BlobStorage + Sync,
+    N: NodeCoreService,
+{
+    let (payload, content_sha) = build_audio_payload(&source)?;
+    finalize_external_content_ingest(
+        payload, content_sha, source.body_bytes, source.body_media_type, cell, ctx,
+    )
+    .await
+}
+
+/// Ingest video (FSD/MEDIA_SHARING.md §2.3 `sub_kind: video`) —
+/// general video; for cinema/art-bearing video use [`ingest_film`].
+pub async fn ingest_video<B, N>(
+    source: VideoSource,
+    cell: Cell,
+    ctx: &IngestContext<'_, B, N>,
+) -> Result<IngestOutcome, IngestError>
+where
+    B: BlobStorage + Sync,
+    N: NodeCoreService,
+{
+    let (payload, content_sha) = build_video_payload(&source)?;
+    finalize_external_content_ingest(
+        payload, content_sha, source.body_bytes, source.body_media_type, cell, ctx,
+    )
+    .await
+}
+
+/// Ingest a film (FSD/MEDIA_SHARING.md §2.4 `sub_kind: film`) —
+/// cinematic / art-bearing video. R/X-rated cinema circulates at
+/// federation scope because the content_class + content_rating +
+/// distributor attestation chain make the art-bearing nature
+/// adjudicable by the trust graph (FSD §1.3).
+pub async fn ingest_film<B, N>(
+    source: FilmSource,
+    cell: Cell,
+    ctx: &IngestContext<'_, B, N>,
+) -> Result<IngestOutcome, IngestError>
+where
+    B: BlobStorage + Sync,
+    N: NodeCoreService,
+{
+    let (payload, content_sha) = build_film_payload(&source)?;
+    finalize_external_content_ingest(
+        payload, content_sha, source.body_bytes, source.body_media_type, cell, ctx,
+    )
+    .await
+}
+
+/// Ingest 3D content (FSD/MEDIA_SHARING.md §2.5
+/// `sub_kind: model_3d`) — glTF / USDZ / FBX / OBJ / Gaussian splat /
+/// volumetric video.
+pub async fn ingest_model_3d<B, N>(
+    source: Model3dSource,
+    cell: Cell,
+    ctx: &IngestContext<'_, B, N>,
+) -> Result<IngestOutcome, IngestError>
+where
+    B: BlobStorage + Sync,
+    N: NodeCoreService,
+{
+    let (payload, content_sha) = build_model_3d_payload(&source)?;
+    finalize_external_content_ingest(
+        payload, content_sha, source.body_bytes, source.body_media_type, cell, ctx,
     )
     .await
 }
