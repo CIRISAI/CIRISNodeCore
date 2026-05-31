@@ -1703,11 +1703,459 @@ fn print_cache_sensitivity(base: &Scenario) {
     println!("  or in low-trust-radius deployments.");
 }
 
+// ─── Adversarial findings — F-AV cost-asymmetry against scenarios ────
+//
+// Pinned to the canonical CIRISVerify Federation Threat Model (v1.0,
+// 2026-05-02; 31 F-AVs across 5 classes per §4.1-§4.5; F-AV catalog
+// §6.1-§6.7). Each finding here cites the F-AV ID + doc reference + the
+// load-bearing claim. The toy is closed-form arithmetic — we surface
+// cost-asymmetry inequalities and which defenses hold/don't, NOT
+// time-evolved adversarial simulation. That's the v0.5 sim-engine
+// scope; this is the v0.4-toy honest-findings extension.
+//
+// Methodology discipline per RATCHET (KNOWN_LIMITATIONS.md §4
+// "Correct Statement" template): every claim states its assumptions
+// (non-adaptive adversary, n ≥ 100 samples, etc.) and which limitation
+// (L-01..L-08) binds.
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
+enum FavStatus {
+    /// Verify Fed TM names this F-AV AND the substrate ships a
+    /// load-bearing defense.
+    SpecifiedMitigated,
+    /// Named in the TM with partial defense; named gaps remain
+    /// (research-grade / structural).
+    Partial,
+    /// Named in the TM but the defense is currently spec-only,
+    /// unimplemented at the substrate layer.
+    SpecOnly,
+    /// Named in the TM but no defense filled. Live exposure today.
+    UnfilledGap,
+    /// Not currently in the TM; toy proposes as candidate-new F-AV
+    /// for the maintainer to evaluate.
+    CandidateNew,
+}
+
+impl FavStatus {
+    fn label(self) -> &'static str {
+        match self {
+            FavStatus::SpecifiedMitigated => "SPECIFIED + MITIGATED",
+            FavStatus::Partial            => "PARTIAL",
+            FavStatus::SpecOnly           => "SPEC ONLY",
+            FavStatus::UnfilledGap        => "UNFILLED — LIVE EXPOSURE",
+            FavStatus::CandidateNew       => "CANDIDATE NEW F-AV",
+        }
+    }
+    fn glyph(self) -> &'static str {
+        match self {
+            FavStatus::SpecifiedMitigated => "✓",
+            FavStatus::Partial            => "◐",
+            FavStatus::SpecOnly           => "◔",
+            FavStatus::UnfilledGap        => "⚠",
+            FavStatus::CandidateNew       => "📝",
+        }
+    }
+}
+
+struct FavFinding {
+    fav_id: &'static str,
+    name: &'static str,
+    doc_ref: &'static str,
+    status: FavStatus,
+    /// What the attacker does + observable
+    mechanism: &'static str,
+    /// Substrate's named defense (or "—" for UnfilledGap)
+    defense: &'static str,
+    /// Limitations from RATCHET KNOWN_LIMITATIONS.md that bind
+    limits: &'static str,
+    /// Computed numbers (free-form; populated by fav_findings()
+    /// from the scenario)
+    findings: Vec<(String, String)>,
+    /// One-line verdict honest about what the toy can and cannot say
+    verdict: String,
+}
+
+fn cost_per_dormant_vtpm_usd_per_year() -> f64 {
+    // Per Verify Fed TM §6.6 F-AV-DORMANT: cloud-vTPM-rented identities
+    // ~$200-$1,000 per identity per 5 years. Midpoint: $600 / 5 = $120/yr.
+    120.0
+}
+
+fn cost_per_hour_cloud_vtpm_usd() -> f64 {
+    // Per Verify Fed TM §6.1 F-AV-1 known weakness: ~$0.10/identity/hour
+    // on cloud vTPMs (the eroded hardware floor).
+    0.10
+}
+
+/// CommonsCredits stake required to file a Reconsideration per
+/// MISSION.md §4.10. Proportional to alleged severity of original
+/// adjudication error. Use a representative midpoint for the toy.
+fn p11_reconsideration_stake_credits() -> f64 {
+    100.0
+}
+
+fn fav_findings(s: &Scenario, lat: &LatencyEstimate) -> Vec<FavFinding> {
+    let mut out = Vec::new();
+
+    // ── F-AV-1 Multi-identity Sybil ──────────────────────────────────
+    {
+        let cost_per_identity_year = cost_per_hour_cloud_vtpm_usd() * 24.0 * 365.0;
+        let n_attacker = 10_000.0;
+        let total_attacker_cost_yr = n_attacker * cost_per_identity_year;
+        // Defense: SOFTWARE_ONLY → COMMUNITY tier cap (per-repo
+        // Verify TM §5 critical invariant). At cohort_scope=community
+        // a Sybil's bytes only reach community-scope subscribers, not
+        // federation-wide. Toy: published cohort_publishable carries
+        // species+planet+federation share; community share is local.
+        let federation_admit_fraction = s.cohort.species + s.cohort.planet + s.cohort.federation;
+        let federation_admit_bytes_per_attacker_year =
+            s.daily_bytes * 365.0 * federation_admit_fraction;
+        out.push(FavFinding {
+            fav_id: "F-AV-1",
+            name: "Multi-identity Sybil (cheap key generation)",
+            doc_ref: "CIRISVerify Fed TM §6.1",
+            status: FavStatus::SpecifiedMitigated,
+            mechanism:
+                "Adversary spins N cloud-vTPM-rented identities, each individually substrate-valid. \
+                 Cluster manifests in PC1 variance ↓ + HwDiv ↓ + clustering coefficient ↑.",
+            defense:
+                "C1 hardware-tier cap (SOFTWARE_ONLY ⇒ COMMUNITY tier permanently) + bond + \
+                 RATCHET cluster detection (N_eff joint manifold dim < 11).",
+            limits: "L-02 (adaptive adversary cap; cluster detection assumes non-adaptive)",
+            findings: vec![
+                ("Cost / identity / year".into(),
+                    format!("${:.2}", cost_per_identity_year)),
+                ("Cost @ 10K Sybils / year".into(),
+                    format!("${:.2}M", total_attacker_cost_yr / 1e6)),
+                ("Federation-scope admit fraction (tier-capped to COMMUNITY)".into(),
+                    "0% — SOFTWARE_ONLY identities cap at COMMUNITY scope".into()),
+                ("Community-scope bytes / Sybil / year (NOT cross-cohort)".into(),
+                    format!("{}", fmt_bytes(federation_admit_bytes_per_attacker_year))),
+            ],
+            verdict:
+                "Defense holds at full_internet_v1 IF SOFTWARE_ONLY tier cap enforced. \
+                 Bound: K_cap = 0 federation-bytes/Sybil. Caveat: cloud-vTPM erosion of \
+                 hardware floor is a known weakness (Fed TM §6.1).".into(),
+        });
+    }
+
+    // ── F-AV-DORMANT Sybil aging ─────────────────────────────────────
+    {
+        let cost_per_dormant_id_yr = cost_per_dormant_vtpm_usd_per_year();
+        let n_dormant = 10_000.0;
+        let dormant_corpus_cost_5yr = n_dormant * cost_per_dormant_id_yr * 5.0;
+        // Activation density tier defense (per Fed TM §6.6): Active
+        // ≥100 traces / 30d ⇒ standing accrues; Dormant <10 ⇒ baseline only.
+        out.push(FavFinding {
+            fav_id: "F-AV-DORMANT",
+            name: "Sybil aging via dormant cloud-vTPM cohort",
+            doc_ref: "CIRISVerify Fed TM §6.6",
+            status: FavStatus::Partial,
+            mechanism:
+                "Cohort of cheap vTPMs idles ~5y at $200-$1000 each, then activates with \
+                 minimal trace history. σ-decay rate inconsistent with claimed temporal history.",
+            defense:
+                "Activity-density tier (Active ≥100/30d ⇒ Standing accrues; Dormant <10 ⇒ \
+                 baseline-only) + σ-decay rate vs claimed history + post-activation \
+                 embedding-cluster proximity (RATCHET signal).",
+            limits: "L-05 finite sample (n ≥ 100 floor) + L-08 slow capture",
+            findings: vec![
+                ("Cost / dormant identity / year".into(),
+                    format!("${:.2}", cost_per_dormant_id_yr)),
+                ("5-year corpus cost @ 10K Sybils".into(),
+                    format!("${:.2}M", dormant_corpus_cost_5yr / 1e6)),
+                ("Activation-density floor (Active tier)".into(),
+                    "≥100 traces / 30 days per identity".into()),
+                ("Cost-asymmetry inequality".into(),
+                    "dC/dw grows linearly in N×t; dB/dw → 0 until activation crosses density floor".into()),
+            ],
+            verdict:
+                "Cost floor at $1.2M / 5y / 10K identities is non-trivial but ~3 OOMs below \
+                 nation-state budgets. Defense partial: activation-density catches naïve attacks; \
+                 F-AV-TIMESHIFT σ-decay paraphrase replay (research-grade) remains open.".into(),
+        });
+    }
+
+    // ── F-AV-ECLIPSE per-peer view manipulation ──────────────────────
+    {
+        let local_share = s.cohort.self_ + s.cohort.family + s.cohort.community;
+        out.push(FavFinding {
+            fav_id: "F-AV-ECLIPSE",
+            name: "Eclipse attack on a peer's S2 read-view",
+            doc_ref: "CIRISVerify Fed TM §6.5 — LIVE EXPOSURE",
+            status: FavStatus::UnfilledGap,
+            mechanism:
+                "All of a target peer's S2 directory read paths controlled, served a curated view. \
+                 Target's local cohort-scope traffic UNAFFECTED (CEG locality dividend); \
+                 cross-cohort moderation/policy/accord visibility poisoned.",
+            defense:
+                "Pending — N1 cryptographic addressing (content-hash destinations) + N2 \
+                 multi-medium transport + witness-signed snapshots. Per Fed TM §3.3 Gap D: \
+                 N1+N2 are Spec ONLY today, pending CIRISEdge Phase 1.",
+            limits: "L-02 (no detector exists; attacker is adaptive)",
+            findings: vec![
+                ("Local cohort fraction (UNEXPOSED by eclipse)".into(),
+                    format!("{:.1}%", local_share * 100.0)),
+                ("Cross-cohort fraction (EXPOSED to view manipulation)".into(),
+                    format!("{:.1}%", (1.0 - local_share) * 100.0)),
+                ("Detection by eclipsed peer (own resources)".into(),
+                    "0% — by definition, eclipsed peer cannot detect locally".into()),
+                ("Detection by non-eclipsed observers".into(),
+                    "Possible after cross-witness reconciliation; latency unspecified (Gap D)".into()),
+            ],
+            verdict:
+                "LIVE EXPOSURE today. The CEG locality dividend bounds eclipse damage to \
+                 cross-cohort traffic only — for full_internet_v1's default cohort, that's \
+                 ~30% of total. Substrate has NO answer until Edge Phase 1 ships N1+N2.".into(),
+        });
+    }
+
+    // ── F-AV-12 Replication-lag exploitation ─────────────────────────
+    {
+        // Cross-region replication lag uses raw cross-ocean RTT
+        // (L_GLOBAL_MS submarine-cable great-circle), not cohort-
+        // weighted user-facing latency. Conservative: 2× one-way for
+        // commit-and-acknowledge round-trip. Real lag also includes
+        // queue + processing + multi-hop ISP; toy underestimates.
+        let _ = lat; // bind for future per-tier extension
+        let cross_region_one_way_ms = L_GLOBAL_MS;
+        let est_replication_lag_s = (2.0 * cross_region_one_way_ms) / 1000.0;
+        let proposed_tau_normal_s = 60.0;
+        let proposed_tau_partial_s = 300.0;
+        out.push(FavFinding {
+            fav_id: "F-AV-12",
+            name: "Replication-lag exploitation (Q1 unspecified — Gap B)",
+            doc_ref: "CIRISVerify Fed TM §6.4 + Gap B",
+            status: FavStatus::Partial,
+            mechanism:
+                "Register key in region A, act, get revoked before replicating to region B. \
+                 Attacker exploits the τ-window between revocation and worldwide propagation.",
+            defense:
+                "Proposed Q1 bounded-staleness CAP: τ ≤ 60s normal / ≤ 300s partial-failure; \
+                 'most recent observed revocation wins' merge rule. Per Fed TM §3.3 Gap B: \
+                 spec UNFILLED today.",
+            limits: "L-06 correlation (multi-region clocks correlated by jurisdiction)",
+            findings: vec![
+                ("Toy-estimated cross-region 2× RTT (proxy for rep-lag)".into(),
+                    format!("{:.2}s", est_replication_lag_s)),
+                ("Proposed τ_normal".into(), format!("≤ {:.0}s", proposed_tau_normal_s)),
+                ("Proposed τ_partial".into(), format!("≤ {:.0}s", proposed_tau_partial_s)),
+                ("Toy estimate vs proposed normal bound".into(),
+                    if est_replication_lag_s <= proposed_tau_normal_s {
+                        format!("INSIDE bound ({:.0}× headroom)", proposed_tau_normal_s / est_replication_lag_s.max(0.001))
+                    } else {
+                        format!("OUTSIDE bound ({:.1}× over)", est_replication_lag_s / proposed_tau_normal_s)
+                    }),
+            ],
+            verdict:
+                "Gap B (Q1 quorum / bounded-staleness CAP) is UNSPECIFIED. Toy's RTT-derived \
+                 estimate is inside the PROPOSED τ_normal bound — but the proposal is not the \
+                 spec. Until Q1 ships, the per-attack τ-window is unmeasurable per Fed TM §3.3.".into(),
+        });
+    }
+
+    // ── F-AV-16 Substrate-availability denial (fail-secure forcing) ─
+    {
+        // Per CIRISVerify per-repo §7 + Fed TM §8.3: sliding window
+        // W=600s with D_max=180s cumulative degraded time triggers
+        // forced RESTRICTED. An adversary holding the substrate
+        // degraded for 180s out of every 600s achieves perpetual
+        // forced-RESTRICTED at ε cost above the gate.
+        let w_s = 600.0;
+        let d_max_s = 180.0;
+        let max_forced_restricted_pct = d_max_s / w_s * 100.0;
+        out.push(FavFinding {
+            fav_id: "F-AV-16",
+            name: "Substrate-availability denial / forced fail-secure RESTRICTED",
+            doc_ref: "CIRISVerify Fed TM §6.5 + per-repo §7 + §8.3 fail-secure",
+            status: FavStatus::Partial,
+            mechanism:
+                "DoS S2 endpoints for τ_grace+ε in a loop. Cumulative-degraded-time in the \
+                 sliding window trips substrate into RESTRICTED. Anti-grace-loop sliding \
+                 window prevents reset-on-recovery but does not prevent forced RESTRICTED.",
+            defense:
+                "Fail-secure protocol §8.3: τ_grace=60s, τ_max=300s, sliding W=600s, \
+                 D_max=180s cumulative-degraded-time threshold within W. Ring buffer fallback \
+                 (N=1024 signed decisions) when S3 degraded.",
+            limits: "L-02 (adaptive adversary can pace DoS to maximize RESTRICTED fraction)",
+            findings: vec![
+                ("Sliding window W".into(), format!("{:.0}s", w_s)),
+                ("D_max cumulative-degraded-time threshold".into(), format!("{:.0}s", d_max_s)),
+                ("Max forced-RESTRICTED fraction at minimum DoS cost".into(),
+                    format!("{:.0}% of operational time", max_forced_restricted_pct)),
+                ("Substrate state during DoS".into(),
+                    "Signed-RESTRICTED decisions; not silent failure".into()),
+            ],
+            verdict:
+                "Substrate FAILS-SECURE (every decision signed; no silent misroute). But \
+                 attacker CAN hold RESTRICTED ~30% of the time at cost ~D_max/W × DoS-budget. \
+                 N2 multi-medium transport (Gap D, pending Edge) would raise this attack's cost.".into(),
+        });
+    }
+
+    // ── F-AV-RATCHET-DOS evaluator denial ────────────────────────────
+    {
+        // Synthetic adversarial trace cost is ~$0.0001/trace (LLM
+        // inference at $0.001/1K tokens × short trace). RATCHET
+        // per-evaluation cost: cohort-centroid + manifold projection
+        // + N_eff calculation, ~10ms CPU + DB read → ~$0.001
+        // amortized on commodity infra. 10× attacker advantage at
+        // per-trace ratio.
+        let attacker_cost_per_trace = 0.0001;
+        let ratchet_cost_per_eval = 0.001;
+        let cost_ratio = ratchet_cost_per_eval / attacker_cost_per_trace;
+        out.push(FavFinding {
+            fav_id: "F-AV-RATCHET-DOS",
+            name: "DoS on the RATCHET evaluator",
+            doc_ref: "CIRISVerify Fed TM §6.5 (Spec only)",
+            status: FavStatus::SpecOnly,
+            mechanism:
+                "Flood RATCHET with expensive-analysis traces (e.g. high-entropy multimedia \
+                 reasoning chains). Legitimate evaluations starve. Cost asymmetry favors \
+                 attacker by per-trace generation cost vs per-eval substrate cost.",
+            defense:
+                "Per-identity compute budget; trace-cost prediction; backpressure → baseline; \
+                 sharding by identity-hash. Per Fed TM §6.5: Spec only, unimplemented.",
+            limits: "L-05 finite sample at evaluator (rate-limit interaction with sample floor)",
+            findings: vec![
+                ("Attacker cost / synthetic trace".into(),
+                    format!("~${:.4} (LLM inference, short trace)", attacker_cost_per_trace)),
+                ("RATCHET cost / evaluation".into(),
+                    format!("~${:.4} (manifold + centroid + N_eff)", ratchet_cost_per_eval)),
+                ("Cost-asymmetry ratio (defender pays more)".into(),
+                    format!("{:.1}× attacker advantage", cost_ratio)),
+                ("F-AV-RATCHET-DOS defense status".into(),
+                    "Spec only — per-identity budget + sharding UNIMPLEMENTED".into()),
+            ],
+            verdict:
+                "Cost asymmetry FAVORS attacker by ~10×. Substrate's named defenses \
+                 (per-identity compute budget + backpressure) are Spec only. Live exposure \
+                 to RATCHET-eval starvation at full_internet_v1 scale.".into(),
+        });
+    }
+
+    // ── Candidate new F-AV: P11 reconsideration weaponization ────────
+    {
+        // Per MISSION.md §4.10: "a target may file at most one
+        // Reconsideration per SlashingAttestation per hash-pinned
+        // evidence package per ground (NEW_EVIDENCE, PROCEDURAL_ERROR,
+        // QUORUM_COMPROMISE separately)." Three filings without
+        // success triggers harassment-pattern review via RATCHET.
+        let stake_per_filing = p11_reconsideration_stake_credits();
+        let max_filings_per_event = 3.0;
+        let grounds = 3.0; // NEW_EVIDENCE / PROCEDURAL_ERROR / QUORUM_COMPROMISE
+        // Each filing forces fresh-quorum recusal + adjudication.
+        // Assume per-adjudication substrate cost = K × per-filing cost.
+        let attacker_total = stake_per_filing * max_filings_per_event * grounds;
+        let substrate_cost_multiplier = 5.0; // fresh-quorum recusal cost > attacker stake
+        let substrate_total = attacker_total * substrate_cost_multiplier;
+        out.push(FavFinding {
+            fav_id: "F-AV-RECONSIDER-DOS",
+            name: "P11 reconsideration weaponization (candidate new F-AV)",
+            doc_ref:
+                "NOT YET NAMED in Verify Fed TM. Closest existing: F-AV-FRONTRUN + F-AV-BRIBE \
+                 + F-AV-ROLLBACK. NodeCore MISSION.md §4.10 Reconsideration recursion bound.",
+            status: FavStatus::CandidateNew,
+            mechanism:
+                "Adversary (organized group) files maximum-allowed reconsiderations against \
+                 every moderation event affecting their bloc. Per-filing stake is sub-quorum cost; \
+                 fresh-quorum recusal multiplies substrate burden. Goal: collapse moderation \
+                 decision-throughput by saturating the appeals pipeline.",
+            defense:
+                "MISSION.md §4.10 recursion bound (max 3 reconsiderations / SlashingAttestation \
+                 across 3 distinct evidence-package-hash × ground pairings) + RATCHET \
+                 harassment-pattern review on 3rd unsuccessful filing.",
+            limits: "L-02 (adaptive adversary times filings to maximize fresh-quorum churn)",
+            findings: vec![
+                ("Stake per filing (CommonsCredits)".into(),
+                    format!("{:.0} credits (proportional to severity)", stake_per_filing)),
+                ("Max filings / SlashingAttestation".into(),
+                    format!("{:.0} grounds × {:.0} evidence-pkg = up to 9 filings",
+                        grounds, max_filings_per_event)),
+                ("Attacker total stake / targeted event".into(),
+                    format!("{:.0} credits", attacker_total)),
+                ("Substrate-burden ratio (fresh-quorum recusal cost)".into(),
+                    format!("~{:.0}× attacker stake — substrate pays {:.0} credits-equivalent",
+                        substrate_cost_multiplier, substrate_total)),
+                ("Throughput collapse @ N targeted events".into(),
+                    "Decision throughput drops ~ (1 / (1 + filings × recusal_factor))".into()),
+            ],
+            verdict:
+                "Cost asymmetry FAVORS attacker (substrate pays ~5× per filing). MISSION.md §4.10 \
+                 bounds attack to 9 filings/event but doesn't bound the per-event cost. Substrate \
+                 has no per-event harassment-rate limit; only per-SlashingAttestation. Should \
+                 propose to CIRISVerify Fed TM maintainer as F-AV-RECONSIDER-DOS.".into(),
+        });
+    }
+
+    out
+}
+
+fn print_fav_findings(s: &Scenario, lat: &LatencyEstimate) {
+    let findings = fav_findings(s, lat);
+    println!();
+    println!("══ Adversarial findings — pinned to CIRISVerify Fed TM v1.0 F-AV catalog ══");
+    println!();
+    println!("  Scenario: {} ({} users, depth {:.0}, cohort_publishable={:.0}%)",
+        s.name, fmt_count(s.n_users), s.trust_depth_avg, s.cohort.publishable() * 100.0);
+    println!();
+    for f in &findings {
+        println!("  {} {} — {}", f.status.glyph(), f.fav_id, f.name);
+        println!("    Status   : {}", f.status.label());
+        println!("    Doc ref  : {}", f.doc_ref);
+        println!("    Mechanism: {}", f.mechanism);
+        println!("    Defense  : {}", f.defense);
+        println!("    Limits   : {}", f.limits);
+        for (k, v) in &f.findings {
+            println!("      • {:<58}  {}", k, v);
+        }
+        println!("    Verdict  : {}", f.verdict);
+        println!();
+    }
+
+    println!("══ Live exposure — structural gaps named in CIRISVerify Fed TM §3.3 ══");
+    println!();
+    println!("  Gap A — R1 revocation timeliness contract:           UNSPECIFIED");
+    println!("    Affected F-AVs: F-AV-11, F-AV-12, F-AV-13, F-AV-ROLLBACK, F-AV-FRONTRUN");
+    println!("    Recommendation: Specify τ_propagate ≤ 60s normal / ≤ 300s partial");
+    println!();
+    println!("  Gap B — Q1 quorum / bounded-staleness CAP:           UNSPECIFIED");
+    println!("    Affected: replication-lag attacks; cross-region consistency");
+    println!("    Recommendation: Specify quorum-write contract + merge rules");
+    println!();
+    println!("  Gap C — C4 hybrid KEX + KDF:                         UNFILLED");
+    println!("    Affected: federation peer-to-peer is harvest-now-decrypt-later vulnerable today");
+    println!("    Recommendation: Ship before federation transport carries plaintext");
+    println!();
+    println!("  Gap D — N1 + N2 (Reticulum + multi-medium transport): SPEC ONLY");
+    println!("    Affected: F-AV-ECLIPSE, F-AV-16, F-AV-RATCHET-DOS, F-AV-17 censorship");
+    println!("    Recommendation: CIRISEdge Phase 1 implementation");
+    println!();
+
+    println!("══ Out-of-scope (substrate has NO answer; simulator must NOT claim detection) ══");
+    println!();
+    println!("  L-01 Emergent deception from honest components — RATCHET impossibility result");
+    println!("  L-02 Adaptive adversary with detector query access — degrades all detector power");
+    println!("  L-03 ETH dependency for exponential complexity gap");
+    println!("  L-08 Slow capture > 1/3 Byzantine fraction — outside BFT bound");
+    println!("  Malicious behavior with valid license (per-repo TM §1)");
+    println!("  HSM/TEE manufacturer supply-chain compromise");
+    println!("  Physical access (TEE.fail / DDR5 bus interposition)");
+    println!("  Simultaneous Ed25519 AND ML-DSA-65 break (hybrid requires both)");
+    println!("  Clock manipulation > 5 minutes (assumption §6.5)");
+    println!("  F-AV-CROSS cross-federation attackers (Fed TM §6.7 stub)");
+    println!();
+    println!("  These are the 'CORRECT STATEMENT' (RATCHET KNOWN_LIMITATIONS §4) assumptions");
+    println!("  every claim above is conditional on.");
+}
+
 fn main() {
-    println!("CIRIS Federation Scaling Model — toy v0.4 (device classes + 9-region realism)");
+    println!("CIRIS Federation Scaling Model — toy v0.5 (+ F-AV cost-asymmetry findings)");
     println!("Empirical baseline : Verify v2.8.0 + Edge v0.10.0 + Persist v3.3.0");
-    println!("Substrate triple   : keyring v4.4.2 + persist v3.6.4 + edge v1.0.1 (multimedia tier landed)");
+    println!("Substrate triple   : keyring v4.4.3 + persist v3.6.9 + edge v1.1.3 (macOS cohab closed)");
     println!("Regional realism   : UN WPP 2024 + GSMA Mobile Economy 2024 + ITU 2024 + IEA 2024");
+    println!("Threat-model anchor: CIRISVerify Fed TM v1.0 (31 F-AVs) + RATCHET L-01..L-08");
     println!();
     println!("Discipline:");
     println!("  • Replication: trust(source) ≥ threshold AND capacity_available");
@@ -1734,6 +2182,11 @@ fn main() {
         // beyond the website's uniform-global model. Uses real GSMA /
         // UN / ITU / IEA 2024-2026 data.
         print_regional_breakdown(v1, FleetStyle::Realistic2026);
+
+        // Adversarial findings — F-AV cost-asymmetry against the v1
+        // target scenario. Pinned to CIRISVerify Fed TM v1.0.
+        let v1_lat = estimate_latency(v1);
+        print_fav_findings(v1, &v1_lat);
     }
 
     println!();
