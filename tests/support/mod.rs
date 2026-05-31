@@ -458,15 +458,28 @@ impl NodeCoreService for MockEngine {
 
     fn list_votes(
         &self,
-        _filter: VotesFilter,
+        filter: VotesFilter,
         _cursor: Option<ListCursor>,
         _limit: i64,
     ) -> impl Future<Output = Result<VoteListPage, SubstrateError>> + Send {
         async move {
-            Ok(VoteListPage {
-                items: self.state.lock().unwrap().votes.clone(),
-                next_cursor: None,
-            })
+            let items: Vec<VoteEnvelope> = self
+                .state
+                .lock()
+                .unwrap()
+                .votes
+                .iter()
+                .filter(|v| match &filter.contribution_id {
+                    Some(cid) => v.contribution_id.as_deref() == Some(cid.as_str()),
+                    None => true,
+                })
+                .filter(|v| match &filter.voter_id {
+                    Some(vid) => &v.voter_id == vid,
+                    None => true,
+                })
+                .cloned()
+                .collect();
+            Ok(VoteListPage { items, next_cursor: None })
         }
     }
 

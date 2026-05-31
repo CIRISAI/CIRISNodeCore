@@ -4,7 +4,7 @@ mod support;
 
 use chrono::Utc;
 
-use ciris_node_core::aggregate::{weighted_aggregate, Aggregate};
+use ciris_node_core::aggregate::{cohort_weighted_aggregate, weighted_aggregate, Aggregate, OccurrenceCohort};
 use ciris_node_core::substrate::{Cell, VoteEnvelope};
 use ciris_node_core::NodeCoreService;
 
@@ -159,4 +159,152 @@ async fn empty_vote_set_is_below_quorum() {
         .await
         .unwrap();
     assert!(matches!(agg, Aggregate::BelowQuorum { votes_counted: 0, .. }));
+}
+
+// ─── Occurrence-cohort aggregation tests (NodeCore#16) ────────────────
+
+#[tokio::test]
+async fn cohort_aggregate_rolls_up_three_occurrences() {
+    let mock = MockEngine::new();
+    seed_voters(&mock).await;
+
+    // Three occurrences of the same agent template, each with its own
+    // Contribution receiving approve/reject votes from the same voter pool.
+    let occ_a = "occ-a-key";
+    let occ_b = "occ-b-key";
+    let occ_c = "occ-c-key";
+    let c_a = "01HXC0000000000000000000A";
+    let c_b = "01HXC0000000000000000000B";
+    let c_c = "01HXC0000000000000000000C";
+
+    // Occurrence A: 100% approval (alice+bob approve, no rejects)
+    mock.cast_vote(vote("alice", c_a, "approve")).await.unwrap();
+    mock.cast_vote(vote("bob", c_a, "approve")).await.unwrap();
+    mock.cast_vote(vote("carol", c_a, "approve")).await.unwrap();
+    // Occurrence B: ~70% approval (alice+bob approve = 230; carol rejects = 100)
+    mock.cast_vote(vote("alice", c_b, "approve")).await.unwrap();
+    mock.cast_vote(vote("bob", c_b, "approve")).await.unwrap();
+    mock.cast_vote(vote("carol", c_b, "reject")).await.unwrap();
+    // Occurrence C: 0% approval (all reject)
+    mock.cast_vote(vote("alice", c_c, "reject")).await.unwrap();
+    mock.cast_vote(vote("bob", c_c, "reject")).await.unwrap();
+    mock.cast_vote(vote("carol", c_c, "reject")).await.unwrap();
+
+    let cohort = OccurrenceCohort {
+        agent_template_id: "ciris-agent-template-v1".into(),
+        included_occurrences: vec![occ_a.into(), occ_b.into(), occ_c.into()],
+        expected_occurrence_count: Some(3),
+    };
+    let mapping = vec![
+        (occ_a.into(), c_a.into()),
+        (occ_b.into(), c_b.into()),
+        (occ_c.into(), c_c.into()),
+    ];
+
+    let agg = cohort_weighted_aggregate(&mock, &cohort, &mapping, 1).await.unwrap();
+    assert_eq!(agg.agent_template_id, "ciris-agent-template-v1");
+    assert_eq!(agg.included_occurrences.len(), 3);
+    assert_eq!(agg.coverage, Some(1.0));
+    // Per-occurrence ratios: 1.0, 230/330 ≈ 0.697, 0.0
+    let ratios = &agg.per_occurrence_approval_ratio;
+    assert!((ratios[0].unwrap() - 1.0).abs() < 1e-9);
+    assert!((ratios[1].unwrap() - 230.0/330.0).abs() < 1e-9);
+    assert!((ratios[2].unwrap() - 0.0).abs() < 1e-9);
+    // Mean: (1.0 + 0.697 + 0.0) / 3 ≈ 0.566
+    let expected_mean = (1.0 + 230.0/330.0 + 0.0) / 3.0;
+    assert!((agg.mean_approval_ratio.unwrap() - expected_mean).abs() < 1e-9);
+    assert!((agg.min_approval_ratio.unwrap() - 0.0).abs() < 1e-9);
+    assert!((agg.max_approval_ratio.unwrap() - 1.0).abs() < 1e-9);
+    // Total fleet weight = 330 × 3 = 990
+    assert!((agg.total_fleet_weight - 990.0).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn cohort_coverage_below_threshold_is_visible() {
+    let mock = MockEngine::new();
+    seed_voters(&mock).await;
+    let c_a = "01HXC0000000000000000000A";
+    mock.cast_vote(vote("alice", c_a, "approve")).await.unwrap();
+    mock.cast_vote(vote("bob", c_a, "approve")).await.unwrap();
+    mock.cast_vote(vote("carol", c_a, "reject")).await.unwrap();
+
+    // Declare fleet of 9 occurrences but only include 1 — coverage = 1/9
+    let cohort = OccurrenceCohort {
+        agent_template_id: "ciris-agent-template-v1".into(),
+        included_occurrences: vec!["occ-a-key".into()],
+        expected_occurrence_count: Some(9),
+    };
+    let mapping = vec![("occ-a-key".into(), c_a.into())];
+    let agg = cohort_weighted_aggregate(&mock, &cohort, &mapping, 1).await.unwrap();
+    assert!((agg.coverage.unwrap() - 1.0/9.0).abs() < 1e-9);
+    // Selective-inclusion rejection at 0.8 threshold
+    assert!(!agg.meets_coverage_threshold(0.8));
+    // Passes at a permissive threshold
+    assert!(agg.meets_coverage_threshold(0.1));
+}
+
+#[tokio::test]
+async fn cohort_skips_occurrences_without_contribution_mapping() {
+    let mock = MockEngine::new();
+    seed_voters(&mock).await;
+    let c_a = "01HXC0000000000000000000A";
+    mock.cast_vote(vote("alice", c_a, "approve")).await.unwrap();
+    mock.cast_vote(vote("bob", c_a, "approve")).await.unwrap();
+
+    // Declare 3 occurrences but supply mapping for only 1 — coverage 1/3
+    let cohort = OccurrenceCohort {
+        agent_template_id: "ciris-agent-template-v1".into(),
+        included_occurrences: vec!["occ-a-key".into(), "occ-b-key".into(), "occ-c-key".into()],
+        expected_occurrence_count: Some(3),
+    };
+    let mapping = vec![("occ-a-key".into(), c_a.into())];
+    let agg = cohort_weighted_aggregate(&mock, &cohort, &mapping, 1).await.unwrap();
+    assert_eq!(agg.included_occurrences.len(), 1);
+    assert!((agg.coverage.unwrap() - 1.0/3.0).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn cohort_empty_set_yields_no_statistics() {
+    let mock = MockEngine::new();
+    let cohort = OccurrenceCohort {
+        agent_template_id: "ciris-agent-template-v1".into(),
+        included_occurrences: vec![],
+        expected_occurrence_count: Some(0),
+    };
+    let agg = cohort_weighted_aggregate(&mock, &cohort, &[], 1).await.unwrap();
+    assert!(agg.included_occurrences.is_empty());
+    assert!(agg.mean_approval_ratio.is_none());
+    assert!(agg.stddev_approval_ratio.is_none());
+    assert_eq!(agg.coverage, Some(0.0));
+}
+
+#[tokio::test]
+async fn cohort_below_quorum_per_occurrence_excluded_from_stats() {
+    let mock = MockEngine::new();
+    seed_voters(&mock).await;
+    let c_a = "01HXC0000000000000000000A";
+    let c_b = "01HXC0000000000000000000B";
+    // Occurrence A: 3 votes, passes quorum of 2
+    mock.cast_vote(vote("alice", c_a, "approve")).await.unwrap();
+    mock.cast_vote(vote("bob", c_a, "approve")).await.unwrap();
+    mock.cast_vote(vote("carol", c_a, "approve")).await.unwrap();
+    // Occurrence B: 1 vote only, BELOW quorum of 2
+    mock.cast_vote(vote("alice", c_b, "approve")).await.unwrap();
+
+    let cohort = OccurrenceCohort {
+        agent_template_id: "ciris-agent-template-v1".into(),
+        included_occurrences: vec!["occ-a-key".into(), "occ-b-key".into()],
+        expected_occurrence_count: Some(2),
+    };
+    let mapping = vec![
+        ("occ-a-key".into(), c_a.into()),
+        ("occ-b-key".into(), c_b.into()),
+    ];
+    let agg = cohort_weighted_aggregate(&mock, &cohort, &mapping, 2).await.unwrap();
+    // Both occurrences included as cohort members, but B yields no ratio
+    assert_eq!(agg.included_occurrences.len(), 2);
+    assert_eq!(agg.per_occurrence_approval_ratio[0], Some(1.0));
+    assert_eq!(agg.per_occurrence_approval_ratio[1], None);
+    // Mean computed only over resolved entries
+    assert!((agg.mean_approval_ratio.unwrap() - 1.0).abs() < 1e-9);
 }
