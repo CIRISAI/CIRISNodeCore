@@ -2,6 +2,17 @@
 //!
 //! Run: `cargo run --example scale_model`
 //!
+//! **v0.6 — post Verify Fed TM v1.1.** Adversarial findings module
+//! (added in v0.5) updated to reflect Verify Fed TM v1.1 (2026-05-31):
+//! 3 of 4 §3.3 structural gaps closed in one shipping cycle (Gap A R1
+//! timeliness + Gap B Q1 CAP specified; Gap C C4 KEX shipped in
+//! v4.6.0 as X25519 + ML-KEM-768). F-AV-RECONSIDER-DOS promoted from
+//! candidate to catalog §6.5 with the v0.5 toy's cost-asymmetry
+//! numbers cited verbatim in the TM entry. Three downstream
+//! enforcement issues filed (CIRISPersist#143 + CIRISRegistry#46 +
+//! CIRISNodeCore#28) + CIRISConformance#7 umbrella for the three new
+//! regression scenarios. Only Gap D (N1+N2 Edge transport) remains.
+//!
 //! **v0.4 — device classes + 9-region realism.** Extends v0.3's
 //! single-pool CEG-organic model with:
 //!
@@ -1705,13 +1716,12 @@ fn print_cache_sensitivity(base: &Scenario) {
 
 // ─── Adversarial findings — F-AV cost-asymmetry against scenarios ────
 //
-// Pinned to the canonical CIRISVerify Federation Threat Model (v1.0,
-// 2026-05-02; 31 F-AVs across 5 classes per §4.1-§4.5; F-AV catalog
-// §6.1-§6.7). Each finding here cites the F-AV ID + doc reference + the
-// load-bearing claim. The toy is closed-form arithmetic — we surface
-// cost-asymmetry inequalities and which defenses hold/don't, NOT
-// time-evolved adversarial simulation. That's the v0.5 sim-engine
-// scope; this is the v0.4-toy honest-findings extension.
+// Pinned to the canonical CIRISVerify Federation Threat Model (v1.1,
+// 2026-05-31; supersedes v1.0 2026-05-02). v1.1 closed three of the
+// four §3.3 structural gaps (A R1 timeliness + B Q1 CAP specified;
+// C C4 KEX shipped in v4.6.0) and added F-AV-RECONSIDER-DOS to the
+// §6.5 catalog with the v0.5 toy's cost-asymmetry numbers cited
+// verbatim. v0.6 toy reflects the new status of every finding.
 //
 // Methodology discipline per RATCHET (KNOWN_LIMITATIONS.md §4
 // "Correct Statement" template): every claim states its assumptions
@@ -1932,26 +1942,32 @@ fn fav_findings(s: &Scenario, lat: &LatencyEstimate) -> Vec<FavFinding> {
                 "Register key in region A, act, get revoked before replicating to region B. \
                  Attacker exploits the τ-window between revocation and worldwide propagation.",
             defense:
-                "Proposed Q1 bounded-staleness CAP: τ ≤ 60s normal / ≤ 300s partial-failure; \
-                 'most recent observed revocation wins' merge rule. Per Fed TM §3.3 Gap B: \
-                 spec UNFILLED today.",
+                "Q1 bounded-staleness CAP — SPECIFIED v1.1: quorum-write ⌈2N/3⌉ + bounded-\
+                 staleness reads (local iff staleness ≤ τ_partial; else transparent read-\
+                 amplification to fresh-quorum) + merge rule 'higher-quorum-weight wins' + \
+                 τ_normal ≤ 60s / τ_partial ≤ 300s composed with Gap A R1 bound.",
             limits: "L-06 correlation (multi-region clocks correlated by jurisdiction)",
             findings: vec![
                 ("Toy-estimated cross-region 2× RTT (proxy for rep-lag)".into(),
                     format!("{:.2}s", est_replication_lag_s)),
-                ("Proposed τ_normal".into(), format!("≤ {:.0}s", proposed_tau_normal_s)),
-                ("Proposed τ_partial".into(), format!("≤ {:.0}s", proposed_tau_partial_s)),
-                ("Toy estimate vs proposed normal bound".into(),
+                ("Contract τ_normal (v1.1)".into(), format!("≤ {:.0}s", proposed_tau_normal_s)),
+                ("Contract τ_partial (v1.1)".into(), format!("≤ {:.0}s", proposed_tau_partial_s)),
+                ("Toy estimate vs τ_normal contract".into(),
                     if est_replication_lag_s <= proposed_tau_normal_s {
                         format!("INSIDE bound ({:.0}× headroom)", proposed_tau_normal_s / est_replication_lag_s.max(0.001))
                     } else {
                         format!("OUTSIDE bound ({:.1}× over)", est_replication_lag_s / proposed_tau_normal_s)
                     }),
+                ("v1.1 status".into(),
+                    "Q1 CAP specified; downstream impl pending CIRISPersist#143 + CIRISRegistry#46".into()),
+                ("Cross-substrate test".into(),
+                    "CIRISConformance#7 Scenario 3 (partition + heal + merge-rule verification)".into()),
             ],
             verdict:
-                "Gap B (Q1 quorum / bounded-staleness CAP) is UNSPECIFIED. Toy's RTT-derived \
-                 estimate is inside the PROPOSED τ_normal bound — but the proposal is not the \
-                 spec. Until Q1 ships, the per-attack τ-window is unmeasurable per Fed TM §3.3.".into(),
+                "Gap B SPECIFIED v1.1: bounded-staleness CAP + merge rule contract is in place. \
+                 Toy's RTT estimate (0.39s) is 154× inside τ_normal — the bound is feasible at \
+                 substrate physics. Tier A9 downgraded TIER-HIGH → TIER-MED per v1.1; drops to \
+                 TIER-LOW once impl ships + Conformance#7 Scenario 3 passes.".into(),
         });
     }
 
@@ -2052,21 +2068,25 @@ fn fav_findings(s: &Scenario, lat: &LatencyEstimate) -> Vec<FavFinding> {
         let substrate_total = attacker_total * substrate_cost_multiplier;
         out.push(FavFinding {
             fav_id: "F-AV-RECONSIDER-DOS",
-            name: "P11 reconsideration weaponization (candidate new F-AV)",
+            name: "P11 reconsideration weaponization (catalog v1.1 §6.5)",
             doc_ref:
-                "NOT YET NAMED in Verify Fed TM. Closest existing: F-AV-FRONTRUN + F-AV-BRIBE \
-                 + F-AV-ROLLBACK. NodeCore MISSION.md §4.10 Reconsideration recursion bound.",
-            status: FavStatus::CandidateNew,
+                "Verify Fed TM v1.1 §6.5 (promoted from candidate to catalog 2026-05-31). \
+                 Toy's 5× cost-asymmetry numbers cited verbatim in the TM entry.",
+            status: FavStatus::Partial,
             mechanism:
                 "Adversary (organized group) files maximum-allowed reconsiderations against \
                  every moderation event affecting their bloc. Per-filing stake is sub-quorum cost; \
                  fresh-quorum recusal multiplies substrate burden. Goal: collapse moderation \
                  decision-throughput by saturating the appeals pipeline.",
             defense:
-                "MISSION.md §4.10 recursion bound (max 3 reconsiderations / SlashingAttestation \
-                 across 3 distinct evidence-package-hash × ground pairings) + RATCHET \
-                 harassment-pattern review on 3rd unsuccessful filing.",
-            limits: "L-02 (adaptive adversary times filings to maximize fresh-quorum churn)",
+                "Three additive defenses specified v1.1: (1) per-event rate limit \
+                 (RECONSIDERATION_RATE_LIMITED), (2) per-actor cumulative budget \
+                 (ACTOR_BUDGET_EXHAUSTED), (3) cross-event harassment-pattern review (RATCHET \
+                 signal on (requester_id, targeted_actor_id) clustering at sub-3-per-event \
+                 thresholds — fires BEFORE §4.10's existing 3rd-unsuccessful trigger).",
+            limits:
+                "L-02 (adaptive single-shot pacing evades cluster scoring) + L-05 (detector \
+                 needs sufficient filing history before firing)",
             findings: vec![
                 ("Stake per filing (CommonsCredits)".into(),
                     format!("{:.0} credits (proportional to severity)", stake_per_filing)),
@@ -2080,12 +2100,16 @@ fn fav_findings(s: &Scenario, lat: &LatencyEstimate) -> Vec<FavFinding> {
                         substrate_cost_multiplier, substrate_total)),
                 ("Throughput collapse @ N targeted events".into(),
                     "Decision throughput drops ~ (1 / (1 + filings × recusal_factor))".into()),
+                ("v1.1 status".into(),
+                    "Defenses specified; primitive impl in CIRISVerify v4.5.0+; downstream P11 \
+                     wiring at CIRISNodeCore#28; conformance scenario CIRISConformance#7 Scenario 1".into()),
             ],
             verdict:
-                "Cost asymmetry FAVORS attacker (substrate pays ~5× per filing). MISSION.md §4.10 \
-                 bounds attack to 9 filings/event but doesn't bound the per-event cost. Substrate \
-                 has no per-event harassment-rate limit; only per-SlashingAttestation. Should \
-                 propose to CIRISVerify Fed TM maintainer as F-AV-RECONSIDER-DOS.".into(),
+                "Promoted candidate → v1.1 catalog. Three additive defenses specified. Cost \
+                 asymmetry REMAINS 5× attacker-favoring at the bare protocol path, but per-event \
+                 + per-actor + cross-event detectors should collapse the effective throughput \
+                 hit. Pending CIRISNodeCore#28 P11 dispatcher consumer of the reconsider-DOS \
+                 budget trait surface (`ciris_verify_core::reconsider_dos`).".into(),
         });
     }
 
@@ -2114,23 +2138,35 @@ fn print_fav_findings(s: &Scenario, lat: &LatencyEstimate) {
         println!();
     }
 
-    println!("══ Live exposure — structural gaps named in CIRISVerify Fed TM §3.3 ══");
+    println!("══ Structural-gap status — CIRISVerify Fed TM §3.3 (v1.1 update 2026-05-31) ══");
     println!();
-    println!("  Gap A — R1 revocation timeliness contract:           UNSPECIFIED");
-    println!("    Affected F-AVs: F-AV-11, F-AV-12, F-AV-13, F-AV-ROLLBACK, F-AV-FRONTRUN");
-    println!("    Recommendation: Specify τ_propagate ≤ 60s normal / ≤ 300s partial");
+    println!("  Gap A — R1 revocation timeliness:                    ✓ SPECIFIED v1.1");
+    println!("    Contract: τ_normal ≤ 60s, τ_partial ≤ 300s, 'most recent observed wins'");
+    println!("    Affected F-AVs collapsed: F-AV-11/12/13/ROLLBACK/FRONTRUN");
+    println!("    Downstream impl: CIRISPersist#143 + CIRISRegistry#46");
+    println!("    Conformance: CIRISConformance#7 Scenario 3 (regression test)");
+    println!("    Tier: A8 R1 timeliness TIER-HIGH → TIER-MED (drops to LOW once impl + test pass)");
     println!();
-    println!("  Gap B — Q1 quorum / bounded-staleness CAP:           UNSPECIFIED");
-    println!("    Affected: replication-lag attacks; cross-region consistency");
-    println!("    Recommendation: Specify quorum-write contract + merge rules");
+    println!("  Gap B — Q1 quorum / bounded-staleness CAP:           ✓ SPECIFIED v1.1");
+    println!("    Contract: quorum-write ⌈2N/3⌉ + bounded-staleness reads + merge rule");
+    println!("    Affected F-AVs collapsed: F-AV-12/13/ROLLBACK");
+    println!("    Downstream impl: CIRISPersist#143 + CIRISRegistry#46 (same impl issue as Gap A)");
+    println!("    Tier: A9 Q1 bounded-staleness TIER-HIGH → TIER-MED (drops to LOW once impl + test pass)");
     println!();
-    println!("  Gap C — C4 hybrid KEX + KDF:                         UNFILLED");
-    println!("    Affected: federation peer-to-peer is harvest-now-decrypt-later vulnerable today");
-    println!("    Recommendation: Ship before federation transport carries plaintext");
+    println!("  Gap C — C4 hybrid KEX + KDF:                         ✓ SHIPPED v4.6.0");
+    println!("    Primitive: X25519 + ML-KEM-768 KEX + HKDF-SHA256 binding");
+    println!("    Domain sep: 'CIRIS-FED-KEX-V1' — composes with C2 hybrid-signing pattern");
+    println!("    Affected: harvest-now-decrypt-later vulnerability closed for new transport");
+    println!("    Tier: A4 forward secrecy TIER-HIGH → resolved");
+    println!("    Downstream consumer: CIRISEdge#54 FederationHandshake");
     println!();
-    println!("  Gap D — N1 + N2 (Reticulum + multi-medium transport): SPEC ONLY");
-    println!("    Affected: F-AV-ECLIPSE, F-AV-16, F-AV-RATCHET-DOS, F-AV-17 censorship");
-    println!("    Recommendation: CIRISEdge Phase 1 implementation");
+    println!("  Gap D — N1 + N2 (Reticulum + multi-medium transport): ◐ SPEC ONLY (still)");
+    println!("    Affected: F-AV-ECLIPSE, F-AV-16, F-AV-RATCHET-DOS, F-AV-17");
+    println!("    Pending: CIRISEdge Phase 1 implementation (CIRISEdge#53)");
+    println!();
+    println!("  Net v1.0 → v1.1: 3 of 4 structural gaps closed in one shipping cycle.");
+    println!("  Toy cited verbatim in TM v1.1 §3.3 Gap A: 'cross-ocean RTT (toy-derived");
+    println!("  from CIRISNodeCore scale_model.rs v0.5) is ~0.39s — 154× inside τ_normal.'");
     println!();
 
     println!("══ Out-of-scope (substrate has NO answer; simulator must NOT claim detection) ══");
@@ -2151,11 +2187,12 @@ fn print_fav_findings(s: &Scenario, lat: &LatencyEstimate) {
 }
 
 fn main() {
-    println!("CIRIS Federation Scaling Model — toy v0.5 (+ F-AV cost-asymmetry findings)");
+    println!("CIRIS Federation Scaling Model — toy v0.6 (post Verify Fed TM v1.1)");
     println!("Empirical baseline : Verify v2.8.0 + Edge v0.10.0 + Persist v3.3.0");
-    println!("Substrate triple   : keyring v4.4.3 + persist v3.6.9 + edge v1.1.3 (macOS cohab closed)");
+    println!("Substrate triple   : keyring v4.4.3 + persist v3.6.9 + edge v1.1.3 (Conformance pin)");
+    println!("Verify HEAD        : v4.6.0 — Gap C hybrid KEX (X25519+ML-KEM-768) SHIPPED");
     println!("Regional realism   : UN WPP 2024 + GSMA Mobile Economy 2024 + ITU 2024 + IEA 2024");
-    println!("Threat-model anchor: CIRISVerify Fed TM v1.0 (31 F-AVs) + RATCHET L-01..L-08");
+    println!("Threat-model anchor: CIRISVerify Fed TM v1.1 (2026-05-31 — 3/4 §3.3 gaps closed)");
     println!();
     println!("Discipline:");
     println!("  • Replication: trust(source) ≥ threshold AND capacity_available");
