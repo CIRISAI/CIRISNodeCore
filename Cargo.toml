@@ -38,7 +38,7 @@ crate-type = ["cdylib", "rlib"]
 # DEPLOYMENT NOTE: persist's ciris-keyring `tpm` feature unification
 # still forces system `libtss2` (`libtss2-dev` for builds) onto every
 # co-resident Linux build / host. See CIRISEdge#12.
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v3.6.4", version = "3", features = ["cirisnode", "cirisaudit", "postgres", "sqlite"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v3.6.9", version = "3", features = ["cirisnode", "cirisaudit", "postgres", "sqlite"] }
 
 # Edge v0.13.1 — cohabitation triple anchor. Consumed surface:
 #  - `Edge` runtime + `MessageType` registry (federation-consensus
@@ -46,7 +46,7 @@ ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v3.6.4
 #  - PyO3: `PyEdge` with `edge_handle()` Rust-tier `Arc<Edge>` accessor
 #    (unblocks the `#[pyfunction]` form of cohabitation install)
 #  - `init_edge_runtime(engine: Bound<'_, PyAny>)` injection pattern
-ciris-edge = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v1.0.1", version = "1" }
+ciris-edge = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v1.1.3", version = "1" }
 
 # Serde + canonicalization. Canonicalization itself routes through
 # persist's `Engine.canonicalize_envelope_for_signing` — see
@@ -92,7 +92,7 @@ uuid = { version = "1", features = ["v4"] }
 # ciris-keyring is reached via the BlobStorage trait surface
 # (evict_actor takes `&dyn ciris_keyring::HardwareSigner`); only the
 # in-memory test mocks need it directly.
-ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v4.4.2", version = "4" }
+ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v4.4.3", version = "4" }
 
 [features]
 default = []
@@ -123,10 +123,17 @@ python = ["dep:pyo3", "ciris-persist/pyo3", "ciris-edge/pyo3"]
 # edge's pin ever decouples sqlite. NodeCore#6.
 sqlite = ["ciris-persist/sqlite"]
 
-# Substrate triple aligned: persist v3.6.3 + edge v1.0.1 + keyring
-# v4.4.2 cohabit at this pin without local path patches. The earlier
-# v3.3.0 / v0.17.1 path-patch convention is no longer needed — edge
-# v1.0.1 ships the persist v3.6.x HardwareSigner trait coordination
-# directly, and persist v3.6.3 ships the multimedia-tier read
-# accessors (list_takedowns_for / list_key_grants_for /
-# retire_key_grants) that the integration-test mocks need.
+# Substrate triple aligned: persist v3.6.9 + edge v1.1.3 + keyring
+# v4.4.3 cohabit at this pin without local path patches. The triple
+# bumped to close the macOS libsqlite3 cohabitation cascade:
+#   - CIRISVerify#45 — workspace rusqlite drops macOS `bundled`,
+#     uses Apple-shipped /usr/lib/libsqlite3.dylib
+#   - CIRISPersist#141 — macOS arm64 wheel statically bundled
+#     libsqlite3 (silent activator was verify-core's bundled-on-macOS
+#     feature); v3.6.9 bumps verify pin + adds macOS Mach-O parity
+#     CI gate
+#   - CIRISEdge#50 — reopened on darwin and now closed end-to-end via
+#     the cascade. Also picks up v1.1.0 routing-table FFI Leviculum
+#     gap-stub flips (#44) + v1.1.1/v1.1.2 scrub_signer routing
+#     (mirrors persist #137/#138 select_signer headless-keychain path).
+# Per CIRISConformance matrix (canonical cohabitation contract).
