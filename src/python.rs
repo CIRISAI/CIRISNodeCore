@@ -475,8 +475,7 @@ fn install_node_mode_serving(
     // strictly synchronous.
     let cap_obj = engine.call_method0("blob_storage_capsule")?;
     let cap: &Bound<'_, PyCapsule> = cap_obj.cast::<PyCapsule>()?;
-    let name: &CStr = CStr::from_bytes_with_nul(b"ciris_persist::blob_storage\0")
-        .expect("static tag has no interior NUL");
+    let name: &CStr = c"ciris_persist::blob_storage";
     let raw: NonNull<std::ffi::c_void> = cap.pointer_checked(Some(name))?;
     // SAFETY: `pointer_checked` returned Ok with the pinned name tag
     // `ciris_persist::blob_storage`, which CIRISPersist#115 guarantees
@@ -486,8 +485,7 @@ fn install_node_mode_serving(
     // so the pointer remains valid for the strictly synchronous deref
     // window.
     #[allow(unsafe_code)]
-    let dispatch: BackendDispatch =
-        unsafe { raw.cast::<BackendDispatch>().as_ref() }.clone();
+    let dispatch: BackendDispatch = unsafe { raw.cast::<BackendDispatch>().as_ref() }.clone();
 
     let edge_handle = edge.borrow().edge_handle();
     let runtime = current_runtime_handle().ok_or_else(|| {
@@ -540,9 +538,7 @@ fn effective_trust_set(
     let py = engine.py();
     let cap_obj = engine.call_method0("federation_directory_capsule")?;
     let cap: &Bound<'_, PyCapsule> = cap_obj.cast::<PyCapsule>()?;
-    let name: &CStr =
-        CStr::from_bytes_with_nul(b"ciris_persist::federation_directory\0")
-            .expect("static tag has no interior NUL");
+    let name: &CStr = c"ciris_persist::federation_directory";
     let raw: NonNull<std::ffi::c_void> = cap.pointer_checked(Some(name))?;
     // SAFETY: pinned name tag matches the persist capsule contract
     // (CIRISPersist#95). The pointer remains valid for the lifetime
@@ -550,8 +546,7 @@ fn effective_trust_set(
     // owned `BackendDispatch` so the borrow lifetime ends before
     // `py.detach` releases the GIL.
     #[allow(unsafe_code)]
-    let dispatch: BackendDispatch =
-        unsafe { raw.cast::<BackendDispatch>().as_ref() }.clone();
+    let dispatch: BackendDispatch = unsafe { raw.cast::<BackendDispatch>().as_ref() }.clone();
 
     let runtime = current_runtime_handle().ok_or_else(|| {
         PyRuntimeError::new_err(
@@ -564,11 +559,11 @@ fn effective_trust_set(
     let set = py
         .detach(|| {
             runtime.block_on(async move {
-                let directory: &dyn ciris_persist::federation::FederationDirectory =
-                    match &dispatch {
-                        BackendDispatch::Postgres(b) => b.as_ref(),
-                        BackendDispatch::Sqlite(b) => b.as_ref(),
-                    };
+                let directory: &dyn ciris_persist::federation::FederationDirectory = match &dispatch
+                {
+                    BackendDispatch::Postgres(b) => b.as_ref(),
+                    BackendDispatch::Sqlite(b) => b.as_ref(),
+                };
                 crate::trust_depth::effective_trust_set(directory, &root_for_async, depth).await
             })
         })
@@ -597,13 +592,10 @@ fn admits_at_depth(
     let py = engine.py();
     let cap_obj = engine.call_method0("federation_directory_capsule")?;
     let cap: &Bound<'_, PyCapsule> = cap_obj.cast::<PyCapsule>()?;
-    let name: &CStr =
-        CStr::from_bytes_with_nul(b"ciris_persist::federation_directory\0")
-            .expect("static tag has no interior NUL");
+    let name: &CStr = c"ciris_persist::federation_directory";
     let raw: NonNull<std::ffi::c_void> = cap.pointer_checked(Some(name))?;
     #[allow(unsafe_code)]
-    let dispatch: BackendDispatch =
-        unsafe { raw.cast::<BackendDispatch>().as_ref() }.clone();
+    let dispatch: BackendDispatch = unsafe { raw.cast::<BackendDispatch>().as_ref() }.clone();
 
     let runtime = current_runtime_handle().ok_or_else(|| {
         PyRuntimeError::new_err(
@@ -614,18 +606,12 @@ fn admits_at_depth(
 
     py.detach(|| {
         runtime.block_on(async move {
-            let directory: &dyn ciris_persist::federation::FederationDirectory =
-                match &dispatch {
-                    BackendDispatch::Postgres(b) => b.as_ref(),
-                    BackendDispatch::Sqlite(b) => b.as_ref(),
-                };
-            crate::trust_depth::admits_at_depth(
-                directory,
-                &root_key_id,
-                &source_key_id,
-                depth,
-            )
-            .await
+            let directory: &dyn ciris_persist::federation::FederationDirectory = match &dispatch {
+                BackendDispatch::Postgres(b) => b.as_ref(),
+                BackendDispatch::Sqlite(b) => b.as_ref(),
+            };
+            crate::trust_depth::admits_at_depth(directory, &root_key_id, &source_key_id, depth)
+                .await
         })
     })
     .map_err(|e| PyRuntimeError::new_err(format!("admits_at_depth: {e}")))
@@ -643,10 +629,7 @@ fn admits_at_depth(
 // Moderation + delegation builders return: `{ "payload": {...} }`
 // =============================================================
 
-fn build_multimedia_result(
-    payload: serde_json::Value,
-    sha256: [u8; 32],
-) -> PyResult<String> {
+fn build_multimedia_result(payload: serde_json::Value, sha256: [u8; 32]) -> PyResult<String> {
     let result = serde_json::json!({
         "payload": payload,
         "content_sha256": crate::ingest::hex_encode(&sha256),
@@ -880,8 +863,8 @@ fn evaluate_consensus_protocol(
     signers_json: String,
     founder_keys_json: String,
 ) -> PyResult<String> {
-    let current_members: Vec<String> =
-        serde_json::from_str(&current_members_json).map_err(|e| json_err("current_members_json", e))?;
+    let current_members: Vec<String> = serde_json::from_str(&current_members_json)
+        .map_err(|e| json_err("current_members_json", e))?;
     let signers: Vec<String> =
         serde_json::from_str(&signers_json).map_err(|e| json_err("signers_json", e))?;
     let founder_keys: Vec<String> =
@@ -966,8 +949,8 @@ fn build_moderation_event_payload(
     if rationale.trim().is_empty() {
         return Err(PyValueError::new_err("rationale must not be empty"));
     }
-    let evidence_refs: serde_json::Value = serde_json::from_str(&evidence_refs_json)
-        .map_err(|e| json_err("evidence_refs_json", e))?;
+    let evidence_refs: serde_json::Value =
+        serde_json::from_str(&evidence_refs_json).map_err(|e| json_err("evidence_refs_json", e))?;
     if !matches!(evidence_refs, serde_json::Value::Array(ref a) if !a.is_empty()) {
         return Err(PyValueError::new_err(
             "evidence_refs must be a non-empty JSON array",
@@ -1133,8 +1116,14 @@ fn ciris_node_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // CEG 0.6 consent ceremony (NodeCore#29)
     m.add_function(wrap_pyfunction!(build_consent_record_payload, m)?)?;
     m.add_function(wrap_pyfunction!(build_bilateral_pair_id, m)?)?;
-    m.add_function(wrap_pyfunction!(build_bilateral_partnership_request_payload, m)?)?;
-    m.add_function(wrap_pyfunction!(build_bilateral_partnership_accept_payload, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        build_bilateral_partnership_request_payload,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        build_bilateral_partnership_accept_payload,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(canonical_subject_hash, m)?)?;
     // CEG 0.7 identity_occurrence + family + consensus (NodeCore#30)
     m.add_function(wrap_pyfunction!(build_identity_occurrence_payload, m)?)?;

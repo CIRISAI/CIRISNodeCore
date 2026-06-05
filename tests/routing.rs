@@ -19,11 +19,41 @@ fn rc(id: &str, expertise: f64) -> RoutableContributor {
 
 fn dir() -> HashMap<&'static str, ContributorMetadata> {
     [
-        ("alice", ContributorMetadata { jurisdiction: "ET".into(), operator: "org_a".into() }),
-        ("bob",   ContributorMetadata { jurisdiction: "KE".into(), operator: "org_b".into() }),
-        ("carol", ContributorMetadata { jurisdiction: "US".into(), operator: "org_a".into() }),
-        ("dan",   ContributorMetadata { jurisdiction: "ET".into(), operator: "org_c".into() }),
-        ("eve",   ContributorMetadata { jurisdiction: "KE".into(), operator: "org_d".into() }),
+        (
+            "alice",
+            ContributorMetadata {
+                jurisdiction: "ET".into(),
+                operator: "org_a".into(),
+            },
+        ),
+        (
+            "bob",
+            ContributorMetadata {
+                jurisdiction: "KE".into(),
+                operator: "org_b".into(),
+            },
+        ),
+        (
+            "carol",
+            ContributorMetadata {
+                jurisdiction: "US".into(),
+                operator: "org_a".into(),
+            },
+        ),
+        (
+            "dan",
+            ContributorMetadata {
+                jurisdiction: "ET".into(),
+                operator: "org_c".into(),
+            },
+        ),
+        (
+            "eve",
+            ContributorMetadata {
+                jurisdiction: "KE".into(),
+                operator: "org_d".into(),
+            },
+        ),
     ]
     .into_iter()
     .collect()
@@ -35,7 +65,12 @@ async fn none_policy_takes_top_by_expertise() {
     mock.set_routable(
         "mental_health",
         "am",
-        vec![rc("alice", 0.9), rc("bob", 0.5), rc("carol", 0.7), rc("dan", 0.8)],
+        vec![
+            rc("alice", 0.9),
+            rc("bob", 0.5),
+            rc("carol", 0.7),
+            rc("dan", 0.8),
+        ],
     );
     let meta = dir();
     let lookup = |id: &str| meta.get(id).cloned();
@@ -49,7 +84,10 @@ async fn none_policy_takes_top_by_expertise() {
         .await
         .unwrap();
 
-    assert_eq!(outcome.routed, vec!["alice".to_string(), "dan".into(), "carol".into()]);
+    assert_eq!(
+        outcome.routed,
+        vec!["alice".to_string(), "dan".into(), "carol".into()]
+    );
     assert!(outcome.min_met);
 }
 
@@ -101,9 +139,27 @@ async fn jurisdictional_policy_cycles_when_short_on_jurisdictions() {
         vec![rc("alice", 0.9), rc("dan", 0.85), rc("frank", 0.6)],
     );
     let meta: HashMap<_, _> = [
-        ("alice", ContributorMetadata { jurisdiction: "ET".into(), operator: "a".into() }),
-        ("dan", ContributorMetadata { jurisdiction: "ET".into(), operator: "b".into() }),
-        ("frank", ContributorMetadata { jurisdiction: "ET".into(), operator: "c".into() }),
+        (
+            "alice",
+            ContributorMetadata {
+                jurisdiction: "ET".into(),
+                operator: "a".into(),
+            },
+        ),
+        (
+            "dan",
+            ContributorMetadata {
+                jurisdiction: "ET".into(),
+                operator: "b".into(),
+            },
+        ),
+        (
+            "frank",
+            ContributorMetadata {
+                jurisdiction: "ET".into(),
+                operator: "c".into(),
+            },
+        ),
     ]
     .into_iter()
     .collect();
@@ -119,7 +175,10 @@ async fn jurisdictional_policy_cycles_when_short_on_jurisdictions() {
         .unwrap();
     // Sweep 1: alice (ET) — exhausts the ET bucket. Sweep 2: dan (ET).
     // Sweep 3: frank (ET).
-    assert_eq!(outcome.routed, vec!["alice".to_string(), "dan".into(), "frank".into()]);
+    assert_eq!(
+        outcome.routed,
+        vec!["alice".to_string(), "dan".into(), "frank".into()]
+    );
     assert_eq!(outcome.jurisdictions_distinct, vec!["ET".to_string()]);
 }
 
@@ -191,7 +250,9 @@ async fn empty_routable_returns_empty_routing() {
 #[tokio::test]
 async fn default_preferences_apply_when_none_passed() {
     let mock = MockEngine::new();
-    let many: Vec<_> = (0..20).map(|i| rc(&format!("c{i}"), 1.0 - (i as f64 / 100.0))).collect();
+    let many: Vec<_> = (0..20)
+        .map(|i| rc(&format!("c{i}"), 1.0 - (i as f64 / 100.0)))
+        .collect();
     mock.set_routable("mental_health", "am", many);
     let lookup = |_id: &str| None::<ContributorMetadata>;
 
@@ -204,12 +265,12 @@ async fn default_preferences_apply_when_none_passed() {
 
 // ── route_deferral integration (composes trust + diversity) ─────────────
 
-use ciris_node_core::routing::route_deferral;
-use ciris_node_core::substrate::{Cell, ContributionType};
-use ciris_node_core::trust::TrustPurpose;
 use ciris_node_core::payloads::registry_vouch::{
     RegistryVouchPayload, SUBJECT_KIND as VOUCH_SUBJECT_KIND,
 };
+use ciris_node_core::routing::route_deferral;
+use ciris_node_core::substrate::{Cell, ContributionType};
+use ciris_node_core::trust::TrustPurpose;
 
 fn make_vouch_envelope(
     registry: &str,
@@ -270,9 +331,9 @@ async fn route_deferral_composes_trust_and_vouches() {
     let mock = MockEngine::new();
     setup_routing_world(&mock).await;
 
-    let classifier = |_ctx: &str| Ok::<_, ciris_node_core::substrate::SubstrateError>(
-        "medical_deferral".to_string(),
-    );
+    let classifier = |_ctx: &str| {
+        Ok::<_, ciris_node_core::substrate::SubstrateError>("medical_deferral".to_string())
+    };
     let no_metadata = |_id: &str| None::<ContributorMetadata>;
 
     let decision = route_deferral(
@@ -311,21 +372,14 @@ async fn route_deferral_bounded_by_max_responders() {
         max_responders: Some(2),
         diversity: Some(DiversityPolicy::None),
     };
-    let classifier = |_ctx: &str| Ok::<_, ciris_node_core::substrate::SubstrateError>(
-        "medical_deferral".to_string(),
-    );
+    let classifier = |_ctx: &str| {
+        Ok::<_, ciris_node_core::substrate::SubstrateError>("medical_deferral".to_string())
+    };
     let no_metadata = |_id: &str| None::<ContributorMetadata>;
 
-    let decision = route_deferral(
-        &mock,
-        &mock,
-        classifier,
-        "x",
-        Some(&prefs),
-        &no_metadata,
-    )
-    .await
-    .unwrap();
+    let decision = route_deferral(&mock, &mock, classifier, "x", Some(&prefs), &no_metadata)
+        .await
+        .unwrap();
     assert_eq!(decision.selected_resolvers.len(), 2);
     assert!(decision.diversity_summary.min_met);
 }
@@ -334,20 +388,13 @@ async fn route_deferral_bounded_by_max_responders() {
 async fn route_deferral_with_no_trusted_registries_returns_empty() {
     let mock = MockEngine::new();
     // No grants, no vouches.
-    let classifier = |_ctx: &str| Ok::<_, ciris_node_core::substrate::SubstrateError>(
-        "medical_deferral".to_string(),
-    );
+    let classifier = |_ctx: &str| {
+        Ok::<_, ciris_node_core::substrate::SubstrateError>("medical_deferral".to_string())
+    };
     let no_metadata = |_id: &str| None::<ContributorMetadata>;
-    let decision = route_deferral(
-        &mock,
-        &mock,
-        classifier,
-        "x",
-        None,
-        &no_metadata,
-    )
-    .await
-    .unwrap();
+    let decision = route_deferral(&mock, &mock, classifier, "x", None, &no_metadata)
+        .await
+        .unwrap();
     assert!(decision.registries_consulted.is_empty());
     assert!(decision.selected_resolvers.is_empty());
 }
@@ -357,20 +404,13 @@ async fn route_deferral_filters_to_classifier_domain() {
     let mock = MockEngine::new();
     setup_routing_world(&mock).await;
     // Classifier returns a domain the registries don't cover.
-    let classifier = |_ctx: &str| Ok::<_, ciris_node_core::substrate::SubstrateError>(
-        "legal_review".to_string(),
-    );
+    let classifier = |_ctx: &str| {
+        Ok::<_, ciris_node_core::substrate::SubstrateError>("legal_review".to_string())
+    };
     let no_metadata = |_id: &str| None::<ContributorMetadata>;
-    let decision = route_deferral(
-        &mock,
-        &mock,
-        classifier,
-        "x",
-        None,
-        &no_metadata,
-    )
-    .await
-    .unwrap();
+    let decision = route_deferral(&mock, &mock, classifier, "x", None, &no_metadata)
+        .await
+        .unwrap();
     assert!(decision.registries_consulted.is_empty());
     assert!(decision.selected_resolvers.is_empty());
 }

@@ -2,6 +2,16 @@
 //!
 //! Run: `cargo run --example scale_model`
 //!
+// This is a standalone analytical toy, not library code. It deliberately:
+//   - keeps documentation-only struct fields (device specs, rollup fields)
+//     that aren't all read by the current print paths (`dead_code`), and
+//   - uses `effective_R` to match the FSD's mathematical notation for the
+//     effective trust-set radius (`non_snake_case`).
+// Both are intentional for fidelity to the spec; allow them here so the
+// `-D warnings` CI gate stays green without distorting the model.
+#![allow(dead_code, non_snake_case, unused_variables)]
+#![allow(clippy::manual_clamp, clippy::type_complexity)]
+//!
 //! **v0.6 — post Verify Fed TM v1.1.** Adversarial findings module
 //! (added in v0.5) updated to reflect Verify Fed TM v1.1 (2026-05-31):
 //! 3 of 4 §3.3 structural gaps closed in one shipping cycle (Gap A R1
@@ -200,34 +210,64 @@ struct DeviceSpec {
 fn device_spec(c: DeviceClass) -> DeviceSpec {
     match c {
         DeviceClass::Phone => DeviceSpec {
-            label: "phone", idle_w: 2.5, marginal_share: 0.05,
-            always_on_factor: 0.15, efficiency_factor: 0.5, net_new: false,
-            typical_storage_gb: 128.0, typical_uplink_mbps: 25.0,
+            label: "phone",
+            idle_w: 2.5,
+            marginal_share: 0.05,
+            always_on_factor: 0.15,
+            efficiency_factor: 0.5,
+            net_new: false,
+            typical_storage_gb: 128.0,
+            typical_uplink_mbps: 25.0,
         },
         DeviceClass::Laptop => DeviceSpec {
-            label: "laptop", idle_w: 10.0, marginal_share: 0.10,
-            always_on_factor: 0.20, efficiency_factor: 0.4, net_new: false,
-            typical_storage_gb: 512.0, typical_uplink_mbps: 100.0,
+            label: "laptop",
+            idle_w: 10.0,
+            marginal_share: 0.10,
+            always_on_factor: 0.20,
+            efficiency_factor: 0.4,
+            net_new: false,
+            typical_storage_gb: 512.0,
+            typical_uplink_mbps: 100.0,
         },
         DeviceClass::Tablet => DeviceSpec {
-            label: "tablet", idle_w: 5.0, marginal_share: 0.07,
-            always_on_factor: 0.10, efficiency_factor: 0.45, net_new: false,
-            typical_storage_gb: 128.0, typical_uplink_mbps: 50.0,
+            label: "tablet",
+            idle_w: 5.0,
+            marginal_share: 0.07,
+            always_on_factor: 0.10,
+            efficiency_factor: 0.45,
+            net_new: false,
+            typical_storage_gb: 128.0,
+            typical_uplink_mbps: 50.0,
         },
         DeviceClass::ArmBox => DeviceSpec {
-            label: "ARM mini-PC", idle_w: 5.0, marginal_share: 1.0,
-            always_on_factor: 1.0, efficiency_factor: 0.6, net_new: true,
-            typical_storage_gb: 1024.0, typical_uplink_mbps: 1000.0,
+            label: "ARM mini-PC",
+            idle_w: 5.0,
+            marginal_share: 1.0,
+            always_on_factor: 1.0,
+            efficiency_factor: 0.6,
+            net_new: true,
+            typical_storage_gb: 1024.0,
+            typical_uplink_mbps: 1000.0,
         },
         DeviceClass::HomeX86 => DeviceSpec {
-            label: "home x86", idle_w: 25.0, marginal_share: 1.0,
-            always_on_factor: 1.0, efficiency_factor: 0.4, net_new: true,
-            typical_storage_gb: 4096.0, typical_uplink_mbps: 1000.0,
+            label: "home x86",
+            idle_w: 25.0,
+            marginal_share: 1.0,
+            always_on_factor: 1.0,
+            efficiency_factor: 0.4,
+            net_new: true,
+            typical_storage_gb: 4096.0,
+            typical_uplink_mbps: 1000.0,
         },
         DeviceClass::OldDesktop => DeviceSpec {
-            label: "old desktop", idle_w: 60.0, marginal_share: 1.0,
-            always_on_factor: 1.0, efficiency_factor: 0.2, net_new: false,
-            typical_storage_gb: 1024.0, typical_uplink_mbps: 200.0,
+            label: "old desktop",
+            idle_w: 60.0,
+            marginal_share: 1.0,
+            always_on_factor: 1.0,
+            efficiency_factor: 0.2,
+            net_new: false,
+            typical_storage_gb: 1024.0,
+            typical_uplink_mbps: 200.0,
         },
     }
 }
@@ -240,7 +280,9 @@ struct DeviceMix {
 
 impl DeviceMix {
     fn new(items: &[(DeviceClass, f64)]) -> Self {
-        Self { items: items.to_vec() }
+        Self {
+            items: items.to_vec(),
+        }
     }
 }
 
@@ -258,24 +300,38 @@ enum FleetStyle {
 fn fleet_mix(style: FleetStyle, tier: Tier) -> DeviceMix {
     use DeviceClass::*;
     match (style, tier) {
-        (FleetStyle::PhoneFirst, Tier::Client) =>
-            DeviceMix::new(&[(Phone, 0.95), (Laptop, 0.05)]),
-        (FleetStyle::PhoneFirst, Tier::Proxy) =>
-            DeviceMix::new(&[(Phone, 0.70), (Laptop, 0.30)]),
-        (FleetStyle::PhoneFirst, Tier::Server) =>
-            DeviceMix::new(&[(Phone, 0.05), (Laptop, 0.15), (ArmBox, 0.70), (HomeX86, 0.05), (OldDesktop, 0.05)]),
-        (FleetStyle::Realistic2026, Tier::Client) =>
-            DeviceMix::new(&[(Phone, 0.85), (Laptop, 0.15)]),
-        (FleetStyle::Realistic2026, Tier::Proxy) =>
-            DeviceMix::new(&[(Phone, 0.50), (Laptop, 0.40), (ArmBox, 0.10)]),
-        (FleetStyle::Realistic2026, Tier::Server) =>
-            DeviceMix::new(&[(Phone, 0.05), (Laptop, 0.20), (ArmBox, 0.40), (HomeX86, 0.25), (OldDesktop, 0.10)]),
-        (FleetStyle::Homelab, Tier::Client) =>
-            DeviceMix::new(&[(Phone, 0.70), (Laptop, 0.30)]),
-        (FleetStyle::Homelab, Tier::Proxy) =>
-            DeviceMix::new(&[(Phone, 0.30), (Laptop, 0.40), (ArmBox, 0.30)]),
-        (FleetStyle::Homelab, Tier::Server) =>
-            DeviceMix::new(&[(Laptop, 0.10), (ArmBox, 0.30), (HomeX86, 0.45), (OldDesktop, 0.15)]),
+        (FleetStyle::PhoneFirst, Tier::Client) => DeviceMix::new(&[(Phone, 0.95), (Laptop, 0.05)]),
+        (FleetStyle::PhoneFirst, Tier::Proxy) => DeviceMix::new(&[(Phone, 0.70), (Laptop, 0.30)]),
+        (FleetStyle::PhoneFirst, Tier::Server) => DeviceMix::new(&[
+            (Phone, 0.05),
+            (Laptop, 0.15),
+            (ArmBox, 0.70),
+            (HomeX86, 0.05),
+            (OldDesktop, 0.05),
+        ]),
+        (FleetStyle::Realistic2026, Tier::Client) => {
+            DeviceMix::new(&[(Phone, 0.85), (Laptop, 0.15)])
+        }
+        (FleetStyle::Realistic2026, Tier::Proxy) => {
+            DeviceMix::new(&[(Phone, 0.50), (Laptop, 0.40), (ArmBox, 0.10)])
+        }
+        (FleetStyle::Realistic2026, Tier::Server) => DeviceMix::new(&[
+            (Phone, 0.05),
+            (Laptop, 0.20),
+            (ArmBox, 0.40),
+            (HomeX86, 0.25),
+            (OldDesktop, 0.10),
+        ]),
+        (FleetStyle::Homelab, Tier::Client) => DeviceMix::new(&[(Phone, 0.70), (Laptop, 0.30)]),
+        (FleetStyle::Homelab, Tier::Proxy) => {
+            DeviceMix::new(&[(Phone, 0.30), (Laptop, 0.40), (ArmBox, 0.30)])
+        }
+        (FleetStyle::Homelab, Tier::Server) => DeviceMix::new(&[
+            (Laptop, 0.10),
+            (ArmBox, 0.30),
+            (HomeX86, 0.45),
+            (OldDesktop, 0.15),
+        ]),
     }
 }
 
@@ -299,7 +355,7 @@ enum Region {
     EastAsia,
     SouthAsia,
     SoutheastAsia,
-    Mena,            // Middle East + North Africa
+    Mena, // Middle East + North Africa
     SubSaharanAfrica,
     LatinAmerica,
     Oceania,
@@ -308,10 +364,10 @@ enum Region {
 #[derive(Debug, Clone, Copy)]
 struct RegionStats {
     label: &'static str,
-    population_2026: f64,          // millions (UN WPP 2024 medium variant)
-    smartphone_penetration: f64,   // fraction with smartphones (GSMA 2024)
-    broadband_penetration: f64,    // 4G+ or fixed ≥ 25 Mbps (ITU 2024)
-    grid_co2_kg_per_kwh: f64,      // regional grid intensity (IEA 2024)
+    population_2026: f64,        // millions (UN WPP 2024 medium variant)
+    smartphone_penetration: f64, // fraction with smartphones (GSMA 2024)
+    broadband_penetration: f64,  // 4G+ or fixed ≥ 25 Mbps (ITU 2024)
+    grid_co2_kg_per_kwh: f64,    // regional grid intensity (IEA 2024)
     /// Fraction of population realistically capable of hosting an
     /// always-on L1 server — needs phone/PC + persistent broadband +
     /// stable grid power. Conservative under-estimate.
@@ -321,58 +377,91 @@ struct RegionStats {
 fn region_stats(r: Region) -> RegionStats {
     match r {
         Region::NorthAmerica => RegionStats {
-            label: "North America", population_2026: 378.0,
-            smartphone_penetration: 0.85, broadband_penetration: 0.82,
-            grid_co2_kg_per_kwh: 0.38, home_server_capable: 0.75,
+            label: "North America",
+            population_2026: 378.0,
+            smartphone_penetration: 0.85,
+            broadband_penetration: 0.82,
+            grid_co2_kg_per_kwh: 0.38,
+            home_server_capable: 0.75,
         },
         Region::Europe => RegionStats {
-            label: "Europe", population_2026: 743.0,
-            smartphone_penetration: 0.83, broadband_penetration: 0.77,
-            grid_co2_kg_per_kwh: 0.27, home_server_capable: 0.70,
+            label: "Europe",
+            population_2026: 743.0,
+            smartphone_penetration: 0.83,
+            broadband_penetration: 0.77,
+            grid_co2_kg_per_kwh: 0.27,
+            home_server_capable: 0.70,
         },
         Region::EastAsia => RegionStats {
-            label: "East Asia", population_2026: 1660.0,
-            smartphone_penetration: 0.79, broadband_penetration: 0.73,
-            grid_co2_kg_per_kwh: 0.51, home_server_capable: 0.65,
+            label: "East Asia",
+            population_2026: 1660.0,
+            smartphone_penetration: 0.79,
+            broadband_penetration: 0.73,
+            grid_co2_kg_per_kwh: 0.51,
+            home_server_capable: 0.65,
         },
         Region::SouthAsia => RegionStats {
-            label: "South Asia", population_2026: 2010.0,
-            smartphone_penetration: 0.61, broadband_penetration: 0.42,
-            grid_co2_kg_per_kwh: 0.71, home_server_capable: 0.25,
+            label: "South Asia",
+            population_2026: 2010.0,
+            smartphone_penetration: 0.61,
+            broadband_penetration: 0.42,
+            grid_co2_kg_per_kwh: 0.71,
+            home_server_capable: 0.25,
         },
         Region::SoutheastAsia => RegionStats {
-            label: "Southeast Asia", population_2026: 695.0,
-            smartphone_penetration: 0.70, broadband_penetration: 0.55,
-            grid_co2_kg_per_kwh: 0.55, home_server_capable: 0.35,
+            label: "Southeast Asia",
+            population_2026: 695.0,
+            smartphone_penetration: 0.70,
+            broadband_penetration: 0.55,
+            grid_co2_kg_per_kwh: 0.55,
+            home_server_capable: 0.35,
         },
         Region::Mena => RegionStats {
-            label: "MENA", population_2026: 581.0,
-            smartphone_penetration: 0.66, broadband_penetration: 0.58,
-            grid_co2_kg_per_kwh: 0.55, home_server_capable: 0.40,
+            label: "MENA",
+            population_2026: 581.0,
+            smartphone_penetration: 0.66,
+            broadband_penetration: 0.58,
+            grid_co2_kg_per_kwh: 0.55,
+            home_server_capable: 0.40,
         },
         Region::SubSaharanAfrica => RegionStats {
-            label: "Sub-Saharan Africa", population_2026: 1280.0,
-            smartphone_penetration: 0.52, broadband_penetration: 0.28,
-            grid_co2_kg_per_kwh: 0.45, home_server_capable: 0.12,
+            label: "Sub-Saharan Africa",
+            population_2026: 1280.0,
+            smartphone_penetration: 0.52,
+            broadband_penetration: 0.28,
+            grid_co2_kg_per_kwh: 0.45,
+            home_server_capable: 0.12,
         },
         Region::LatinAmerica => RegionStats {
-            label: "Latin America", population_2026: 660.0,
-            smartphone_penetration: 0.72, broadband_penetration: 0.65,
-            grid_co2_kg_per_kwh: 0.21, home_server_capable: 0.45,
+            label: "Latin America",
+            population_2026: 660.0,
+            smartphone_penetration: 0.72,
+            broadband_penetration: 0.65,
+            grid_co2_kg_per_kwh: 0.21,
+            home_server_capable: 0.45,
         },
         Region::Oceania => RegionStats {
-            label: "Oceania", population_2026: 45.0,
-            smartphone_penetration: 0.80, broadband_penetration: 0.75,
-            grid_co2_kg_per_kwh: 0.55, home_server_capable: 0.65,
+            label: "Oceania",
+            population_2026: 45.0,
+            smartphone_penetration: 0.80,
+            broadband_penetration: 0.75,
+            grid_co2_kg_per_kwh: 0.55,
+            home_server_capable: 0.65,
         },
     }
 }
 
 fn all_regions() -> [Region; 9] {
     [
-        Region::NorthAmerica, Region::Europe, Region::EastAsia,
-        Region::SouthAsia, Region::SoutheastAsia, Region::Mena,
-        Region::SubSaharanAfrica, Region::LatinAmerica, Region::Oceania,
+        Region::NorthAmerica,
+        Region::Europe,
+        Region::EastAsia,
+        Region::SouthAsia,
+        Region::SoutheastAsia,
+        Region::Mena,
+        Region::SubSaharanAfrica,
+        Region::LatinAmerica,
+        Region::Oceania,
     ]
 }
 
@@ -380,8 +469,12 @@ fn all_regions() -> [Region; 9] {
 /// the realistic CEWP-reachable population at 100% adoption among
 /// smartphone-owning humans.
 fn realistic_world_population_smartphone() -> f64 {
-    all_regions().iter()
-        .map(|r| { let s = region_stats(*r); s.population_2026 * s.smartphone_penetration * 1e6 })
+    all_regions()
+        .iter()
+        .map(|r| {
+            let s = region_stats(*r);
+            s.population_2026 * s.smartphone_penetration * 1e6
+        })
         .sum()
 }
 
@@ -395,7 +488,9 @@ fn region_tier_mix(r: Region) -> (f64, f64, f64) {
     // Server: home_server_capable share of smartphone owners
     let server_frac = (s.home_server_capable / s.smartphone_penetration.max(0.01)).min(0.15);
     // Proxy: broadband-having smartphone owners who AREN'T servers
-    let proxy_frac = ((s.broadband_penetration / s.smartphone_penetration.max(0.01)) - server_frac).max(0.0).min(0.80);
+    let proxy_frac = ((s.broadband_penetration / s.smartphone_penetration.max(0.01)) - server_frac)
+        .max(0.0)
+        .min(0.80);
     // Client: the rest of smartphone owners
     let client_frac = (1.0 - proxy_frac - server_frac).max(0.0);
     (client_frac, proxy_frac, server_frac)
@@ -409,12 +504,12 @@ fn region_tier_mix(r: Region) -> (f64, f64, f64) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 enum ConnectivityTier {
-    Fiber,         // 100+ Mbps symmetric uplink
-    Cable5g,       // 100+ Mbps DL, 10+ Mbps UL
-    MobileLte,     // 25+ Mbps DL, 5+ Mbps UL (typical 4G)
-    Mobile3g,      // 1-5 Mbps DL, <1 Mbps UL
-    Mobile2g,      // sub-1 Mbps; voice + SMS feasible only
-    Sparse,        // intermittent / satellite / no persistent connection
+    Fiber,     // 100+ Mbps symmetric uplink
+    Cable5g,   // 100+ Mbps DL, 10+ Mbps UL
+    MobileLte, // 25+ Mbps DL, 5+ Mbps UL (typical 4G)
+    Mobile3g,  // 1-5 Mbps DL, <1 Mbps UL
+    Mobile2g,  // sub-1 Mbps; voice + SMS feasible only
+    Sparse,    // intermittent / satellite / no persistent connection
 }
 
 #[allow(dead_code)]
@@ -454,8 +549,10 @@ fn internet_footprint(n_users: f64) -> Footprint {
     let power_mw = dcs * HYPERSCALE_DC_AVG_MW;
     let (twh, co2) = envelope(power_mw, GLOBAL_GRID_CO2_KG_PER_KWH);
     Footprint {
-        datacenters: dcs, power_mw,
-        electricity_twh_per_year: twh, co2_mt_per_year: co2,
+        datacenters: dcs,
+        power_mw,
+        electricity_twh_per_year: twh,
+        co2_mt_per_year: co2,
         marginal_power_mw: 0.0,
         new_buildout_power_mw: power_mw,
         useful_work_per_watt: 1.0,
@@ -463,7 +560,10 @@ fn internet_footprint(n_users: f64) -> Footprint {
     }
 }
 
-fn tier_power(count: f64, mix: &DeviceMix) -> (f64, f64, f64, f64, Vec<(DeviceClass, f64, f64, bool)>) {
+fn tier_power(
+    count: f64,
+    mix: &DeviceMix,
+) -> (f64, f64, f64, f64, Vec<(DeviceClass, f64, f64, bool)>) {
     let mut power_mw = 0.0;
     let mut marginal_mw = 0.0;
     let mut new_buildout_mw = 0.0;
@@ -471,19 +571,29 @@ fn tier_power(count: f64, mix: &DeviceMix) -> (f64, f64, f64, f64, Vec<(DeviceCl
     let mut mix_sum = 0.0;
     let mut by_class = Vec::new();
     for (cls, frac) in &mix.items {
-        if *frac <= 0.0 { continue; }
+        if *frac <= 0.0 {
+            continue;
+        }
         let spec = device_spec(*cls);
         let tier_count = count * frac;
         let tier_w = tier_count * spec.idle_w * spec.marginal_share;
         let tier_mw = tier_w / 1e6;
         power_mw += tier_mw;
-        if spec.marginal_share < 1.0 || !spec.net_new { marginal_mw += tier_mw; }
-        if spec.net_new && spec.marginal_share >= 0.5 { new_buildout_mw += tier_mw; }
+        if spec.marginal_share < 1.0 || !spec.net_new {
+            marginal_mw += tier_mw;
+        }
+        if spec.net_new && spec.marginal_share >= 0.5 {
+            new_buildout_mw += tier_mw;
+        }
         weighted_eff += frac * spec.efficiency_factor;
         mix_sum += frac;
         by_class.push((*cls, tier_count, tier_mw, spec.net_new));
     }
-    let efficiency = if mix_sum > 0.0 { weighted_eff / mix_sum } else { 1.0 };
+    let efficiency = if mix_sum > 0.0 {
+        weighted_eff / mix_sum
+    } else {
+        1.0
+    };
     (power_mw, marginal_mw, new_buildout_mw, efficiency, by_class)
 }
 
@@ -499,15 +609,19 @@ fn cewp_footprint(s: &Scenario, style: FleetStyle, grid_co2: f64) -> Footprint {
     let new_buildout_mw = cli.2 + prx.2 + srv.2;
     let efficiency = if power_mw > 0.0 {
         (cli.3 * cli.0 + prx.3 * prx.0 + srv.3 * srv.0) / power_mw
-    } else { 1.0 };
+    } else {
+        1.0
+    };
     let (twh, co2) = envelope(power_mw, grid_co2);
     let mut by_class = cli.4;
     by_class.extend(prx.4);
     by_class.extend(srv.4);
     by_class.retain(|(_, _, p, _)| *p > 0.0);
     Footprint {
-        datacenters: 0.0, power_mw,
-        electricity_twh_per_year: twh, co2_mt_per_year: co2,
+        datacenters: 0.0,
+        power_mw,
+        electricity_twh_per_year: twh,
+        co2_mt_per_year: co2,
         marginal_power_mw: marginal_mw,
         new_buildout_power_mw: new_buildout_mw,
         useful_work_per_watt: efficiency,
@@ -521,7 +635,10 @@ fn cewp_footprint(s: &Scenario, style: FleetStyle, grid_co2: f64) -> Footprint {
 /// spent in Latin America is greener than in MENA. Caller supplies a
 /// base scenario (typically `full_internet_v1`); we override n_users
 /// + tier_mix per region from the regional realism data.
-fn cewp_regional_footprint(base: &Scenario, style: FleetStyle) -> (Footprint, Vec<(Region, f64, f64)>) {
+fn cewp_regional_footprint(
+    base: &Scenario,
+    style: FleetStyle,
+) -> (Footprint, Vec<(Region, f64, f64)>) {
     let total_smartphone_pop = realistic_world_population_smartphone();
     let mut total_power_mw = 0.0;
     let mut total_marginal_mw = 0.0;
@@ -529,7 +646,8 @@ fn cewp_regional_footprint(base: &Scenario, style: FleetStyle) -> (Footprint, Ve
     let mut total_co2_mt = 0.0;
     let mut total_twh = 0.0;
     let mut weighted_eff = 0.0;
-    let mut by_class_agg: std::collections::HashMap<DeviceClass, (f64, f64, bool)> = std::collections::HashMap::new();
+    let mut by_class_agg: std::collections::HashMap<DeviceClass, (f64, f64, bool)> =
+        std::collections::HashMap::new();
     let mut per_region = Vec::new();
     for r in all_regions() {
         let stats = region_stats(r);
@@ -539,7 +657,11 @@ fn cewp_regional_footprint(base: &Scenario, style: FleetStyle) -> (Footprint, Ve
         let mut region_scenario = base.clone();
         region_scenario.name = stats.label;
         region_scenario.n_users = region_user_share;
-        region_scenario.tier_mix = TierMix { client: cli_f, proxy: prx_f, server: srv_f };
+        region_scenario.tier_mix = TierMix {
+            client: cli_f,
+            proxy: prx_f,
+            server: srv_f,
+        };
         let fp = cewp_footprint(&region_scenario, style, stats.grid_co2_kg_per_kwh);
         total_power_mw += fp.power_mw;
         total_marginal_mw += fp.marginal_power_mw;
@@ -554,7 +676,11 @@ fn cewp_regional_footprint(base: &Scenario, style: FleetStyle) -> (Footprint, Ve
         }
         per_region.push((r, fp.power_mw, fp.co2_mt_per_year));
     }
-    let efficiency = if total_power_mw > 0.0 { weighted_eff / total_power_mw } else { 1.0 };
+    let efficiency = if total_power_mw > 0.0 {
+        weighted_eff / total_power_mw
+    } else {
+        1.0
+    };
     let by_class: Vec<(DeviceClass, f64, f64, bool)> = by_class_agg
         .into_iter()
         .map(|(k, (count, p_mw, net_new))| (k, count, p_mw, net_new))
@@ -656,20 +782,35 @@ impl CohortDist {
     }
     fn default_model() -> Self {
         Self {
-            self_: 0.50, family: 0.15, community: 0.15, affiliations: 0.10,
-            species: 0.05, planet: 0.03, federation: 0.02,
+            self_: 0.50,
+            family: 0.15,
+            community: 0.15,
+            affiliations: 0.10,
+            species: 0.05,
+            planet: 0.03,
+            federation: 0.02,
         }
     }
     fn local_heavy() -> Self {
         Self {
-            self_: 0.45, family: 0.25, community: 0.20, affiliations: 0.07,
-            species: 0.02, planet: 0.005, federation: 0.005,
+            self_: 0.45,
+            family: 0.25,
+            community: 0.20,
+            affiliations: 0.07,
+            species: 0.02,
+            planet: 0.005,
+            federation: 0.005,
         }
     }
     fn global_heavy() -> Self {
         Self {
-            self_: 0.30, family: 0.10, community: 0.15, affiliations: 0.20,
-            species: 0.10, planet: 0.08, federation: 0.07,
+            self_: 0.30,
+            family: 0.10,
+            community: 0.15,
+            affiliations: 0.20,
+            species: 0.10,
+            planet: 0.08,
+            federation: 0.07,
         }
     }
 }
@@ -777,11 +918,17 @@ struct Scenario {
 /// Linear-interpolated between anchors. `depth > 3` extrapolates
 /// gently (Dunbar limits + saturation flatten the curve quickly).
 fn effective_trust_set_multiplier(depth: f64) -> f64 {
-    if depth <= 0.0 { 1.0 }
-    else if depth <= 1.0 { 1.0 + depth * 3.0 }
-    else if depth <= 2.0 { 4.0 + (depth - 1.0) * 16.0 }
-    else if depth <= 3.0 { 20.0 + (depth - 2.0) * 80.0 }
-    else { 100.0 * 1.5_f64.powf(depth - 3.0) }
+    if depth <= 0.0 {
+        1.0
+    } else if depth <= 1.0 {
+        1.0 + depth * 3.0
+    } else if depth <= 2.0 {
+        4.0 + (depth - 1.0) * 16.0
+    } else if depth <= 3.0 {
+        20.0 + (depth - 2.0) * 80.0
+    } else {
+        100.0 * 1.5_f64.powf(depth - 3.0)
+    }
 }
 
 // ─── Per-actor model ─────────────────────────────────────────────────
@@ -843,7 +990,15 @@ fn per_actor(tier: Tier, s: &Scenario) -> ActorCosts {
             // Phone — own only. No admitted-trust, no significant
             // cache (most reads are explicit fetches, not held).
             let verify_from_fetch = s.daily_fetch_bytes / s.avg_envelope_bytes;
-            (0.0, 0.0, s.daily_fetch_bytes, verify_from_fetch, 0.0, 1.0, 0.0)
+            (
+                0.0,
+                0.0,
+                s.daily_fetch_bytes,
+                verify_from_fetch,
+                0.0,
+                1.0,
+                0.0,
+            )
         }
         Tier::Proxy => {
             // **Proxy = L0 server** (Eric's framing) — low-storage
@@ -858,12 +1013,11 @@ fn per_actor(tier: Tier, s: &Scenario) -> ActorCosts {
             //
             // The model collapses all server-tier behavior into one
             // formula parameterized by (budget, depth).
-            let effective_R = s.trust_radius
-                * effective_trust_set_multiplier(0.0); // L0 = strict
+            let effective_R = s.trust_radius * effective_trust_set_multiplier(0.0); // L0 = strict
 
             let daily_admitted = effective_R * s.daily_bytes * s.cohort.publishable();
             // Proxy doesn't replicate agent traces (server-only).
-            let traces_in_per_day = 0.0;
+            let _traces_in_per_day = 0.0;
 
             let trust_share_of_remaining = 0.85;
             let trust_budget = remaining_budget * trust_share_of_remaining;
@@ -871,7 +1025,9 @@ fn per_actor(tier: Tier, s: &Scenario) -> ActorCosts {
 
             let effective_days = if daily_admitted > 0.0 {
                 trust_budget / daily_admitted
-            } else { 0.0 };
+            } else {
+                0.0
+            };
             let admitted_trust_held = (daily_admitted * effective_days).min(trust_budget);
 
             let cache_hit_rate = (s.cache_hit_rate - 0.1).max(0.1);
@@ -893,7 +1049,15 @@ fn per_actor(tier: Tier, s: &Scenario) -> ActorCosts {
             let narrow = s.cohort.community + s.cohort.affiliations;
             let fanout = 1.0 + narrow * 4.0 + wide * 64.0;
 
-            (admitted_trust_held, cache_held, inbound, verify, 0.0, fanout, effective_days)
+            (
+                admitted_trust_held,
+                cache_held,
+                inbound,
+                verify,
+                0.0,
+                fanout,
+                effective_days,
+            )
         }
         Tier::Server => {
             // Full node — admits trusted peers' publishable
@@ -906,17 +1070,15 @@ fn per_actor(tier: Tier, s: &Scenario) -> ActorCosts {
             // direct R counts; at depth=1 friend-of-friends are also
             // admissible (~4× the source count, but heavy overlap);
             // at depth=2 most of the extended community (~20×).
-            let effective_R = s.trust_radius
-                * effective_trust_set_multiplier(s.trust_depth_avg);
+            let effective_R = s.trust_radius * effective_trust_set_multiplier(s.trust_depth_avg);
 
             // Daily admitted-trust inbound rate — every effective
             // trust source's publishable activity.
             let daily_admitted = effective_R * s.daily_bytes * s.cohort.publishable();
             // Replicated publishable agent traces from the effective
             // trust set.
-            let traces_in_per_day = effective_R
-                * trace_bytes_per_day
-                * s.trace_publishable_fraction;
+            let traces_in_per_day =
+                effective_R * trace_bytes_per_day * s.trace_publishable_fraction;
             let daily_admitted_plus_traces = daily_admitted + traces_in_per_day;
 
             // Effective retention falls out of budget vs inbound rate.
@@ -928,9 +1090,12 @@ fn per_actor(tier: Tier, s: &Scenario) -> ActorCosts {
 
             let effective_days = if daily_admitted_plus_traces > 0.0 {
                 trust_budget / daily_admitted_plus_traces
-            } else { 0.0 };
+            } else {
+                0.0
+            };
             let admitted_trust_held = (daily_admitted * effective_days).min(trust_budget * 0.85);
-            let replicated_traces_held = (traces_in_per_day * effective_days).min(trust_budget * 0.15);
+            let replicated_traces_held =
+                (traces_in_per_day * effective_days).min(trust_budget * 0.15);
 
             // Cache holds the hot-fetch tail; effective_days for cache
             // is the same since both ride the same eviction sweeper.
@@ -987,8 +1152,8 @@ fn per_actor(tier: Tier, s: &Scenario) -> ActorCosts {
     let encrypt_cpu = encrypt_in * AES_GCM_ENCRYPT_NS_PER_BYTE * 1e-9;
     let decrypt_cpu = in_bps * AES_GCM_DECRYPT_NS_PER_BYTE * 1e-9;
 
-    let cpu_total = sign_cpu + verify_cpu + dispatch_cpu + canon_cpu + scrub_cpu
-        + encrypt_cpu + decrypt_cpu;
+    let cpu_total =
+        sign_cpu + verify_cpu + dispatch_cpu + canon_cpu + scrub_cpu + encrypt_cpu + decrypt_cpu;
 
     ActorCosts {
         storage_own,
@@ -1029,18 +1194,25 @@ fn rollup(s: &Scenario) -> FedRollup {
     let n_srv = s.n_users * s.tier_mix.server;
 
     FedRollup {
-        total_storage_bytes:
-            n_cli * cli.storage_total + n_prx * prx.storage_total + n_srv * srv.storage_total,
-        total_bandwidth_in_bytes_per_day:
-            n_cli * cli.bandwidth_in_per_day + n_prx * prx.bandwidth_in_per_day + n_srv * srv.bandwidth_in_per_day,
-        total_bandwidth_out_bytes_per_day:
-            n_cli * cli.bandwidth_out_per_day + n_prx * prx.bandwidth_out_per_day + n_srv * srv.bandwidth_out_per_day,
-        total_verify_ops_per_day:
-            n_cli * cli.verify_ops_per_day + n_prx * prx.verify_ops_per_day + n_srv * srv.verify_ops_per_day,
-        total_sign_ops_per_day:
-            n_cli * cli.sign_ops_per_day + n_prx * prx.sign_ops_per_day + n_srv * srv.sign_ops_per_day,
-        aggregate_cpu_cores_full_util:
-            (n_cli * cli.cpu_seconds_per_day + n_prx * prx.cpu_seconds_per_day + n_srv * srv.cpu_seconds_per_day) / 86_400.0,
+        total_storage_bytes: n_cli * cli.storage_total
+            + n_prx * prx.storage_total
+            + n_srv * srv.storage_total,
+        total_bandwidth_in_bytes_per_day: n_cli * cli.bandwidth_in_per_day
+            + n_prx * prx.bandwidth_in_per_day
+            + n_srv * srv.bandwidth_in_per_day,
+        total_bandwidth_out_bytes_per_day: n_cli * cli.bandwidth_out_per_day
+            + n_prx * prx.bandwidth_out_per_day
+            + n_srv * srv.bandwidth_out_per_day,
+        total_verify_ops_per_day: n_cli * cli.verify_ops_per_day
+            + n_prx * prx.verify_ops_per_day
+            + n_srv * srv.verify_ops_per_day,
+        total_sign_ops_per_day: n_cli * cli.sign_ops_per_day
+            + n_prx * prx.sign_ops_per_day
+            + n_srv * srv.sign_ops_per_day,
+        aggregate_cpu_cores_full_util: (n_cli * cli.cpu_seconds_per_day
+            + n_prx * prx.cpu_seconds_per_day
+            + n_srv * srv.cpu_seconds_per_day)
+            / 86_400.0,
         per_tier: [(Tier::Client, cli), (Tier::Proxy, prx), (Tier::Server, srv)],
     }
 }
@@ -1054,7 +1226,11 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "bootstrap",
             n_users: 10_000.0,
-            tier_mix: TierMix { client: 0.30, proxy: 0.65, server: 0.05 },
+            tier_mix: TierMix {
+                client: 0.30,
+                proxy: 0.65,
+                server: 0.05,
+            },
             trust_radius: 50.0,
             trust_depth_avg: 1.0,
             daily_bytes: 20.0 * KB,
@@ -1072,7 +1248,11 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "dunbar_steady",
             n_users: 1_000_000.0,
-            tier_mix: TierMix { client: 0.40, proxy: 0.55, server: 0.05 },
+            tier_mix: TierMix {
+                client: 0.40,
+                proxy: 0.55,
+                server: 0.05,
+            },
             trust_radius: 150.0,
             trust_depth_avg: 1.0,
             daily_bytes: 50.0 * KB,
@@ -1090,7 +1270,11 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "media_heavy",
             n_users: 1_000_000.0,
-            tier_mix: TierMix { client: 0.30, proxy: 0.60, server: 0.10 },
+            tier_mix: TierMix {
+                client: 0.30,
+                proxy: 0.60,
+                server: 0.10,
+            },
             trust_radius: 150.0,
             trust_depth_avg: 1.0,
             daily_bytes: 500.0 * KB,
@@ -1108,7 +1292,11 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "twitter_scale",
             n_users: 1_000_000_000.0,
-            tier_mix: TierMix { client: 0.45, proxy: 0.50, server: 0.05 },
+            tier_mix: TierMix {
+                client: 0.45,
+                proxy: 0.50,
+                server: 0.05,
+            },
             trust_radius: 150.0,
             trust_depth_avg: 1.0,
             daily_bytes: 5.0 * KB,
@@ -1126,7 +1314,11 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "news_replacement",
             n_users: 1_000_000_000.0,
-            tier_mix: TierMix { client: 0.40, proxy: 0.55, server: 0.05 },
+            tier_mix: TierMix {
+                client: 0.40,
+                proxy: 0.55,
+                server: 0.05,
+            },
             trust_radius: 300.0,
             trust_depth_avg: 1.0,
             daily_bytes: 100.0 * KB,
@@ -1144,7 +1336,11 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "full_internet_v1",
             n_users: 5_000_000_000.0,
-            tier_mix: TierMix { client: 0.35, proxy: 0.55, server: 0.10 },
+            tier_mix: TierMix {
+                client: 0.35,
+                proxy: 0.55,
+                server: 0.10,
+            },
             trust_radius: 250.0,
             trust_depth_avg: 1.0,
             daily_bytes: 50.0 * MB,
@@ -1162,7 +1358,11 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "full_internet_local_heavy",
             n_users: 5_000_000_000.0,
-            tier_mix: TierMix { client: 0.35, proxy: 0.55, server: 0.10 },
+            tier_mix: TierMix {
+                client: 0.35,
+                proxy: 0.55,
+                server: 0.10,
+            },
             trust_radius: 250.0,
             trust_depth_avg: 1.0,
             daily_bytes: 50.0 * MB,
@@ -1180,7 +1380,11 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "full_internet_global_heavy",
             n_users: 5_000_000_000.0,
-            tier_mix: TierMix { client: 0.30, proxy: 0.55, server: 0.15 },
+            tier_mix: TierMix {
+                client: 0.30,
+                proxy: 0.55,
+                server: 0.15,
+            },
             trust_radius: 250.0,
             trust_depth_avg: 1.0,
             daily_bytes: 50.0 * MB,
@@ -1198,7 +1402,11 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "village_dense",
             n_users: 1_000.0,
-            tier_mix: TierMix { client: 0.40, proxy: 0.40, server: 0.20 },
+            tier_mix: TierMix {
+                client: 0.40,
+                proxy: 0.40,
+                server: 0.20,
+            },
             trust_radius: 50.0,
             trust_depth_avg: 1.0,
             daily_bytes: 30.0 * MB,
@@ -1236,7 +1444,11 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "tiktok_replacement",
             n_users: 5_000_000_000.0,
-            tier_mix: TierMix { client: 0.40, proxy: 0.55, server: 0.05 },
+            tier_mix: TierMix {
+                client: 0.40,
+                proxy: 0.55,
+                server: 0.05,
+            },
             trust_radius: 250.0,
             trust_depth_avg: 1.0,
             daily_bytes: 500.0 * KB, // averaged producer rate: 3% × 15 MB
@@ -1246,7 +1458,7 @@ fn scenarios() -> Vec<Scenario> {
             disk_budget_server: 1.0 * TB,
             cohort: CohortDist::default_model(), // social-graph driven
             daily_fetch_bytes: 95.0 * MB,
-            cache_hit_rate: 0.70, // viral short-form clusters hard
+            cache_hit_rate: 0.70,         // viral short-form clusters hard
             external_fetch_fraction: 0.0, // ALL inline; ≤ 16 MiB per clip
             agent_decisions_per_day: 50.0,
             trace_publishable_fraction: 0.05,
@@ -1256,10 +1468,14 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "youtube_replacement",
             n_users: 5_000_000_000.0,
-            tier_mix: TierMix { client: 0.40, proxy: 0.55, server: 0.05 },
+            tier_mix: TierMix {
+                client: 0.40,
+                proxy: 0.55,
+                server: 0.05,
+            },
             trust_radius: 200.0,
             trust_depth_avg: 1.0,
-            daily_bytes: 500.0 * KB, // averaged producer rate
+            daily_bytes: 500.0 * KB,       // averaged producer rate
             avg_envelope_bytes: 30.0 * MB, // mixed: shorts inline, long-form metadata
             disk_budget_client: 256.0 * GB,
             disk_budget_proxy: 256.0 * GB,
@@ -1277,18 +1493,22 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "netflix_replacement",
             n_users: 5_000_000_000.0,
-            tier_mix: TierMix { client: 0.40, proxy: 0.55, server: 0.05 },
+            tier_mix: TierMix {
+                client: 0.40,
+                proxy: 0.55,
+                server: 0.05,
+            },
             trust_radius: 100.0, // narrower trust set for studio publishers
             trust_depth_avg: 1.0,
-            daily_bytes: 1.0 * KB, // negligible UGC
+            daily_bytes: 1.0 * KB,        // negligible UGC
             avg_envelope_bytes: 5.0 * KB, // metadata-only envelope
             disk_budget_client: 256.0 * GB,
             disk_budget_proxy: 256.0 * GB,
             disk_budget_server: 1.0 * TB,
             cohort: CohortDist::default_model(),
             daily_fetch_bytes: 1500.0 * MB, // 2 hours HD × 750 MB/hour
-            cache_hit_rate: 0.30, // long-form less popularity-clustered than shorts
-            external_fetch_fraction: 1.0, // ALL external; substrate routes metadata only
+            cache_hit_rate: 0.30,           // long-form less popularity-clustered than shorts
+            external_fetch_fraction: 1.0,   // ALL external; substrate routes metadata only
             agent_decisions_per_day: 30.0,
             trace_publishable_fraction: 0.05,
         },
@@ -1313,7 +1533,11 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "adulthub_replacement",
             n_users: 100_000_000.0,
-            tier_mix: TierMix { client: 0.45, proxy: 0.50, server: 0.05 },
+            tier_mix: TierMix {
+                client: 0.45,
+                proxy: 0.50,
+                server: 0.05,
+            },
             trust_radius: 50.0, // subscribers' curated creator subset
             trust_depth_avg: 1.0,
             daily_bytes: 100.0 * KB, // averaged subscriber upload (most don't post)
@@ -1323,8 +1547,8 @@ fn scenarios() -> Vec<Scenario> {
             disk_budget_server: 1.0 * TB,
             cohort: CohortDist::default_model(),
             daily_fetch_bytes: 1000.0 * MB, // ~30 min/day adult-video consumption
-            cache_hit_rate: 0.40, // long-tail content; less popularity clustering
-            external_fetch_fraction: 0.95, // almost all video external; thumbs inline
+            cache_hit_rate: 0.40,           // long-tail content; less popularity clustering
+            external_fetch_fraction: 0.95,  // almost all video external; thumbs inline
             agent_decisions_per_day: 30.0,
             trace_publishable_fraction: 0.05,
         },
@@ -1334,10 +1558,14 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "full_internet_with_video",
             n_users: 5_000_000_000.0,
-            tier_mix: TierMix { client: 0.35, proxy: 0.55, server: 0.10 },
+            tier_mix: TierMix {
+                client: 0.35,
+                proxy: 0.55,
+                server: 0.10,
+            },
             trust_radius: 250.0,
             trust_depth_avg: 1.0,
-            daily_bytes: 11.0 * MB, // combined produced rate
+            daily_bytes: 11.0 * MB,        // combined produced rate
             avg_envelope_bytes: 50.0 * KB, // weighted-avg across content types
             disk_budget_client: 256.0 * GB,
             disk_budget_proxy: 256.0 * GB,
@@ -1359,10 +1587,15 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "south_asia_dense", // India + Pakistan + Bangladesh, 61% smartphone, 42% broadband
             n_users: (region_stats(Region::SouthAsia).population_2026
-                * region_stats(Region::SouthAsia).smartphone_penetration * 1e6),
+                * region_stats(Region::SouthAsia).smartphone_penetration
+                * 1e6),
             tier_mix: {
                 let (c, p, s) = region_tier_mix(Region::SouthAsia);
-                TierMix { client: c, proxy: p, server: s }
+                TierMix {
+                    client: c,
+                    proxy: p,
+                    server: s,
+                }
             },
             trust_radius: 120.0, // dense kinship + neighborhood graphs
             trust_depth_avg: 1.0,
@@ -1381,10 +1614,15 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "sub_saharan_bootstrap", // 52% smartphone, 28% broadband, 12% L1-capable
             n_users: (region_stats(Region::SubSaharanAfrica).population_2026
-                * region_stats(Region::SubSaharanAfrica).smartphone_penetration * 1e6),
+                * region_stats(Region::SubSaharanAfrica).smartphone_penetration
+                * 1e6),
             tier_mix: {
                 let (c, p, s) = region_tier_mix(Region::SubSaharanAfrica);
-                TierMix { client: c, proxy: p, server: s }
+                TierMix {
+                    client: c,
+                    proxy: p,
+                    server: s,
+                }
             },
             trust_radius: 60.0, // smaller direct-trust set early
             trust_depth_avg: 1.0,
@@ -1403,10 +1641,15 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "north_america_realistic", // 85% smartphone, 82% broadband, 0.38 grid CO2
             n_users: (region_stats(Region::NorthAmerica).population_2026
-                * region_stats(Region::NorthAmerica).smartphone_penetration * 1e6),
+                * region_stats(Region::NorthAmerica).smartphone_penetration
+                * 1e6),
             tier_mix: {
                 let (c, p, s) = region_tier_mix(Region::NorthAmerica);
-                TierMix { client: c, proxy: p, server: s }
+                TierMix {
+                    client: c,
+                    proxy: p,
+                    server: s,
+                }
             },
             trust_radius: 200.0,
             trust_depth_avg: 1.0,
@@ -1428,28 +1671,45 @@ fn scenarios() -> Vec<Scenario> {
 // ─── Output formatting + feasibility report ──────────────────────────
 
 fn fmt_bytes(b: f64) -> String {
-    if b >= EB { format!("{:.2} EB", b / EB) }
-    else if b >= PB { format!("{:.2} PB", b / PB) }
-    else if b >= TB { format!("{:.2} TB", b / TB) }
-    else if b >= GB { format!("{:.2} GB", b / GB) }
-    else if b >= MB { format!("{:.2} MB", b / MB) }
-    else if b >= KB { format!("{:.2} KB", b / KB) }
-    else { format!("{:.0} B", b) }
+    if b >= EB {
+        format!("{:.2} EB", b / EB)
+    } else if b >= PB {
+        format!("{:.2} PB", b / PB)
+    } else if b >= TB {
+        format!("{:.2} TB", b / TB)
+    } else if b >= GB {
+        format!("{:.2} GB", b / GB)
+    } else if b >= MB {
+        format!("{:.2} MB", b / MB)
+    } else if b >= KB {
+        format!("{:.2} KB", b / KB)
+    } else {
+        format!("{:.0} B", b)
+    }
 }
 
 fn fmt_count(c: f64) -> String {
-    if c >= 1e12 { format!("{:.2} T", c / 1e12) }
-    else if c >= 1e9 { format!("{:.2} B", c / 1e9) }
-    else if c >= 1e6 { format!("{:.2} M", c / 1e6) }
-    else if c >= 1e3 { format!("{:.2} K", c / 1e3) }
-    else { format!("{:.1}", c) }
+    if c >= 1e12 {
+        format!("{:.2} T", c / 1e12)
+    } else if c >= 1e9 {
+        format!("{:.2} B", c / 1e9)
+    } else if c >= 1e6 {
+        format!("{:.2} M", c / 1e6)
+    } else if c >= 1e3 {
+        format!("{:.2} K", c / 1e3)
+    } else {
+        format!("{:.1}", c)
+    }
 }
 
 #[derive(Debug)]
 struct Feasibility {
-    storage_ok: bool, storage_ratio: f64,
-    bandwidth_ok: bool, bandwidth_ratio: f64,
-    cpu_ok: bool, cpu_ratio: f64,
+    storage_ok: bool,
+    storage_ratio: f64,
+    bandwidth_ok: bool,
+    bandwidth_ratio: f64,
+    cpu_ok: bool,
+    cpu_ratio: f64,
 }
 
 fn check_server_feasibility(srv: &ActorCosts) -> Feasibility {
@@ -1458,13 +1718,22 @@ fn check_server_feasibility(srv: &ActorCosts) -> Feasibility {
     let bw_ratio = bw_total / SERVER_BANDWIDTH_GATE_BYTES_PER_DAY;
     let cpu_ratio = srv.cpu_seconds_per_day / SERVER_CPU_GATE_SECONDS_PER_DAY;
     Feasibility {
-        storage_ok: s_ratio <= 1.0, storage_ratio: s_ratio,
-        bandwidth_ok: bw_ratio <= 1.0, bandwidth_ratio: bw_ratio,
-        cpu_ok: cpu_ratio <= 1.0, cpu_ratio,
+        storage_ok: s_ratio <= 1.0,
+        storage_ratio: s_ratio,
+        bandwidth_ok: bw_ratio <= 1.0,
+        bandwidth_ratio: bw_ratio,
+        cpu_ok: cpu_ratio <= 1.0,
+        cpu_ratio,
     }
 }
 
-fn fmt_check(ok: bool) -> &'static str { if ok { "✓" } else { "⚠" } }
+fn fmt_check(ok: bool) -> &'static str {
+    if ok {
+        "✓"
+    } else {
+        "⚠"
+    }
+}
 
 fn print_scenario(s: &Scenario, r: &FedRollup) {
     let srv = &r.per_tier[2].1;
@@ -1472,90 +1741,151 @@ fn print_scenario(s: &Scenario, r: &FedRollup) {
 
     println!();
     println!("══ {} ══", s.name);
-    println!("  N users: {}   tier mix: client {:.0}% / proxy {:.0}% / server {:.0}%",
-        fmt_count(s.n_users), s.tier_mix.client * 100.0,
-        s.tier_mix.proxy * 100.0, s.tier_mix.server * 100.0);
+    println!(
+        "  N users: {}   tier mix: client {:.0}% / proxy {:.0}% / server {:.0}%",
+        fmt_count(s.n_users),
+        s.tier_mix.client * 100.0,
+        s.tier_mix.proxy * 100.0,
+        s.tier_mix.server * 100.0
+    );
     let effective_R = s.trust_radius * effective_trust_set_multiplier(s.trust_depth_avg);
-    println!("  R={}  trust_depth={:.1} → effective_sources={}  D={}/day  env={}",
-        s.trust_radius as u64, s.trust_depth_avg,
+    println!(
+        "  R={}  trust_depth={:.1} → effective_sources={}  D={}/day  env={}",
+        s.trust_radius as u64,
+        s.trust_depth_avg,
         fmt_count(effective_R),
-        fmt_bytes(s.daily_bytes), fmt_bytes(s.avg_envelope_bytes));
-    println!("  σ_pub={:.0}%  σ_local={:.0}%  fetch={}/day",
-        s.cohort.publishable() * 100.0, s.cohort.local_only() * 100.0,
-        fmt_bytes(s.daily_fetch_bytes));
-    println!("  disk budgets: client {}  proxy {}  server {}",
-        fmt_bytes(s.disk_budget_client), fmt_bytes(s.disk_budget_proxy),
-        fmt_bytes(s.disk_budget_server));
+        fmt_bytes(s.daily_bytes),
+        fmt_bytes(s.avg_envelope_bytes)
+    );
+    println!(
+        "  σ_pub={:.0}%  σ_local={:.0}%  fetch={}/day",
+        s.cohort.publishable() * 100.0,
+        s.cohort.local_only() * 100.0,
+        fmt_bytes(s.daily_fetch_bytes)
+    );
+    println!(
+        "  disk budgets: client {}  proxy {}  server {}",
+        fmt_bytes(s.disk_budget_client),
+        fmt_bytes(s.disk_budget_proxy),
+        fmt_bytes(s.disk_budget_server)
+    );
 
     let prx = &r.per_tier[1].1;
     println!();
-    println!("  Proxy-tier (L0, depth 0, {} budget):", fmt_bytes(s.disk_budget_proxy));
-    println!("    held TOTAL          {}  ({:.0}% util)   admitted-trust retention {:.0}d",
+    println!(
+        "  Proxy-tier (L0, depth 0, {} budget):",
+        fmt_bytes(s.disk_budget_proxy)
+    );
+    println!(
+        "    held TOTAL          {}  ({:.0}% util)   admitted-trust retention {:.0}d",
         fmt_bytes(prx.storage_total),
         prx.storage_utilization * 100.0,
-        prx.effective_retention_days);
+        prx.effective_retention_days
+    );
     println!();
-    println!("  Server-tier (L1, depth {:.0}, {} budget) — single-pool held bytes:",
-        s.trust_depth_avg, fmt_bytes(s.disk_budget_server));
+    println!(
+        "  Server-tier (L1, depth {:.0}, {} budget) — single-pool held bytes:",
+        s.trust_depth_avg,
+        fmt_bytes(s.disk_budget_server)
+    );
     println!("    own data            {}", fmt_bytes(srv.storage_own));
-    println!("    admitted trust      {}", fmt_bytes(srv.storage_admitted_trust));
-    println!("    hot cache           {}", fmt_bytes(srv.storage_hot_cache));
+    println!(
+        "    admitted trust      {}",
+        fmt_bytes(srv.storage_admitted_trust)
+    );
+    println!(
+        "    hot cache           {}",
+        fmt_bytes(srv.storage_hot_cache)
+    );
     println!("    agent traces        {}", fmt_bytes(srv.storage_traces));
     println!("    ─────────────────────────────");
-    println!("    held TOTAL          {}  ({:.0}% of {})",
+    println!(
+        "    held TOTAL          {}  ({:.0}% of {})",
         fmt_bytes(srv.storage_total),
         srv.storage_utilization * 100.0,
-        fmt_bytes(s.disk_budget_server));
+        fmt_bytes(s.disk_budget_server)
+    );
     if srv.effective_retention_days > 0.0 {
-        println!("    implied retention   {:.0} days of admitted-trust content",
-            srv.effective_retention_days);
+        println!(
+            "    implied retention   {:.0} days of admitted-trust content",
+            srv.effective_retention_days
+        );
         println!("                        (derived; eviction sweeper maintains this)");
     }
     println!();
     println!("  Server-tier flow:");
-    println!("    bandwidth in/day    {}", fmt_bytes(srv.bandwidth_in_per_day));
-    println!("    bandwidth out/day   {}", fmt_bytes(srv.bandwidth_out_per_day));
-    println!("    verify ops/sec      {}",
-        fmt_count(srv.verify_ops_per_day / 86400.0));
+    println!(
+        "    bandwidth in/day    {}",
+        fmt_bytes(srv.bandwidth_in_per_day)
+    );
+    println!(
+        "    bandwidth out/day   {}",
+        fmt_bytes(srv.bandwidth_out_per_day)
+    );
+    println!(
+        "    verify ops/sec      {}",
+        fmt_count(srv.verify_ops_per_day / 86400.0)
+    );
     println!("    CPU sec/day         {:.1}", srv.cpu_seconds_per_day);
 
     println!();
     println!("  v1 feasibility (per-server gates: 1 TB / 1 Gbps / 1 core):");
-    println!("    {} storage    {:>5.1}% of 1 TB     ({})",
-        fmt_check(feas.storage_ok), feas.storage_ratio * 100.0,
-        fmt_bytes(srv.storage_total));
+    println!(
+        "    {} storage    {:>5.1}% of 1 TB     ({})",
+        fmt_check(feas.storage_ok),
+        feas.storage_ratio * 100.0,
+        fmt_bytes(srv.storage_total)
+    );
     let bw_total = srv.bandwidth_in_per_day + srv.bandwidth_out_per_day;
-    println!("    {} bandwidth  {:>5.1}% of 1 Gbps   ({}/day, ≈ {}/sec)",
-        fmt_check(feas.bandwidth_ok), feas.bandwidth_ratio * 100.0,
-        fmt_bytes(bw_total), fmt_bytes(bw_total / 86400.0));
-    println!("    {} cpu        {:>5.1}% of 1 core   ({:.1} cpu-sec/day)",
-        fmt_check(feas.cpu_ok), feas.cpu_ratio * 100.0, srv.cpu_seconds_per_day);
+    println!(
+        "    {} bandwidth  {:>5.1}% of 1 Gbps   ({}/day, ≈ {}/sec)",
+        fmt_check(feas.bandwidth_ok),
+        feas.bandwidth_ratio * 100.0,
+        fmt_bytes(bw_total),
+        fmt_bytes(bw_total / 86400.0)
+    );
+    println!(
+        "    {} cpu        {:>5.1}% of 1 core   ({:.1} cpu-sec/day)",
+        fmt_check(feas.cpu_ok),
+        feas.cpu_ratio * 100.0,
+        srv.cpu_seconds_per_day
+    );
 
     println!();
     println!("  Federation totals:");
     println!("    storage          {}", fmt_bytes(r.total_storage_bytes));
-    println!("    bandwidth in     {}/day  ({}/sec)",
+    println!(
+        "    bandwidth in     {}/day  ({}/sec)",
         fmt_bytes(r.total_bandwidth_in_bytes_per_day),
-        fmt_bytes(r.total_bandwidth_in_bytes_per_day / 86400.0));
-    println!("    sign/verify ops  {} sign/sec    {} verify/sec",
+        fmt_bytes(r.total_bandwidth_in_bytes_per_day / 86400.0)
+    );
+    println!(
+        "    sign/verify ops  {} sign/sec    {} verify/sec",
         fmt_count(r.total_sign_ops_per_day / 86400.0),
-        fmt_count(r.total_verify_ops_per_day / 86400.0));
-    println!("    CPU @ 5% util    {} cores",
-        fmt_count(r.aggregate_cpu_cores_full_util / 0.05));
+        fmt_count(r.total_verify_ops_per_day / 86400.0)
+    );
+    println!(
+        "    CPU @ 5% util    {} cores",
+        fmt_count(r.aggregate_cpu_cores_full_util / 0.05)
+    );
 
     // Retention floor: if the trust pool churns faster than 2 days,
     // the server is mostly a pass-through cache and the federation
     // has lost the persistence the trust gate was supposed to give it.
     let retention_ok = srv.effective_retention_days >= RETENTION_FLOOR_DAYS;
-    println!("    {} retention {:>5.0} days (floor {:.0} days)",
+    println!(
+        "    {} retention {:>5.0} days (floor {:.0} days)",
         fmt_check(retention_ok),
         srv.effective_retention_days,
-        RETENTION_FLOOR_DAYS);
+        RETENTION_FLOOR_DAYS
+    );
 
     if feas.storage_ok && feas.bandwidth_ok && feas.cpu_ok && retention_ok {
         println!();
-        println!("  ✓ v1 feasible per-server. {} servers globally.",
-            fmt_count(s.n_users * s.tier_mix.server));
+        println!(
+            "  ✓ v1 feasible per-server. {} servers globally.",
+            fmt_count(s.n_users * s.tier_mix.server)
+        );
     }
 
     // Latency comparison
@@ -1567,12 +1897,17 @@ fn print_scenario(s: &Scenario, r: &FedRollup) {
         lat.cewp_from_cache_ms, lat.cewp_from_local_ms,
         lat.cewp_from_regional_ms, lat.cewp_from_global_ms,
         lat.cewp_trust_hop_ms);
-    println!("    Internet  {:>6.1} ms   (CDN edge cache + hyperscale origin fetch)",
-        lat.internet_p50_ms);
+    println!(
+        "    Internet  {:>6.1} ms   (CDN edge cache + hyperscale origin fetch)",
+        lat.internet_p50_ms
+    );
     let savings = lat.internet_p50_ms - lat.cewp_p50_ms;
     if savings > 0.0 {
-        println!("    ↓ CEWP saves {:.1} ms p50 ({:.0}% reduction)",
-            savings, savings / lat.internet_p50_ms * 100.0);
+        println!(
+            "    ↓ CEWP saves {:.1} ms p50 ({:.0}% reduction)",
+            savings,
+            savings / lat.internet_p50_ms * 100.0
+        );
     } else {
         println!("    ↑ Internet faster by {:.1} ms p50", -savings);
     }
@@ -1588,12 +1923,21 @@ fn print_footprint(s: &Scenario) {
     println!("  Centralized internet substrate (today):");
     println!("    datacenters       {}", fmt_count(internet.datacenters));
     println!("    power             {:.1} MW", internet.power_mw);
-    println!("    electricity       {:.1} TWh/yr", internet.electricity_twh_per_year);
-    println!("    CO2               {:.1} Mt/yr (grid avg {:.2} kg/kWh)",
-        internet.co2_mt_per_year, GLOBAL_GRID_CO2_KG_PER_KWH);
+    println!(
+        "    electricity       {:.1} TWh/yr",
+        internet.electricity_twh_per_year
+    );
+    println!(
+        "    CO2               {:.1} Mt/yr (grid avg {:.2} kg/kWh)",
+        internet.co2_mt_per_year, GLOBAL_GRID_CO2_KG_PER_KWH
+    );
     println!();
     println!("  CEWP substrate (fleet styles, no datacenters):");
-    for style in [FleetStyle::PhoneFirst, FleetStyle::Realistic2026, FleetStyle::Homelab] {
+    for style in [
+        FleetStyle::PhoneFirst,
+        FleetStyle::Realistic2026,
+        FleetStyle::Homelab,
+    ] {
         let label = match style {
             FleetStyle::PhoneFirst => "phone-first    ",
             FleetStyle::Realistic2026 => "realistic 2026 ",
@@ -1618,17 +1962,24 @@ fn print_footprint(s: &Scenario) {
 /// by region/capability/availability, as a class.
 fn print_regional_breakdown(base: &Scenario, style: FleetStyle) {
     println!();
-    println!("══ Regional CEWP footprint — base scenario: {} ══", base.name);
-    println!("    Fleet style: {}", match style {
-        FleetStyle::PhoneFirst => "phone-first",
-        FleetStyle::Realistic2026 => "realistic 2026",
-        FleetStyle::Homelab => "homelab",
-    });
+    println!(
+        "══ Regional CEWP footprint — base scenario: {} ══",
+        base.name
+    );
+    println!(
+        "    Fleet style: {}",
+        match style {
+            FleetStyle::PhoneFirst => "phone-first",
+            FleetStyle::Realistic2026 => "realistic 2026",
+            FleetStyle::Homelab => "homelab",
+        }
+    );
     println!();
     println!("    Per-region realism (UN 2024 pop / GSMA 2024 smartphone / ITU 2024 broadband / IEA 2024 grid):");
-    println!("    {:<22} {:>9}  {:>5}  {:>5}  {:>5}  {:>6}  {:>10}  {:>10}",
-        "region", "pop (M)", "smart", "bband", "L1cap", "gridCO2",
-        "power MW", "CO2 Mt/yr");
+    println!(
+        "    {:<22} {:>9}  {:>5}  {:>5}  {:>5}  {:>6}  {:>10}  {:>10}",
+        "region", "pop (M)", "smart", "bband", "L1cap", "gridCO2", "power MW", "CO2 Mt/yr"
+    );
     for r in all_regions() {
         let stats = region_stats(r);
         let (_, fp_mw, fp_co2) = {
@@ -1638,18 +1989,25 @@ fn print_regional_breakdown(base: &Scenario, style: FleetStyle) {
             let (cli_f, prx_f, srv_f) = region_tier_mix(r);
             let mut sc = base.clone();
             sc.n_users = region_user_share;
-            sc.tier_mix = TierMix { client: cli_f, proxy: prx_f, server: srv_f };
+            sc.tier_mix = TierMix {
+                client: cli_f,
+                proxy: prx_f,
+                server: srv_f,
+            };
             let fp = cewp_footprint(&sc, style, stats.grid_co2_kg_per_kwh);
             (r, fp.power_mw, fp.co2_mt_per_year)
         };
-        println!("    {:<22} {:>9.0}  {:>4.0}%  {:>4.0}%  {:>4.0}%   {:>4.2}  {:>10.1}  {:>10.2}",
+        println!(
+            "    {:<22} {:>9.0}  {:>4.0}%  {:>4.0}%  {:>4.0}%   {:>4.2}  {:>10.1}  {:>10.2}",
             stats.label,
             stats.population_2026,
             stats.smartphone_penetration * 100.0,
             stats.broadband_penetration * 100.0,
             stats.home_server_capable * 100.0,
             stats.grid_co2_kg_per_kwh,
-            fp_mw, fp_co2);
+            fp_mw,
+            fp_co2
+        );
     }
     let (fp_total, _) = cewp_regional_footprint(base, style);
     let internet = internet_footprint(base.n_users);
@@ -1657,22 +2015,40 @@ fn print_regional_breakdown(base: &Scenario, style: FleetStyle) {
     println!("    ─────────────────────────────────────────────────────────────────────────────────────────");
     println!("    Federation total (regional realism):");
     println!("      power               {:.1} MW", fp_total.power_mw);
-    println!("      ├─ marginal         {:.1} MW  (rides existing phones/laptops — zero net buildout)",
-        fp_total.marginal_power_mw);
-    println!("      └─ new buildout     {:.1} MW  (ARM mini-PCs + home x86 — new hardware)",
-        fp_total.new_buildout_power_mw);
-    println!("      electricity         {:.1} TWh/yr", fp_total.electricity_twh_per_year);
-    println!("      CO2                 {:.2} Mt/yr  (regional grids, NOT global avg)",
-        fp_total.co2_mt_per_year);
-    println!("      useful work/watt    {:.2}× (relative to hyperscale baseline 1.0)",
-        fp_total.useful_work_per_watt);
+    println!(
+        "      ├─ marginal         {:.1} MW  (rides existing phones/laptops — zero net buildout)",
+        fp_total.marginal_power_mw
+    );
+    println!(
+        "      └─ new buildout     {:.1} MW  (ARM mini-PCs + home x86 — new hardware)",
+        fp_total.new_buildout_power_mw
+    );
+    println!(
+        "      electricity         {:.1} TWh/yr",
+        fp_total.electricity_twh_per_year
+    );
+    println!(
+        "      CO2                 {:.2} Mt/yr  (regional grids, NOT global avg)",
+        fp_total.co2_mt_per_year
+    );
+    println!(
+        "      useful work/watt    {:.2}× (relative to hyperscale baseline 1.0)",
+        fp_total.useful_work_per_watt
+    );
     println!();
-    println!("    Internet substrate baseline at same N users: {} MW / {:.0} TWh/yr / {:.0} Mt CO2/yr",
-        fmt_count(internet.power_mw), internet.electricity_twh_per_year, internet.co2_mt_per_year);
+    println!(
+        "    Internet substrate baseline at same N users: {} MW / {:.0} TWh/yr / {:.0} Mt CO2/yr",
+        fmt_count(internet.power_mw),
+        internet.electricity_twh_per_year,
+        internet.co2_mt_per_year
+    );
     let power_ratio = internet.power_mw / fp_total.power_mw.max(0.001);
     let co2_ratio = internet.co2_mt_per_year / fp_total.co2_mt_per_year.max(0.001);
-    println!("    CEWP is {}× lower power, {}× lower CO2 vs centralized internet substrate.",
-        fmt_count(power_ratio), fmt_count(co2_ratio));
+    println!(
+        "    CEWP is {}× lower power, {}× lower CO2 vs centralized internet substrate.",
+        fmt_count(power_ratio),
+        fmt_count(co2_ratio)
+    );
 }
 
 /// Run the same scenario at three cache-hit-rate assumptions to
@@ -1682,10 +2058,15 @@ fn print_regional_breakdown(base: &Scenario, style: FleetStyle) {
 /// pressure) if the assumption is wrong in either direction.
 fn print_cache_sensitivity(base: &Scenario) {
     println!();
-    println!("══ Cache hit rate sensitivity sweep — base: {} ══", base.name);
+    println!(
+        "══ Cache hit rate sensitivity sweep — base: {} ══",
+        base.name
+    );
     println!();
-    println!("    {:<14}  {:>10}  {:>10}  {:>10}  {:>10}",
-        "hit_rate", "storage", "in/day", "verify/s", "retention");
+    println!(
+        "    {:<14}  {:>10}  {:>10}  {:>10}  {:>10}",
+        "hit_rate", "storage", "in/day", "verify/s", "retention"
+    );
     for hit in [0.30f64, 0.45, 0.60, 0.75, 0.85] {
         let mut s = base.clone();
         s.cache_hit_rate = hit;
@@ -1698,12 +2079,14 @@ fn print_cache_sensitivity(base: &Scenario) {
             h if h <= 0.75 => "0.75 favorable",
             _ => "0.85 optimistic",
         };
-        println!("    {:<14}  {:>10}  {:>10}  {:>10}  {:>9.0}d",
+        println!(
+            "    {:<14}  {:>10}  {:>10}  {:>10}  {:>9.0}d",
             label,
             fmt_bytes(srv.storage_total),
             fmt_bytes(srv.bandwidth_in_per_day),
             fmt_count(srv.verify_ops_per_day / 86400.0),
-            srv.effective_retention_days);
+            srv.effective_retention_days
+        );
     }
     println!();
     println!("  Reading: at v1-target scale, admitted-trust inbound DOMINATES");
@@ -1751,19 +2134,19 @@ impl FavStatus {
     fn label(self) -> &'static str {
         match self {
             FavStatus::SpecifiedMitigated => "SPECIFIED + MITIGATED",
-            FavStatus::Partial            => "PARTIAL",
-            FavStatus::SpecOnly           => "SPEC ONLY",
-            FavStatus::UnfilledGap        => "UNFILLED — LIVE EXPOSURE",
-            FavStatus::CandidateNew       => "CANDIDATE NEW F-AV",
+            FavStatus::Partial => "PARTIAL",
+            FavStatus::SpecOnly => "SPEC ONLY",
+            FavStatus::UnfilledGap => "UNFILLED — LIVE EXPOSURE",
+            FavStatus::CandidateNew => "CANDIDATE NEW F-AV",
         }
     }
     fn glyph(self) -> &'static str {
         match self {
             FavStatus::SpecifiedMitigated => "✓",
-            FavStatus::Partial            => "◐",
-            FavStatus::SpecOnly           => "◔",
-            FavStatus::UnfilledGap        => "⚠",
-            FavStatus::CandidateNew       => "📝",
+            FavStatus::Partial => "◐",
+            FavStatus::SpecOnly => "◔",
+            FavStatus::UnfilledGap => "⚠",
+            FavStatus::CandidateNew => "📝",
         }
     }
 }
@@ -1841,7 +2224,7 @@ fn fav_findings(s: &Scenario, lat: &LatencyEstimate) -> Vec<FavFinding> {
                 ("Federation-scope admit fraction (tier-capped to COMMUNITY)".into(),
                     "0% — SOFTWARE_ONLY identities cap at COMMUNITY scope".into()),
                 ("Community-scope bytes / Sybil / year (NOT cross-cohort)".into(),
-                    format!("{}", fmt_bytes(federation_admit_bytes_per_attacker_year))),
+                    fmt_bytes(federation_admit_bytes_per_attacker_year).to_string()),
             ],
             verdict:
                 "Defense holds at full_internet_v1 IF SOFTWARE_ONLY tier cap enforced. \
@@ -1862,28 +2245,35 @@ fn fav_findings(s: &Scenario, lat: &LatencyEstimate) -> Vec<FavFinding> {
             name: "Sybil aging via dormant cloud-vTPM cohort",
             doc_ref: "CIRISVerify Fed TM §6.6",
             status: FavStatus::Partial,
-            mechanism:
-                "Cohort of cheap vTPMs idles ~5y at $200-$1000 each, then activates with \
+            mechanism: "Cohort of cheap vTPMs idles ~5y at $200-$1000 each, then activates with \
                  minimal trace history. σ-decay rate inconsistent with claimed temporal history.",
-            defense:
-                "Activity-density tier (Active ≥100/30d ⇒ Standing accrues; Dormant <10 ⇒ \
+            defense: "Activity-density tier (Active ≥100/30d ⇒ Standing accrues; Dormant <10 ⇒ \
                  baseline-only) + σ-decay rate vs claimed history + post-activation \
                  embedding-cluster proximity (RATCHET signal).",
             limits: "L-05 finite sample (n ≥ 100 floor) + L-08 slow capture",
             findings: vec![
-                ("Cost / dormant identity / year".into(),
-                    format!("${:.2}", cost_per_dormant_id_yr)),
-                ("5-year corpus cost @ 10K Sybils".into(),
-                    format!("${:.2}M", dormant_corpus_cost_5yr / 1e6)),
-                ("Activation-density floor (Active tier)".into(),
-                    "≥100 traces / 30 days per identity".into()),
-                ("Cost-asymmetry inequality".into(),
-                    "dC/dw grows linearly in N×t; dB/dw → 0 until activation crosses density floor".into()),
+                (
+                    "Cost / dormant identity / year".into(),
+                    format!("${:.2}", cost_per_dormant_id_yr),
+                ),
+                (
+                    "5-year corpus cost @ 10K Sybils".into(),
+                    format!("${:.2}M", dormant_corpus_cost_5yr / 1e6),
+                ),
+                (
+                    "Activation-density floor (Active tier)".into(),
+                    "≥100 traces / 30 days per identity".into(),
+                ),
+                (
+                    "Cost-asymmetry inequality".into(),
+                    "dC/dw grows linearly in N×t; dB/dw → 0 until activation crosses density floor"
+                        .into(),
+                ),
             ],
-            verdict:
-                "Cost floor at $1.2M / 5y / 10K identities is non-trivial but ~3 OOMs below \
+            verdict: "Cost floor at $1.2M / 5y / 10K identities is non-trivial but ~3 OOMs below \
                  nation-state budgets. Defense partial: activation-density catches naïve attacks; \
-                 F-AV-TIMESHIFT σ-decay paraphrase replay (research-grade) remains open.".into(),
+                 F-AV-TIMESHIFT σ-decay paraphrase replay (research-grade) remains open."
+                .into(),
         });
     }
 
@@ -1899,25 +2289,33 @@ fn fav_findings(s: &Scenario, lat: &LatencyEstimate) -> Vec<FavFinding> {
                 "All of a target peer's S2 directory read paths controlled, served a curated view. \
                  Target's local cohort-scope traffic UNAFFECTED (CEG locality dividend); \
                  cross-cohort moderation/policy/accord visibility poisoned.",
-            defense:
-                "Pending — N1 cryptographic addressing (content-hash destinations) + N2 \
+            defense: "Pending — N1 cryptographic addressing (content-hash destinations) + N2 \
                  multi-medium transport + witness-signed snapshots. Per Fed TM §3.3 Gap D: \
                  N1+N2 are Spec ONLY today, pending CIRISEdge Phase 1.",
             limits: "L-02 (no detector exists; attacker is adaptive)",
             findings: vec![
-                ("Local cohort fraction (UNEXPOSED by eclipse)".into(),
-                    format!("{:.1}%", local_share * 100.0)),
-                ("Cross-cohort fraction (EXPOSED to view manipulation)".into(),
-                    format!("{:.1}%", (1.0 - local_share) * 100.0)),
-                ("Detection by eclipsed peer (own resources)".into(),
-                    "0% — by definition, eclipsed peer cannot detect locally".into()),
-                ("Detection by non-eclipsed observers".into(),
-                    "Possible after cross-witness reconciliation; latency unspecified (Gap D)".into()),
+                (
+                    "Local cohort fraction (UNEXPOSED by eclipse)".into(),
+                    format!("{:.1}%", local_share * 100.0),
+                ),
+                (
+                    "Cross-cohort fraction (EXPOSED to view manipulation)".into(),
+                    format!("{:.1}%", (1.0 - local_share) * 100.0),
+                ),
+                (
+                    "Detection by eclipsed peer (own resources)".into(),
+                    "0% — by definition, eclipsed peer cannot detect locally".into(),
+                ),
+                (
+                    "Detection by non-eclipsed observers".into(),
+                    "Possible after cross-witness reconciliation; latency unspecified (Gap D)"
+                        .into(),
+                ),
             ],
-            verdict:
-                "LIVE EXPOSURE today. The CEG locality dividend bounds eclipse damage to \
+            verdict: "LIVE EXPOSURE today. The CEG locality dividend bounds eclipse damage to \
                  cross-cohort traffic only — for full_internet_v1's default cohort, that's \
-                 ~30% of total. Substrate has NO answer until Edge Phase 1 ships N1+N2.".into(),
+                 ~30% of total. Substrate has NO answer until Edge Phase 1 ships N1+N2."
+                .into(),
         });
     }
 
@@ -1941,33 +2339,55 @@ fn fav_findings(s: &Scenario, lat: &LatencyEstimate) -> Vec<FavFinding> {
             mechanism:
                 "Register key in region A, act, get revoked before replicating to region B. \
                  Attacker exploits the τ-window between revocation and worldwide propagation.",
-            defense:
-                "Q1 bounded-staleness CAP — SPECIFIED v1.1: quorum-write ⌈2N/3⌉ + bounded-\
+            defense: "Q1 bounded-staleness CAP — SPECIFIED v1.1: quorum-write ⌈2N/3⌉ + bounded-\
                  staleness reads (local iff staleness ≤ τ_partial; else transparent read-\
                  amplification to fresh-quorum) + merge rule 'higher-quorum-weight wins' + \
                  τ_normal ≤ 60s / τ_partial ≤ 300s composed with Gap A R1 bound.",
             limits: "L-06 correlation (multi-region clocks correlated by jurisdiction)",
             findings: vec![
-                ("Toy-estimated cross-region 2× RTT (proxy for rep-lag)".into(),
-                    format!("{:.2}s", est_replication_lag_s)),
-                ("Contract τ_normal (v1.1)".into(), format!("≤ {:.0}s", proposed_tau_normal_s)),
-                ("Contract τ_partial (v1.1)".into(), format!("≤ {:.0}s", proposed_tau_partial_s)),
-                ("Toy estimate vs τ_normal contract".into(),
+                (
+                    "Toy-estimated cross-region 2× RTT (proxy for rep-lag)".into(),
+                    format!("{:.2}s", est_replication_lag_s),
+                ),
+                (
+                    "Contract τ_normal (v1.1)".into(),
+                    format!("≤ {:.0}s", proposed_tau_normal_s),
+                ),
+                (
+                    "Contract τ_partial (v1.1)".into(),
+                    format!("≤ {:.0}s", proposed_tau_partial_s),
+                ),
+                (
+                    "Toy estimate vs τ_normal contract".into(),
                     if est_replication_lag_s <= proposed_tau_normal_s {
-                        format!("INSIDE bound ({:.0}× headroom)", proposed_tau_normal_s / est_replication_lag_s.max(0.001))
+                        format!(
+                            "INSIDE bound ({:.0}× headroom)",
+                            proposed_tau_normal_s / est_replication_lag_s.max(0.001)
+                        )
                     } else {
-                        format!("OUTSIDE bound ({:.1}× over)", est_replication_lag_s / proposed_tau_normal_s)
-                    }),
-                ("v1.1 status".into(),
-                    "Q1 CAP specified; downstream impl pending CIRISPersist#143 + CIRISRegistry#46".into()),
-                ("Cross-substrate test".into(),
-                    "CIRISConformance#7 Scenario 3 (partition + heal + merge-rule verification)".into()),
+                        format!(
+                            "OUTSIDE bound ({:.1}× over)",
+                            est_replication_lag_s / proposed_tau_normal_s
+                        )
+                    },
+                ),
+                (
+                    "v1.1 status".into(),
+                    "Q1 CAP specified; downstream impl pending CIRISPersist#143 + CIRISRegistry#46"
+                        .into(),
+                ),
+                (
+                    "Cross-substrate test".into(),
+                    "CIRISConformance#7 Scenario 3 (partition + heal + merge-rule verification)"
+                        .into(),
+                ),
             ],
             verdict:
                 "Gap B SPECIFIED v1.1: bounded-staleness CAP + merge rule contract is in place. \
                  Toy's RTT estimate (0.39s) is 154× inside τ_normal — the bound is feasible at \
                  substrate physics. Tier A9 downgraded TIER-HIGH → TIER-MED per v1.1; drops to \
-                 TIER-LOW once impl ships + Conformance#7 Scenario 3 passes.".into(),
+                 TIER-LOW once impl ships + Conformance#7 Scenario 3 passes."
+                    .into(),
         });
     }
 
@@ -1986,27 +2406,32 @@ fn fav_findings(s: &Scenario, lat: &LatencyEstimate) -> Vec<FavFinding> {
             name: "Substrate-availability denial / forced fail-secure RESTRICTED",
             doc_ref: "CIRISVerify Fed TM §6.5 + per-repo §7 + §8.3 fail-secure",
             status: FavStatus::Partial,
-            mechanism:
-                "DoS S2 endpoints for τ_grace+ε in a loop. Cumulative-degraded-time in the \
+            mechanism: "DoS S2 endpoints for τ_grace+ε in a loop. Cumulative-degraded-time in the \
                  sliding window trips substrate into RESTRICTED. Anti-grace-loop sliding \
                  window prevents reset-on-recovery but does not prevent forced RESTRICTED.",
-            defense:
-                "Fail-secure protocol §8.3: τ_grace=60s, τ_max=300s, sliding W=600s, \
+            defense: "Fail-secure protocol §8.3: τ_grace=60s, τ_max=300s, sliding W=600s, \
                  D_max=180s cumulative-degraded-time threshold within W. Ring buffer fallback \
                  (N=1024 signed decisions) when S3 degraded.",
             limits: "L-02 (adaptive adversary can pace DoS to maximize RESTRICTED fraction)",
             findings: vec![
                 ("Sliding window W".into(), format!("{:.0}s", w_s)),
-                ("D_max cumulative-degraded-time threshold".into(), format!("{:.0}s", d_max_s)),
-                ("Max forced-RESTRICTED fraction at minimum DoS cost".into(),
-                    format!("{:.0}% of operational time", max_forced_restricted_pct)),
-                ("Substrate state during DoS".into(),
-                    "Signed-RESTRICTED decisions; not silent failure".into()),
+                (
+                    "D_max cumulative-degraded-time threshold".into(),
+                    format!("{:.0}s", d_max_s),
+                ),
+                (
+                    "Max forced-RESTRICTED fraction at minimum DoS cost".into(),
+                    format!("{:.0}% of operational time", max_forced_restricted_pct),
+                ),
+                (
+                    "Substrate state during DoS".into(),
+                    "Signed-RESTRICTED decisions; not silent failure".into(),
+                ),
             ],
-            verdict:
-                "Substrate FAILS-SECURE (every decision signed; no silent misroute). But \
+            verdict: "Substrate FAILS-SECURE (every decision signed; no silent misroute). But \
                  attacker CAN hold RESTRICTED ~30% of the time at cost ~D_max/W × DoS-budget. \
-                 N2 multi-medium transport (Gap D, pending Edge) would raise this attack's cost.".into(),
+                 N2 multi-medium transport (Gap D, pending Edge) would raise this attack's cost."
+                .into(),
         });
     }
 
@@ -2035,19 +2460,33 @@ fn fav_findings(s: &Scenario, lat: &LatencyEstimate) -> Vec<FavFinding> {
                  sharding by identity-hash. Per Fed TM §6.5: Spec only, unimplemented.",
             limits: "L-05 finite sample at evaluator (rate-limit interaction with sample floor)",
             findings: vec![
-                ("Attacker cost / synthetic trace".into(),
-                    format!("~${:.4} (LLM inference, short trace)", attacker_cost_per_trace)),
-                ("RATCHET cost / evaluation".into(),
-                    format!("~${:.4} (manifold + centroid + N_eff)", ratchet_cost_per_eval)),
-                ("Cost-asymmetry ratio (defender pays more)".into(),
-                    format!("{:.1}× attacker advantage", cost_ratio)),
-                ("F-AV-RATCHET-DOS defense status".into(),
-                    "Spec only — per-identity budget + sharding UNIMPLEMENTED".into()),
+                (
+                    "Attacker cost / synthetic trace".into(),
+                    format!(
+                        "~${:.4} (LLM inference, short trace)",
+                        attacker_cost_per_trace
+                    ),
+                ),
+                (
+                    "RATCHET cost / evaluation".into(),
+                    format!(
+                        "~${:.4} (manifold + centroid + N_eff)",
+                        ratchet_cost_per_eval
+                    ),
+                ),
+                (
+                    "Cost-asymmetry ratio (defender pays more)".into(),
+                    format!("{:.1}× attacker advantage", cost_ratio),
+                ),
+                (
+                    "F-AV-RATCHET-DOS defense status".into(),
+                    "Spec only — per-identity budget + sharding UNIMPLEMENTED".into(),
+                ),
             ],
-            verdict:
-                "Cost asymmetry FAVORS attacker by ~10×. Substrate's named defenses \
+            verdict: "Cost asymmetry FAVORS attacker by ~10×. Substrate's named defenses \
                  (per-identity compute budget + backpressure) are Spec only. Live exposure \
-                 to RATCHET-eval starvation at full_internet_v1 scale.".into(),
+                 to RATCHET-eval starvation at full_internet_v1 scale."
+                .into(),
         });
     }
 
@@ -2061,8 +2500,8 @@ fn fav_findings(s: &Scenario, lat: &LatencyEstimate) -> Vec<FavFinding> {
         let stake_per_filing = p11_reconsideration_stake_credits();
         let max_filings_per_event = 3.0;
         let grounds = 3.0; // NEW_EVIDENCE / PROCEDURAL_ERROR / QUORUM_COMPROMISE
-        // Each filing forces fresh-quorum recusal + adjudication.
-        // Assume per-adjudication substrate cost = K × per-filing cost.
+                           // Each filing forces fresh-quorum recusal + adjudication.
+                           // Assume per-adjudication substrate cost = K × per-filing cost.
         let attacker_total = stake_per_filing * max_filings_per_event * grounds;
         let substrate_cost_multiplier = 5.0; // fresh-quorum recusal cost > attacker stake
         let substrate_total = attacker_total * substrate_cost_multiplier;
@@ -2121,8 +2560,13 @@ fn print_fav_findings(s: &Scenario, lat: &LatencyEstimate) {
     println!();
     println!("══ Adversarial findings — pinned to CIRISVerify Fed TM v1.0 F-AV catalog ══");
     println!();
-    println!("  Scenario: {} ({} users, depth {:.0}, cohort_publishable={:.0}%)",
-        s.name, fmt_count(s.n_users), s.trust_depth_avg, s.cohort.publishable() * 100.0);
+    println!(
+        "  Scenario: {} ({} users, depth {:.0}, cohort_publishable={:.0}%)",
+        s.name,
+        fmt_count(s.n_users),
+        s.trust_depth_avg,
+        s.cohort.publishable() * 100.0
+    );
     println!();
     for f in &findings {
         println!("  {} {} — {}", f.status.glyph(), f.fav_id, f.name);
@@ -2145,7 +2589,9 @@ fn print_fav_findings(s: &Scenario, lat: &LatencyEstimate) {
     println!("    Affected F-AVs collapsed: F-AV-11/12/13/ROLLBACK/FRONTRUN");
     println!("    Downstream impl: CIRISPersist#143 + CIRISRegistry#46");
     println!("    Conformance: CIRISConformance#7 Scenario 3 (regression test)");
-    println!("    Tier: A8 R1 timeliness TIER-HIGH → TIER-MED (drops to LOW once impl + test pass)");
+    println!(
+        "    Tier: A8 R1 timeliness TIER-HIGH → TIER-MED (drops to LOW once impl + test pass)"
+    );
     println!();
     println!("  Gap B — Q1 quorum / bounded-staleness CAP:           ✓ SPECIFIED v1.1");
     println!("    Contract: quorum-write ⌈2N/3⌉ + bounded-staleness reads + merge rule");
@@ -2189,7 +2635,9 @@ fn print_fav_findings(s: &Scenario, lat: &LatencyEstimate) {
 fn main() {
     println!("CIRIS Federation Scaling Model — toy v0.6 (post Verify Fed TM v1.1)");
     println!("Empirical baseline : Verify v2.8.0 + Edge v0.10.0 + Persist v3.3.0");
-    println!("Substrate triple   : keyring v4.4.3 + persist v3.6.9 + edge v1.1.3 (Conformance pin)");
+    println!(
+        "Substrate triple   : keyring v4.4.3 + persist v3.6.9 + edge v1.1.3 (Conformance pin)"
+    );
     println!("Verify HEAD        : v4.6.0 — Gap C hybrid KEX (X25519+ML-KEM-768) SHIPPED");
     println!("Regional realism   : UN WPP 2024 + GSMA Mobile Economy 2024 + ITU 2024 + IEA 2024");
     println!("Threat-model anchor: CIRISVerify Fed TM v1.1 (2026-05-31 — 3/4 §3.3 gaps closed)");

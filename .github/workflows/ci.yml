@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    # Fire on v-prefixed release tags so the wheel job runs on a cut.
+    # Mirrors persist + edge + lens-core.
+    tags: ['v*']
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # ─── linux-x86_64 — pyo3 path (covers PyO3 cdylib build) ────────────
+  linux-x86_64-test:
+    name: linux-x86_64 (python feature)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # ciris-keyring's `tpm` feature is auto-enabled for Linux targets
+      # by ciris-persist; cargo unions the feature across the graph so
+      # node-core inherits it even though it never asks for `tpm`.
+      # Building tss-esapi links system libtss2. Mirrors edge's
+      # CIRISEdge#12 + lens-core CI fix.
+      - name: install libtss2-dev (TPM build dep)
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test (python feature)
+        run: cargo test --features "python" --all-targets
+
+  # ─── darwin-aarch64 — Phase 1 macOS dev path ────────────────────────
+  # No python feature here per persist/edge/lens precedent — the abi3
+  # wheel build for darwin runs via the wheel matrix when it lands.
+  darwin-aarch64-test:
+    name: darwin-aarch64 (rlib only)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # `cache-bin: false` per persist v0.7.3 closure: the macos-14
+      # runner ships a rustup stub at ~/.cargo/bin/cargo that falls
+      # through to rustup-init when the toolchain isn't installed
+      # locally. dtolnay installs the real cargo into the same dir;
+      # without cache-bin:false, rust-cache restores the stub from a
+      # prior run, masking real cargo. Linux runners unaffected.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+      - name: cargo test (no python)
+        run: cargo test --no-default-features
+
+  # ─── lint: clippy + fmt (mission rejection gate) ────────────────────
+  lint:
+    name: clippy + fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # libtss2 for the tpm keyring feature — clippy compiles the full
+      # dependency graph. See linux-x86_64-test; CIRISEdge#12.
+      - name: install libtss2-dev (TPM build dep)
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+      - name: cargo clippy
+        run: cargo clippy --all-targets --features "python" -- -D warnings
+
+  # ─── license-audit: cargo deny (license + advisories) ───────────────
+  license-audit:
+    name: cargo deny (license + advisories)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  # ─── wheel-build: maturin abi3-py310 (release-artifact validation) ──
+  #
+  # Builds the abi3 cdylib wheel on linux-x86_64 (native runner) to
+  # prove the release artifact compiles via maturin. Runs on every
+  # push/PR so wheel-build drift is caught before a tag.
+  #
+  # NOT a publish job: CIRISNodeCore is not on PyPI yet. When a real
+  # PyPI consumer materializes, extend this to the full persist/edge
+  # matrix (linux aarch64 + darwin arm64) + a `publish-pypi` job gated
+  # on `refs/tags/v*` with a PyPI token — mirroring the sister repos.
+  wheel-build:
+    name: maturin abi3-py310 wheel (linux-x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install libtss2-dev (TPM build dep)
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: install maturin
+        run: pip install 'maturin>=1.5,<2'
+      - name: maturin build (abi3 wheel)
+        run: maturin build --release --features python
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ciris-node-core-wheel-linux-x86_64
+          path: target/wheels/*.whl

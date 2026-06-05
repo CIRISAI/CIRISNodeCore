@@ -10,7 +10,13 @@
 //! moderation, slashing, reconsideration request + attestation,
 //! promotion attestation) and the `is_canonical` flip on target rows.
 
-#![allow(dead_code)] // each integration-test file uses a subset
+#![allow(dead_code)]
+// each integration-test file uses a subset
+// The mock impls deliberately use RPITIT (`-> impl Future + Send`) to
+// mirror persist's `NodeCoreService` trait signature exactly, rather
+// than `async fn`. clippy prefers `async fn`; the RPITIT form is the
+// intentional contract-mirror here.
+#![allow(clippy::manual_async_fn)]
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -39,8 +45,8 @@ use ciris_persist::federation::{
 
 // AuditService support types — needed for the 3 required stubs
 // (record_entry / list_entries / verify_chain).
-use ciris_persist::audit::{AuditEntry, AuditFilter, AuditListPage, ChainVerification};
 use ciris_persist::audit::types::AuditCursor;
+use ciris_persist::audit::{AuditEntry, AuditFilter, AuditListPage, ChainVerification};
 
 #[derive(Default)]
 struct MockState {
@@ -125,16 +131,16 @@ impl MockEngine {
         standing: f64,
         active: bool,
     ) {
-        self.state
-            .lock()
-            .unwrap()
-            .expertise
-            .insert(
-                (contributor.into(), domain.into(), language.into()),
-                (standing, active),
-            );
+        self.state.lock().unwrap().expertise.insert(
+            (contributor.into(), domain.into(), language.into()),
+            (standing, active),
+        );
         if active {
-            self.state.lock().unwrap().active_set.insert(contributor.into());
+            self.state
+                .lock()
+                .unwrap()
+                .active_set
+                .insert(contributor.into());
         }
     }
 
@@ -248,7 +254,11 @@ impl NodeCoreService for MockEngine {
                 update.language,
                 update.subject,
             );
-            self.state.lock().unwrap().credits.insert(key, update.new_balance);
+            self.state
+                .lock()
+                .unwrap()
+                .credits
+                .insert(key, update.new_balance);
             Ok(())
         }
     }
@@ -264,14 +274,22 @@ impl NodeCoreService for MockEngine {
                     update.new_expertise
                 )));
             }
-            let key = (update.contributor_id.clone(), update.domain, update.language);
+            let key = (
+                update.contributor_id.clone(),
+                update.domain,
+                update.language,
+            );
             self.state
                 .lock()
                 .unwrap()
                 .expertise
                 .insert(key, (update.new_expertise, update.new_active_tier));
             if update.new_active_tier {
-                self.state.lock().unwrap().active_set.insert(update.contributor_id);
+                self.state
+                    .lock()
+                    .unwrap()
+                    .active_set
+                    .insert(update.contributor_id);
             }
             Ok(())
         }
@@ -294,7 +312,11 @@ impl NodeCoreService for MockEngine {
     ) -> impl Future<Output = Result<(), SubstrateError>> + Send {
         let envelope = att;
         async move {
-            self.state.lock().unwrap().slashing_attestations.push(envelope);
+            self.state
+                .lock()
+                .unwrap()
+                .slashing_attestations
+                .push(envelope);
             Ok(())
         }
     }
@@ -305,7 +327,11 @@ impl NodeCoreService for MockEngine {
     ) -> impl Future<Output = Result<(), SubstrateError>> + Send {
         let envelope = req;
         async move {
-            self.state.lock().unwrap().reconsideration_requests.push(envelope);
+            self.state
+                .lock()
+                .unwrap()
+                .reconsideration_requests
+                .push(envelope);
             Ok(())
         }
     }
@@ -316,7 +342,11 @@ impl NodeCoreService for MockEngine {
     ) -> impl Future<Output = Result<(), SubstrateError>> + Send {
         let envelope = att;
         async move {
-            self.state.lock().unwrap().reconsideration_attestations.push(envelope);
+            self.state
+                .lock()
+                .unwrap()
+                .reconsideration_attestations
+                .push(envelope);
             Ok(())
         }
     }
@@ -407,7 +437,6 @@ impl NodeCoreService for MockEngine {
         _cursor: Option<ListCursor>,
         _limit: i64,
     ) -> impl Future<Output = Result<ContributionListPage, SubstrateError>> + Send {
-        let filter = filter;
         async move {
             let st = self.state.lock().unwrap();
             let items: Vec<ContributionEnvelope> = st
@@ -440,7 +469,11 @@ impl NodeCoreService for MockEngine {
                         }
                     }
                     if let Some(canonical) = filter.is_canonical {
-                        let is_can = st.canonical.get(&env.contribution_id).copied().unwrap_or(false);
+                        let is_can = st
+                            .canonical
+                            .get(&env.contribution_id)
+                            .copied()
+                            .unwrap_or(false);
                         if is_can != canonical {
                             return false;
                         }
@@ -479,7 +512,10 @@ impl NodeCoreService for MockEngine {
                 })
                 .cloned()
                 .collect();
-            Ok(VoteListPage { items, next_cursor: None })
+            Ok(VoteListPage {
+                items,
+                next_cursor: None,
+            })
         }
     }
 
@@ -497,7 +533,10 @@ impl NodeCoreService for MockEngine {
         &self,
         _announcement_id: &str,
     ) -> impl Future<
-        Output = Result<Vec<ciris_persist::cirisnode::federation_announcement::DeliveryAttestation>, SubstrateError>,
+        Output = Result<
+            Vec<ciris_persist::cirisnode::federation_announcement::DeliveryAttestation>,
+            SubstrateError,
+        >,
     > + Send {
         async { Ok(Vec::new()) }
     }
@@ -604,9 +643,7 @@ impl NodeCoreService for MockEngine {
     ) -> impl Future<
         Output = Result<ciris_persist::cirisnode::service::RetireKeyGrantsReport, SubstrateError>,
     > + Send {
-        async move {
-            Ok(ciris_persist::cirisnode::service::RetireKeyGrantsReport::default())
-        }
+        async move { Ok(ciris_persist::cirisnode::service::RetireKeyGrantsReport::default()) }
     }
 }
 
@@ -619,7 +656,9 @@ type FedErr = ciris_persist::federation::Error;
 /// paths must use persist's actual MemoryBackend; node-core tests
 /// touch only the trust subset.
 fn fed_stub(method: &'static str) -> FedErr {
-    FedErr::Backend(format!("MockEngine: {method} not implemented in node-core test fixtures"))
+    FedErr::Backend(format!(
+        "MockEngine: {method} not implemented in node-core test fixtures"
+    ))
 }
 
 #[async_trait::async_trait]
@@ -634,7 +673,9 @@ impl FederationDirectory for MockEngine {
     async fn grant_trust(&self, grant: TrustGrant) -> Result<(), FedErr> {
         // Mirror persist::store::memory::validate_trust_grant.
         if grant.key.is_empty() {
-            return Err(FedErr::InvalidArgument("grant.key must be non-empty".into()));
+            return Err(FedErr::InvalidArgument(
+                "grant.key must be non-empty".into(),
+            ));
         }
         if grant.trusted_by.is_empty() {
             return Err(FedErr::InvalidArgument(
@@ -812,10 +853,7 @@ impl FederationDirectory for MockEngine {
         Err(fed_stub("attach_revocation_pqc_signature"))
     }
 
-    async fn list_hybrid_pending_keys(
-        &self,
-        _limit: i64,
-    ) -> Result<Vec<HybridPendingRow>, FedErr> {
+    async fn list_hybrid_pending_keys(&self, _limit: i64) -> Result<Vec<HybridPendingRow>, FedErr> {
         Err(fed_stub("list_hybrid_pending_keys"))
     }
 
@@ -892,8 +930,7 @@ impl AuditService for MockEngine {
         scope: &str,
         include_revoked: bool,
         include_expired: bool,
-    ) -> impl Future<Output = Result<Vec<TrustGrantRow>, ciris_persist::audit::Error>> + Send
-    {
+    ) -> impl Future<Output = Result<Vec<TrustGrantRow>, ciris_persist::audit::Error>> + Send {
         let grantee = grantee_key.to_owned();
         let scope = scope.to_owned();
         async move {
@@ -917,8 +954,7 @@ impl AuditService for MockEngine {
     fn list_trust_grants(
         &self,
         filter: TrustGrantFilter,
-    ) -> impl Future<Output = Result<Vec<TrustGrantRow>, ciris_persist::audit::Error>> + Send
-    {
+    ) -> impl Future<Output = Result<Vec<TrustGrantRow>, ciris_persist::audit::Error>> + Send {
         async move {
             let st = self.state.lock().unwrap();
             let now = Utc::now();
@@ -961,7 +997,7 @@ impl AuditService for MockEngine {
                 .cloned()
                 .collect();
             // Deterministic ordering for tests.
-            rows.sort_by(|a, b| a.grant_id.cmp(&b.grant_id));
+            rows.sort_by_key(|a| a.grant_id);
             Ok(rows)
         }
     }

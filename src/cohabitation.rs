@@ -58,7 +58,9 @@ pub async fn install<E>(service: Arc<E>, edge: &Edge) -> Result<(), EdgeError>
 where
     E: NodeCoreService + 'static,
 {
-    Arc::new(NodeCore::new(service)).install_handlers(edge).await
+    Arc::new(NodeCore::new(service))
+        .install_handlers(edge)
+        .await
 }
 
 /// Substrate adapter — wire node-core in from persist's

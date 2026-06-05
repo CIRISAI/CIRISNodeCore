@@ -60,7 +60,10 @@ mod tests {
     #[test]
     fn urgency_snake_case() {
         assert_eq!(serde_json::to_string(&Urgency::Low).unwrap(), r#""low""#);
-        assert_eq!(serde_json::to_string(&Urgency::Normal).unwrap(), r#""normal""#);
+        assert_eq!(
+            serde_json::to_string(&Urgency::Normal).unwrap(),
+            r#""normal""#
+        );
         assert_eq!(serde_json::to_string(&Urgency::High).unwrap(), r#""high""#);
     }
 

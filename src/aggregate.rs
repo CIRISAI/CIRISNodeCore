@@ -150,7 +150,12 @@ pub async fn weighted_aggregate<E: NodeCoreService>(
         };
         let subject = vote.cell.subject.clone().unwrap_or_default();
         let weight = engine
-            .read_vote_weight(&vote.voter_id, &vote.cell.domain, &vote.cell.language, &subject)
+            .read_vote_weight(
+                &vote.voter_id,
+                &vote.cell.domain,
+                &vote.cell.language,
+                &subject,
+            )
             .await?
             .map(|w| w.weight)
             .unwrap_or(0.0);
@@ -327,9 +332,18 @@ pub async fn cohort_weighted_aggregate<E: NodeCoreService>(
         };
         let agg = weighted_aggregate(engine, &cid, minimum_quorum_per_occurrence).await?;
         let (ratio, weight) = match agg {
-            Aggregate::Resolved { approve_weight, reject_weight, abstain_weight, .. } => {
+            Aggregate::Resolved {
+                approve_weight,
+                reject_weight,
+                abstain_weight,
+                ..
+            } => {
                 let denom = approve_weight + reject_weight;
-                let ratio = if denom > 0.0 { Some(approve_weight / denom) } else { None };
+                let ratio = if denom > 0.0 {
+                    Some(approve_weight / denom)
+                } else {
+                    None
+                };
                 let weight = approve_weight + reject_weight + abstain_weight;
                 (ratio, weight)
             }
@@ -354,7 +368,11 @@ pub async fn cohort_weighted_aggregate<E: NodeCoreService>(
     };
 
     let coverage = cohort.expected_occurrence_count.map(|expected| {
-        if expected == 0 { 0.0 } else { included.len() as f64 / expected as f64 }
+        if expected == 0 {
+            0.0
+        } else {
+            included.len() as f64 / expected as f64
+        }
     });
 
     let total_fleet_weight: f64 = per_occ_weight.iter().sum();

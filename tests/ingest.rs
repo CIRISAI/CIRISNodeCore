@@ -7,6 +7,11 @@
 //!      `contributor_id()` (no proxy-signing)
 //!   3. `NodeCoreService::put_contribution` persists the envelope
 
+// `MockBlobStorage` mirrors persist's `BlobStorage` trait via RPITIT
+// (`-> impl Future`); clippy prefers `async fn` but the contract-mirror
+// form is intentional here.
+#![allow(clippy::manual_async_fn)]
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -50,7 +55,13 @@ impl MockBlobStorage {
         self.state.lock().unwrap().attestations.len()
     }
     fn last_attestation(&self) -> PutBlobAttestation {
-        self.state.lock().unwrap().attestations.last().unwrap().clone()
+        self.state
+            .lock()
+            .unwrap()
+            .attestations
+            .last()
+            .unwrap()
+            .clone()
     }
 }
 
@@ -84,7 +95,12 @@ impl BlobStorage for MockBlobStorage {
         let state = self.state.clone();
         let sha = *sha256;
         async move {
-            Ok(state.lock().unwrap().blobs.get(&sha).map(|(b, _)| b.clone()))
+            Ok(state
+                .lock()
+                .unwrap()
+                .blobs
+                .get(&sha)
+                .map(|(b, _)| b.clone()))
         }
     }
 
@@ -189,17 +205,29 @@ async fn ingest_encyclopedia_article_full_sequence() {
 
     // The blob landed with its own SHA + persist-assembled holder.
     assert_eq!(mock_blobs.blob_count(), 1, "exactly one blob stored");
-    assert_eq!(mock_blobs.attestation_count(), 1, "exactly one holder attestation emitted");
-    assert_eq!(outcome.content_sha256_hex.len(), 64, "content_sha256_hex is 64-char hex");
+    assert_eq!(
+        mock_blobs.attestation_count(),
+        1,
+        "exactly one holder attestation emitted"
+    );
+    assert_eq!(
+        outcome.content_sha256_hex.len(),
+        64,
+        "content_sha256_hex is 64-char hex"
+    );
 
     // The holder attestation cites the host's own federation key.
     let holder = mock_blobs.last_attestation();
     assert_eq!(holder.attesting_key_id, "test-local-key");
     assert_eq!(holder.scrub_key_id, "test-local-key");
-    assert!(!holder.scrub_signature_classical.is_empty(),
-        "persist signed the holds_bytes envelope");
-    assert!(!holder.original_content_hash_hex.is_empty(),
-        "original_content_hash_hex is the canonical-bytes SHA, not the blob SHA");
+    assert!(
+        !holder.scrub_signature_classical.is_empty(),
+        "persist signed the holds_bytes envelope"
+    );
+    assert!(
+        !holder.original_content_hash_hex.is_empty(),
+        "original_content_hash_hex is the canonical-bytes SHA, not the blob SHA"
+    );
 
     // The Contribution envelope was persisted and signed by the host
     // identity (no proxy-signing — `author_id` is the host's pubkey,
@@ -209,8 +237,10 @@ async fn ingest_encyclopedia_article_full_sequence() {
     assert_eq!(contributions.len(), 1, "exactly one Contribution stored");
     let env = &contributions[0];
     assert_eq!(env.contribution_id, outcome.contribution_id);
-    assert_eq!(env.author_id, author_id_b64,
-        "author_id is the HOST's contributor_id, not the encyclopedia entity");
+    assert_eq!(
+        env.author_id, author_id_b64,
+        "author_id is the HOST's contributor_id, not the encyclopedia entity"
+    );
     assert_eq!(env.subject.domain, "general_knowledge");
     assert_eq!(env.subject.language, "en");
     assert_eq!(env.subject.subject.as_deref(), Some("external_content"));
@@ -218,13 +248,22 @@ async fn ingest_encyclopedia_article_full_sequence() {
     // The payload carries the sub_kind discriminator + the
     // entity_key_id of what the content is about.
     let payload = env.payload.as_object().expect("payload is JSON object");
-    assert_eq!(payload.get("sub_kind").and_then(|v| v.as_str()),
-        Some("encyclopedia_article"));
-    assert_eq!(payload.get("entity_key_id").and_then(|v| v.as_str()),
-        Some("wikipedia:article:einstein"));
-    assert_eq!(payload.get("cohort_scope").and_then(|v| v.as_str()), Some("federation"));
-    assert_eq!(payload.get("content_sha256").and_then(|v| v.as_str()),
-        Some(outcome.content_sha256_hex.as_str()));
+    assert_eq!(
+        payload.get("sub_kind").and_then(|v| v.as_str()),
+        Some("encyclopedia_article")
+    );
+    assert_eq!(
+        payload.get("entity_key_id").and_then(|v| v.as_str()),
+        Some("wikipedia:article:einstein")
+    );
+    assert_eq!(
+        payload.get("cohort_scope").and_then(|v| v.as_str()),
+        Some("federation")
+    );
+    assert_eq!(
+        payload.get("content_sha256").and_then(|v| v.as_str()),
+        Some(outcome.content_sha256_hex.as_str())
+    );
 }
 
 #[tokio::test]
@@ -253,7 +292,9 @@ async fn ingest_records_payload_observations_about_third_parties_not_envelope_id
     // The article's entity_key_id is "wikipedia:article:einstein" —
     // very deliberately NOT the host's identity. If proxy-signing
     // leaked, author_id would (wrongly) be derived from the entity.
-    let _ = ingest_encyclopedia_article(sample_article("community"), cell, &ctx).await.unwrap();
+    let _ = ingest_encyclopedia_article(sample_article("community"), cell, &ctx)
+        .await
+        .unwrap();
 
     let env = &mock_engine.contributions()[0];
     assert_eq!(env.author_id, host_id_b64);

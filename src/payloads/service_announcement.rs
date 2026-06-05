@@ -78,9 +78,18 @@ mod tests {
 
     #[test]
     fn service_kind_snake_case() {
-        assert_eq!(serde_json::to_string(&ServiceKind::Llm).unwrap(), r#""llm""#);
-        assert_eq!(serde_json::to_string(&ServiceKind::Embedding).unwrap(), r#""embedding""#);
-        assert_eq!(serde_json::to_string(&ServiceKind::Tool).unwrap(), r#""tool""#);
+        assert_eq!(
+            serde_json::to_string(&ServiceKind::Llm).unwrap(),
+            r#""llm""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ServiceKind::Embedding).unwrap(),
+            r#""embedding""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ServiceKind::Tool).unwrap(),
+            r#""tool""#
+        );
     }
 
     #[test]

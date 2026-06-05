@@ -271,10 +271,11 @@ pub async fn list_vouched_for<E: NodeCoreService>(
         let Ok(payload) = serde_json::from_value::<RegistryVouchPayload>(env.payload) else {
             continue;
         };
-        if payload.vouched_domain == domain && payload.is_active_at(now) {
-            if !out.contains(&payload.vouched_key) {
-                out.push(payload.vouched_key);
-            }
+        if payload.vouched_domain == domain
+            && payload.is_active_at(now)
+            && !out.contains(&payload.vouched_key)
+        {
+            out.push(payload.vouched_key);
         }
     }
     Ok(out)

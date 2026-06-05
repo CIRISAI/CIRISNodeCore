@@ -2,11 +2,11 @@
 //!
 //! Wikipedia + news + other encyclopedic / journalistic sources absorbed
 //! into the federation as `external_content` Contributions per
-//! [SCHEMA.md §4.29](../SCHEMA.md). The 1+4 wire format absorbs both
-//! shape families through a `sub_kind` discriminator + shared envelope
-//! + new dimension prefix vocabulary (the prefixes themselves land via
-//! a Registry FSD-002 §4.9.2 amendment; this module produces payloads
-//! that reference them).
+//! `SCHEMA.md` §4.29. The 1+4 wire format absorbs both shape families
+//! through a `sub_kind` discriminator, a shared envelope, and new
+//! dimension prefix vocabulary. The prefixes themselves land via a
+//! Registry FSD-002 §4.9.2 amendment; this module produces payloads
+//! that reference them.
 //!
 //! # What this module provides (Phase 2A)
 //!
@@ -73,12 +73,6 @@ pub mod scope {
 
 /// Wikipedia-shape article source. Populated by an importer that walks
 /// a Wikipedia XML dump / API response / mirror archive.
-#[allow(missing_docs)]
-#[allow(missing_docs)]
-#[allow(missing_docs)]
-#[allow(missing_docs)]
-#[allow(missing_docs)]
-#[allow(missing_docs)]
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncyclopediaArticleSource {
@@ -300,7 +294,9 @@ pub fn build_encyclopedia_payload(
         return Err(IngestError::EmptyBody);
     }
     if !is_promotable_scope(&article.cohort_scope) {
-        return Err(IngestError::UnknownPromotionScope(article.cohort_scope.clone()));
+        return Err(IngestError::UnknownPromotionScope(
+            article.cohort_scope.clone(),
+        ));
     }
     let sha256 = compute_sha256(&article.body_bytes);
 
@@ -354,7 +350,9 @@ pub fn build_news_payload(
         return Err(IngestError::EmptyHeadline);
     }
     if !is_promotable_scope(&article.cohort_scope) {
-        return Err(IngestError::UnknownPromotionScope(article.cohort_scope.clone()));
+        return Err(IngestError::UnknownPromotionScope(
+            article.cohort_scope.clone(),
+        ));
     }
     let sha256 = compute_sha256(&article.body_bytes);
 
@@ -632,7 +630,9 @@ pub fn build_accord_payload(
         return Err(IngestError::EmptyVersionTag);
     }
     if !is_promotable_scope(&source.cohort_scope) {
-        return Err(IngestError::UnknownPromotionScope(source.cohort_scope.clone()));
+        return Err(IngestError::UnknownPromotionScope(
+            source.cohort_scope.clone(),
+        ));
     }
     let sha256 = compute_sha256(&source.body_bytes);
 
@@ -1060,8 +1060,14 @@ impl ContentClass {
     pub fn art_class(&self) -> bool {
         matches!(
             self,
-            Self::Film | Self::ShortFilm | Self::Documentary | Self::ArtPiece
-                | Self::Theatre | Self::Performance | Self::Animation | Self::Experimental
+            Self::Film
+                | Self::ShortFilm
+                | Self::Documentary
+                | Self::ArtPiece
+                | Self::Theatre
+                | Self::Performance
+                | Self::Animation
+                | Self::Experimental
         )
     }
     /// True if the class is news-editorial-framing (current-events
@@ -1324,7 +1330,9 @@ pub fn build_image_payload(
         return Err(IngestError::EmptyBody);
     }
     if !is_promotable_scope(&source.cohort_scope) {
-        return Err(IngestError::UnknownPromotionScope(source.cohort_scope.clone()));
+        return Err(IngestError::UnknownPromotionScope(
+            source.cohort_scope.clone(),
+        ));
     }
     let is_federation_scope = matches!(
         source.cohort_scope.as_str(),
@@ -1391,7 +1399,9 @@ pub fn build_audio_payload(
         return Err(IngestError::EmptyBody);
     }
     if !is_promotable_scope(&source.cohort_scope) {
-        return Err(IngestError::UnknownPromotionScope(source.cohort_scope.clone()));
+        return Err(IngestError::UnknownPromotionScope(
+            source.cohort_scope.clone(),
+        ));
     }
     let is_federation_scope = matches!(
         source.cohort_scope.as_str(),
@@ -1462,7 +1472,9 @@ pub fn build_video_payload(
         return Err(IngestError::EmptyBody);
     }
     if !is_promotable_scope(&source.cohort_scope) {
-        return Err(IngestError::UnknownPromotionScope(source.cohort_scope.clone()));
+        return Err(IngestError::UnknownPromotionScope(
+            source.cohort_scope.clone(),
+        ));
     }
     let is_federation_scope = matches!(
         source.cohort_scope.as_str(),
@@ -1535,7 +1547,9 @@ pub fn build_film_payload(
         return Err(IngestError::EmptyBody);
     }
     if !is_promotable_scope(&source.cohort_scope) {
-        return Err(IngestError::UnknownPromotionScope(source.cohort_scope.clone()));
+        return Err(IngestError::UnknownPromotionScope(
+            source.cohort_scope.clone(),
+        ));
     }
     if source.captions.trim().is_empty() {
         return Err(IngestError::MissingAccessibilityText);
@@ -1611,7 +1625,9 @@ pub fn build_model_3d_payload(
         return Err(IngestError::EmptyBody);
     }
     if !is_promotable_scope(&source.cohort_scope) {
-        return Err(IngestError::UnknownPromotionScope(source.cohort_scope.clone()));
+        return Err(IngestError::UnknownPromotionScope(
+            source.cohort_scope.clone(),
+        ));
     }
     validate_multimedia_federation_constraints(
         &source.cohort_scope,
@@ -1687,7 +1703,9 @@ pub fn build_chat_payload(
         return Err(IngestError::EmptySenderHandle);
     }
     if !is_promotable_scope(&source.cohort_scope) {
-        return Err(IngestError::UnknownPromotionScope(source.cohort_scope.clone()));
+        return Err(IngestError::UnknownPromotionScope(
+            source.cohort_scope.clone(),
+        ));
     }
     let sha256 = compute_sha256(&source.body_bytes);
 
@@ -1760,7 +1778,9 @@ pub fn build_blog_payload(
         return Err(IngestError::EmptyPostTitle);
     }
     if !is_promotable_scope(&source.cohort_scope) {
-        return Err(IngestError::UnknownPromotionScope(source.cohort_scope.clone()));
+        return Err(IngestError::UnknownPromotionScope(
+            source.cohort_scope.clone(),
+        ));
     }
     let sha256 = compute_sha256(&source.body_bytes);
 
@@ -1833,7 +1853,9 @@ pub fn build_event_listing_payload(
         return Err(IngestError::EmptyEventTitle);
     }
     if !is_promotable_scope(&source.cohort_scope) {
-        return Err(IngestError::UnknownPromotionScope(source.cohort_scope.clone()));
+        return Err(IngestError::UnknownPromotionScope(
+            source.cohort_scope.clone(),
+        ));
     }
     if let Some(end) = source.ends_at {
         if end < source.starts_at {
@@ -2230,8 +2252,9 @@ pub fn build_family_payload(source: &FamilySource) -> Result<serde_json::Value, 
     }
     // Validate the protocol parses to a recognized canonical shape (open
     // vocab still admits custom:*, but a malformed quorum:M/N is caught).
-    parse_consensus_protocol(&source.consensus_protocol)
-        .ok_or_else(|| IngestError::MalformedConsensusProtocol(source.consensus_protocol.clone()))?;
+    parse_consensus_protocol(&source.consensus_protocol).ok_or_else(|| {
+        IngestError::MalformedConsensusProtocol(source.consensus_protocol.clone())
+    })?;
     if source.members.is_empty() {
         return Err(IngestError::EmptyFamilyMembers);
     }
@@ -2306,7 +2329,9 @@ pub fn parse_consensus_protocol(s: &str) -> Option<ConsensusProtocol> {
                 if rubric.is_empty() {
                     return None;
                 }
-                Some(ConsensusProtocol::Weighted { rubric: rubric.to_owned() })
+                Some(ConsensusProtocol::Weighted {
+                    rubric: rubric.to_owned(),
+                })
             } else if let Some(id) = s.strip_prefix("custom:") {
                 if id.is_empty() {
                     return None;
@@ -2413,7 +2438,10 @@ pub fn evaluate_consensus_protocol(
             if got >= roster && roster > 0 {
                 ConsensusResult::Satisfied
             } else {
-                ConsensusResult::Insufficient { needed: roster, got }
+                ConsensusResult::Insufficient {
+                    needed: roster,
+                    got,
+                }
             }
         }
         ConsensusProtocol::Majority => {
@@ -2502,7 +2530,9 @@ pub fn promote_payload(
     let mut promoted = prior_payload.clone();
 
     if !is_promotable_scope(new_target_scope) {
-        return Err(IngestError::UnknownPromotionScope(new_target_scope.to_owned()));
+        return Err(IngestError::UnknownPromotionScope(
+            new_target_scope.to_owned(),
+        ));
     }
 
     if let Some(sk) = new_sub_kind {
@@ -2536,13 +2566,7 @@ pub fn promote_payload(
 pub fn is_promotable_scope(scope: &str) -> bool {
     matches!(
         scope,
-        "self"
-            | "family"
-            | "community"
-            | "affiliations"
-            | "species"
-            | "planet"
-            | "federation"
+        "self" | "family" | "community" | "affiliations" | "species" | "planet" | "federation"
     )
 }
 
@@ -3114,7 +3138,12 @@ where
 {
     let (payload, content_sha) = build_image_payload(&source)?;
     finalize_external_content_ingest(
-        payload, content_sha, source.body_bytes, source.body_media_type, cell, ctx,
+        payload,
+        content_sha,
+        source.body_bytes,
+        source.body_media_type,
+        cell,
+        ctx,
     )
     .await
 }
@@ -3132,7 +3161,12 @@ where
 {
     let (payload, content_sha) = build_audio_payload(&source)?;
     finalize_external_content_ingest(
-        payload, content_sha, source.body_bytes, source.body_media_type, cell, ctx,
+        payload,
+        content_sha,
+        source.body_bytes,
+        source.body_media_type,
+        cell,
+        ctx,
     )
     .await
 }
@@ -3150,7 +3184,12 @@ where
 {
     let (payload, content_sha) = build_video_payload(&source)?;
     finalize_external_content_ingest(
-        payload, content_sha, source.body_bytes, source.body_media_type, cell, ctx,
+        payload,
+        content_sha,
+        source.body_bytes,
+        source.body_media_type,
+        cell,
+        ctx,
     )
     .await
 }
@@ -3171,7 +3210,12 @@ where
 {
     let (payload, content_sha) = build_film_payload(&source)?;
     finalize_external_content_ingest(
-        payload, content_sha, source.body_bytes, source.body_media_type, cell, ctx,
+        payload,
+        content_sha,
+        source.body_bytes,
+        source.body_media_type,
+        cell,
+        ctx,
     )
     .await
 }
@@ -3190,7 +3234,12 @@ where
 {
     let (payload, content_sha) = build_model_3d_payload(&source)?;
     finalize_external_content_ingest(
-        payload, content_sha, source.body_bytes, source.body_media_type, cell, ctx,
+        payload,
+        content_sha,
+        source.body_bytes,
+        source.body_media_type,
+        cell,
+        ctx,
     )
     .await
 }
@@ -3452,11 +3501,11 @@ mod tests {
         assert_eq!(payload["source"]["local_kind"], "notes");
         assert_eq!(payload["source"]["owner_key_id"], "user-key-abc123");
         assert_eq!(payload["source"]["title"], "Research notes on coherence");
+        assert_eq!(payload["source"]["tags"].as_array().unwrap().len(), 2);
         assert_eq!(
-            payload["source"]["tags"].as_array().unwrap().len(),
-            2
+            payload["source"]["promote_hint"]["target_scope"],
+            "community"
         );
-        assert_eq!(payload["source"]["promote_hint"]["target_scope"], "community");
     }
 
     #[test]
@@ -3560,8 +3609,11 @@ mod tests {
             "content_sha256": "abc",
         });
         let promoted = promote_payload(&payload, "c-1", None, "community").unwrap();
-        assert_eq!(promoted["sub_kind"], "local_data");   // unchanged
-        assert_eq!(promoted["supersedes_payload"]["new_target_scope"], "community");
+        assert_eq!(promoted["sub_kind"], "local_data"); // unchanged
+        assert_eq!(
+            promoted["supersedes_payload"]["new_target_scope"],
+            "community"
+        );
     }
 
     // --- chat_message --------------------------------------------------
@@ -3646,7 +3698,10 @@ mod tests {
             citations: vec![],
             valid_until: None,
         };
-        assert!(matches!(build_chat_payload(&src), Err(IngestError::EmptyPlatform)));
+        assert!(matches!(
+            build_chat_payload(&src),
+            Err(IngestError::EmptyPlatform)
+        ));
 
         src.platform = "discord".into();
         src.conversation_id = "".into();
@@ -3701,7 +3756,7 @@ mod tests {
         assert_eq!(payload["source"]["author_key_id"], "author-key-eric");
         assert_eq!(payload["source"]["post_title"], "On Coherence");
         assert_eq!(payload["source"]["tags"].as_array().unwrap().len(), 2);
-        assert!(payload.get("valid_until").is_none());  // typical blog: indefinite
+        assert!(payload.get("valid_until").is_none()); // typical blog: indefinite
     }
 
     #[test]
@@ -3724,7 +3779,10 @@ mod tests {
             citations: vec![],
             valid_until: None,
         };
-        assert!(matches!(build_blog_payload(&src), Err(IngestError::EmptyBlogId)));
+        assert!(matches!(
+            build_blog_payload(&src),
+            Err(IngestError::EmptyBlogId)
+        ));
 
         src.blog_id = "blog-1".into();
         src.author_handle = "".into();
@@ -3805,7 +3863,10 @@ mod tests {
         assert_eq!(payload["source"]["venue"]["name"], "Brooklyn Hangar");
         assert_eq!(payload["source"]["capacity"], 80);
         assert_eq!(payload["source"]["ticket_grant_policy"], "open");
-        assert_eq!(payload["source"]["organizer_key_id"], "organizer-rust-nyc-key");
+        assert_eq!(
+            payload["source"]["organizer_key_id"],
+            "organizer-rust-nyc-key"
+        );
     }
 
     #[test]
@@ -3834,7 +3895,10 @@ mod tests {
         let (payload, _) = build_event_listing_payload(&src).unwrap();
         assert_eq!(payload["source"]["venue"]["kind"], "virtual");
         assert_eq!(payload["source"]["venue"]["url"], "https://lu.ma/abc-zoom");
-        assert_eq!(payload["source"]["ticket_grant_policy"], "approval_required");
+        assert_eq!(
+            payload["source"]["ticket_grant_policy"],
+            "approval_required"
+        );
         assert!(payload["source"]["capacity"].is_null());
     }
 
@@ -3866,7 +3930,10 @@ mod tests {
         };
         let (payload, _) = build_event_listing_payload(&src).unwrap();
         assert_eq!(payload["source"]["venue"]["kind"], "hybrid");
-        assert_eq!(payload["source"]["venue"]["physical_name"], "MIT Stata Center");
+        assert_eq!(
+            payload["source"]["venue"]["physical_name"],
+            "MIT Stata Center"
+        );
         assert_eq!(
             payload["source"]["venue"]["virtual_url"],
             "https://stream.ciris.ai/conf-2026"
@@ -3887,7 +3954,9 @@ mod tests {
                 title: "Meetup".into(),
                 starts_at: parse_dt("2026-09-15T18:00:00Z"),
                 ends_at: None,
-                venue: EventVenue::Virtual { url: "https://example".into() },
+                venue: EventVenue::Virtual {
+                    url: "https://example".into(),
+                },
                 capacity: None,
                 ticket_grant_policy: TicketGrantPolicy::Open,
                 cohort_scope: "community".into(),
@@ -3929,7 +3998,9 @@ mod tests {
             title: "Inverted".into(),
             starts_at: parse_dt("2026-09-15T18:00:00Z"),
             ends_at: Some(parse_dt("2026-09-15T17:00:00Z")), // before starts_at
-            venue: EventVenue::Virtual { url: "https://x".into() },
+            venue: EventVenue::Virtual {
+                url: "https://x".into(),
+            },
             capacity: None,
             ticket_grant_policy: TicketGrantPolicy::Open,
             cohort_scope: "community".into(),
@@ -4077,7 +4148,7 @@ mod tests {
         assert_eq!(parts.len(), 5);
         assert_eq!(parts[0].len(), 8);
         assert_eq!(parts[2].chars().next(), Some('4')); // version 4
-        // distinct each call
+                                                        // distinct each call
         assert_ne!(build_bilateral_pair_id(), build_bilateral_pair_id());
     }
 
@@ -4093,13 +4164,9 @@ mod tests {
             at,
         )
         .unwrap();
-        let acc = build_bilateral_partnership_accept_payload(
-            "producer-bob",
-            "subject-alice",
-            &pair,
-            at,
-        )
-        .unwrap();
+        let acc =
+            build_bilateral_partnership_accept_payload("producer-bob", "subject-alice", &pair, at)
+                .unwrap();
         // both halves carry the same pair_id with stance granted
         assert_eq!(req["bilateral_pair_id"], acc["bilateral_pair_id"]);
         assert_eq!(req["stance"], "granted");
@@ -4136,7 +4203,8 @@ mod tests {
         assert_eq!(a, b, "deterministic");
         assert_eq!(a.len(), 64, "bare 64-char hex, no prefix");
         assert!(
-            a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            a.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
             "lowercase hex only per §0.6"
         );
         // platform + id discriminate
@@ -4155,7 +4223,10 @@ mod tests {
         // SHA-256 of "discord:user:42" — bare hex per §0.6.
         // PROVISIONAL preimage convention (PIN-1, CIRISRegistry#53).
         let digest = compute_sha256("discord:user:42".as_bytes());
-        assert_eq!(canonical_subject_hash("discord", "user", "42"), hex_encode(&digest));
+        assert_eq!(
+            canonical_subject_hash("discord", "user", "42"),
+            hex_encode(&digest)
+        );
     }
 
     // ─── CEG 0.7 identity_occurrence + family + consensus (NodeCore#30) ──
@@ -4308,20 +4379,33 @@ mod tests {
 
     #[test]
     fn parse_consensus_protocol_canonical_kinds() {
-        assert_eq!(parse_consensus_protocol("founder_only"), Some(ConsensusProtocol::FounderOnly));
-        assert_eq!(parse_consensus_protocol("unanimous"), Some(ConsensusProtocol::Unanimous));
-        assert_eq!(parse_consensus_protocol("majority"), Some(ConsensusProtocol::Majority));
+        assert_eq!(
+            parse_consensus_protocol("founder_only"),
+            Some(ConsensusProtocol::FounderOnly)
+        );
+        assert_eq!(
+            parse_consensus_protocol("unanimous"),
+            Some(ConsensusProtocol::Unanimous)
+        );
+        assert_eq!(
+            parse_consensus_protocol("majority"),
+            Some(ConsensusProtocol::Majority)
+        );
         assert_eq!(
             parse_consensus_protocol("quorum:2/3"),
             Some(ConsensusProtocol::Quorum { m: 2, n: 3 })
         );
         assert_eq!(
             parse_consensus_protocol("weighted:board_seats"),
-            Some(ConsensusProtocol::Weighted { rubric: "board_seats".into() })
+            Some(ConsensusProtocol::Weighted {
+                rubric: "board_seats".into()
+            })
         );
         assert_eq!(
             parse_consensus_protocol("custom:time_locked_v2"),
-            Some(ConsensusProtocol::Custom { id: "time_locked_v2".into() })
+            Some(ConsensusProtocol::Custom {
+                id: "time_locked_v2".into()
+            })
         );
         // malformed
         assert_eq!(parse_consensus_protocol("quorum:5"), None);
@@ -4337,12 +4421,26 @@ mod tests {
         let founders = vec!["alice".to_string(), "bob".to_string()];
         // a founder signs → satisfied
         assert_eq!(
-            evaluate_consensus_protocol("founder_only", &members, &["alice".into()], &founders, None, None),
+            evaluate_consensus_protocol(
+                "founder_only",
+                &members,
+                &["alice".into()],
+                &founders,
+                None,
+                None
+            ),
             ConsensusResult::Satisfied
         );
         // only a non-founder signs → insufficient
         assert_eq!(
-            evaluate_consensus_protocol("founder_only", &members, &["roku".into()], &founders, None, None),
+            evaluate_consensus_protocol(
+                "founder_only",
+                &members,
+                &["roku".into()],
+                &founders,
+                None,
+                None
+            ),
             ConsensusResult::Insufficient { needed: 1, got: 0 }
         );
     }
@@ -4352,19 +4450,37 @@ mod tests {
         let members = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         // unanimous: all three
         assert_eq!(
-            evaluate_consensus_protocol("unanimous", &members,
-                &["a".into(), "b".into(), "c".into()], &[], None, None),
+            evaluate_consensus_protocol(
+                "unanimous",
+                &members,
+                &["a".into(), "b".into(), "c".into()],
+                &[],
+                None,
+                None
+            ),
             ConsensusResult::Satisfied
         );
         assert_eq!(
-            evaluate_consensus_protocol("unanimous", &members,
-                &["a".into(), "b".into()], &[], None, None),
+            evaluate_consensus_protocol(
+                "unanimous",
+                &members,
+                &["a".into(), "b".into()],
+                &[],
+                None,
+                None
+            ),
             ConsensusResult::Insufficient { needed: 3, got: 2 }
         );
         // majority of 3 = 2
         assert_eq!(
-            evaluate_consensus_protocol("majority", &members,
-                &["a".into(), "b".into()], &[], None, None),
+            evaluate_consensus_protocol(
+                "majority",
+                &members,
+                &["a".into(), "b".into()],
+                &[],
+                None,
+                None
+            ),
             ConsensusResult::Satisfied
         );
         assert_eq!(
@@ -4378,20 +4494,38 @@ mod tests {
         let members = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         // quorum:2/3 — two distinct member signers
         assert_eq!(
-            evaluate_consensus_protocol("quorum:2/3", &members,
-                &["a".into(), "b".into()], &[], None, None),
+            evaluate_consensus_protocol(
+                "quorum:2/3",
+                &members,
+                &["a".into(), "b".into()],
+                &[],
+                None,
+                None
+            ),
             ConsensusResult::Satisfied
         );
         // duplicate signature from same member counts once
         assert_eq!(
-            evaluate_consensus_protocol("quorum:2/3", &members,
-                &["a".into(), "a".into()], &[], None, None),
+            evaluate_consensus_protocol(
+                "quorum:2/3",
+                &members,
+                &["a".into(), "a".into()],
+                &[],
+                None,
+                None
+            ),
             ConsensusResult::Insufficient { needed: 2, got: 1 }
         );
         // non-member signatures are filtered out
         assert_eq!(
-            evaluate_consensus_protocol("quorum:2/3", &members,
-                &["a".into(), "intruder".into()], &[], None, None),
+            evaluate_consensus_protocol(
+                "quorum:2/3",
+                &members,
+                &["a".into(), "intruder".into()],
+                &[],
+                None,
+                None
+            ),
             ConsensusResult::Insufficient { needed: 2, got: 1 }
         );
     }
@@ -4411,13 +4545,27 @@ mod tests {
 
         struct Rubric;
         impl WeightedRubricResolver for Rubric {
-            fn weight(&self, _r: &str, k: &str) -> f64 { if k == "a" { 3.0 } else { 1.0 } }
-            fn threshold(&self, _r: &str) -> f64 { 2.5 }
+            fn weight(&self, _r: &str, k: &str) -> f64 {
+                if k == "a" {
+                    3.0
+                } else {
+                    1.0
+                }
+            }
+            fn threshold(&self, _r: &str) -> f64 {
+                2.5
+            }
         }
         // a alone (weight 3.0) exceeds threshold 2.5
         assert_eq!(
-            evaluate_consensus_protocol("weighted:seats", &members, &["a".into()], &[],
-                Some(&Rubric), None),
+            evaluate_consensus_protocol(
+                "weighted:seats",
+                &members,
+                &["a".into()],
+                &[],
+                Some(&Rubric),
+                None
+            ),
             ConsensusResult::Satisfied
         );
 
@@ -4428,7 +4576,14 @@ mod tests {
             }
         }
         assert_eq!(
-            evaluate_consensus_protocol("custom:x", &members, &["a".into()], &[], None, Some(&Pred)),
+            evaluate_consensus_protocol(
+                "custom:x",
+                &members,
+                &["a".into()],
+                &[],
+                None,
+                Some(&Pred)
+            ),
             ConsensusResult::Satisfied
         );
     }
@@ -4438,8 +4593,14 @@ mod tests {
         // §9: HUMANITY_ACCORD is family with quorum:2/3 + entrenched.
         let members = vec!["x".to_string(), "y".to_string(), "z".to_string()];
         assert_eq!(
-            evaluate_consensus_protocol("quorum:2/3", &members,
-                &["x".into(), "z".into()], &[], None, None),
+            evaluate_consensus_protocol(
+                "quorum:2/3",
+                &members,
+                &["x".into(), "z".into()],
+                &[],
+                None,
+                None
+            ),
             ConsensusResult::Satisfied
         );
         assert_eq!(

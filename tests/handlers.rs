@@ -129,7 +129,11 @@ async fn deferral_defaults_to_max_9_when_preferences_omitted() {
         serde_json::json!({"title": "x", "context": "x", "response_format": "binary"}),
     );
     let routing = core.submit_deferral(env).await.unwrap();
-    assert_eq!(routing.routed_responders.len(), 9, "default cap per §3.3 step 4");
+    assert_eq!(
+        routing.routed_responders.len(),
+        9,
+        "default cap per §3.3 step 4"
+    );
 }
 
 // ── Vote weight ─────────────────────────────────────────────────────────

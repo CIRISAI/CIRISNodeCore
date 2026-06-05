@@ -38,9 +38,9 @@
 pub use ciris_persist::cirisnode::types::{
     Cell, ContributionEnvelope, ContributionListPage, ContributionType, ContributionsFilter,
     CreditsLedgerEntry, CreditsUpdate, DiversityProof, ExpertiseLedgerEntry, ExpertiseUpdate,
-    HybridSignature, ListCursor, ModerationEvent, PromotionAttestation,
-    ReconsiderationAttestation, ReconsiderationRequest, RoutableContributor, SlashingAttestation,
-    TargetRowKind, VoteEnvelope, VoteListPage, VoteWeight, VotesFilter, Witness, WitnessSet,
+    HybridSignature, ListCursor, ModerationEvent, PromotionAttestation, ReconsiderationAttestation,
+    ReconsiderationRequest, RoutableContributor, SlashingAttestation, TargetRowKind, VoteEnvelope,
+    VoteListPage, VoteWeight, VotesFilter, Witness, WitnessSet,
 };
 
 pub use ciris_persist::cirisnode::{Error as SubstrateError, NodeCoreService};

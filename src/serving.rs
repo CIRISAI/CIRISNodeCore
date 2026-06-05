@@ -106,11 +106,7 @@ pub struct ContentFetchServingHandler<S: BlobStorage + ?Sized> {
 
 #[async_trait]
 impl<S: BlobStorage + ?Sized + 'static> Handler<ContentFetch> for ContentFetchServingHandler<S> {
-    async fn handle(
-        &self,
-        msg: ContentFetch,
-        ctx: HandlerContext,
-    ) -> Result<(), HandlerError> {
+    async fn handle(&self, msg: ContentFetch, ctx: HandlerContext) -> Result<(), HandlerError> {
         match compute_serving_response(&*self.storage, msg).await {
             ServingResponse::Body(body) => {
                 // Fire-and-forget reply via Ephemeral delivery. We
@@ -184,6 +180,9 @@ pub async fn install_from_dispatch(
 }
 
 #[cfg(test)]
+// `MemBlobs` mirrors persist's `BlobStorage` trait via RPITIT
+// (`-> impl Future`); the contract-mirror form is intentional.
+#[allow(clippy::manual_async_fn)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
@@ -284,9 +283,10 @@ mod tests {
             _attesting_key_id: &'s str,
             _signer: &'s dyn ciris_keyring::HardwareSigner,
             _now: chrono::DateTime<chrono::Utc>,
-        ) -> impl std::future::Future<Output = Result<ciris_persist::federation::EvictActorReport, BlobError>>
-                 + Send
-                 + 's {
+        ) -> impl std::future::Future<
+            Output = Result<ciris_persist::federation::EvictActorReport, BlobError>,
+        > + Send
+               + 's {
             async { Ok(ciris_persist::federation::EvictActorReport::default()) }
         }
     }
@@ -308,7 +308,11 @@ mod tests {
     #[tokio::test]
     async fn inline_blob_returns_content_body_with_bytes_and_sha() {
         let store = MemBlobs::default();
-        store.inline.lock().unwrap().insert(sha(1), vec![0xAA, 0xBB, 0xCC]);
+        store
+            .inline
+            .lock()
+            .unwrap()
+            .insert(sha(1), vec![0xAA, 0xBB, 0xCC]);
 
         let resp = compute_serving_response(&store, fetch(sha(1), None)).await;
         match resp {

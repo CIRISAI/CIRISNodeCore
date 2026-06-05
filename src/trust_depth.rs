@@ -184,7 +184,10 @@ mod tests {
         let set = admitted_set_from_graph(&g);
         assert!(set.contains("alice"));
         assert!(set.contains("bob"));
-        assert!(!set.contains("carol"), "carol is 2 hops, not in depth-1 graph");
+        assert!(
+            !set.contains("carol"),
+            "carol is 2 hops, not in depth-1 graph"
+        );
     }
 
     #[test]
@@ -202,7 +205,10 @@ mod tests {
         assert!(set.contains("alice"));
         assert!(set.contains("bob"));
         assert!(set.contains("carol"));
-        assert!(!set.contains("dave"), "dave is 3 hops, not in depth-2 graph");
+        assert!(
+            !set.contains("dave"),
+            "dave is 3 hops, not in depth-2 graph"
+        );
     }
 
     #[test]
@@ -235,7 +241,7 @@ mod tests {
                 edge("alice", "bob", 1, false),
                 edge("alice", "frank", 1, true), // withdrawn
                 edge("bob", "carol", 2, false),
-                edge("bob", "evan", 2, true),    // withdrawn by bob
+                edge("bob", "evan", 2, true), // withdrawn by bob
                 edge("carol", "dave", 3, false),
             ],
         );

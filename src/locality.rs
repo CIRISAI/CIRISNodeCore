@@ -235,17 +235,14 @@ pub struct CellLocalityHealth {
 /// locality-claimed adjudication, only N=3-default decisions, and
 /// even then only if `cell_pool ≥ 6` for P11 recusal feasibility.
 pub fn max_supportable_scale(cell_pool_size: usize) -> Option<LocalityScale> {
-    for scale in [
+    [
         LocalityScale::Federation,
         LocalityScale::National,
         LocalityScale::Regional,
         LocalityScale::Local,
-    ] {
-        if cell_pool_size >= default_min_pool(scale) {
-            return Some(scale);
-        }
-    }
-    None
+    ]
+    .into_iter()
+    .find(|&scale| cell_pool_size >= default_min_pool(scale))
 }
 
 #[cfg(test)]

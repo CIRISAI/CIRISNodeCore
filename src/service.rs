@@ -129,7 +129,10 @@ impl<E: NodeCoreService> NodeCore<E> {
             .unwrap_or(9) as usize;
 
         self.engine.put_contribution(envelope).await?;
-        let candidates = self.engine.routable_contributors(&domain, &language).await?;
+        let candidates = self
+            .engine
+            .routable_contributors(&domain, &language)
+            .await?;
         let routed_responders = candidates
             .into_iter()
             .take(max)
@@ -234,9 +237,9 @@ impl<E: NodeCoreService + 'static> NodeCore<E> {
             .await?;
         edge.register_handler::<wire::DeferralResponse, _>(DeferralResponseHandler(self.clone()))
             .await?;
-        edge.register_handler::<wire::ExpertiseAttestationPublish, _>(
-            ExpertiseAttestationHandler(self.clone()),
-        )
+        edge.register_handler::<wire::ExpertiseAttestationPublish, _>(ExpertiseAttestationHandler(
+            self.clone(),
+        ))
         .await?;
         edge.register_handler::<wire::ModerationEventPublish, _>(ModerationEventHandler(
             self.clone(),
@@ -283,22 +286,53 @@ macro_rules! impl_handler {
 
         #[async_trait::async_trait]
         impl<E: NodeCoreService + 'static> Handler<$Msg> for $Wrapper<E> {
-            async fn handle(
-                &self,
-                msg: $Msg,
-                _ctx: HandlerContext,
-            ) -> Result<$Ack, HandlerError> {
+            async fn handle(&self, msg: $Msg, _ctx: HandlerContext) -> Result<$Ack, HandlerError> {
                 self.0.$method(msg.0).await.map_err(map_substrate_err)
             }
         }
     };
 }
 
-impl_handler!(ContributionHandler, wire::ContributionSubmit, ContributionAck, submit_contribution);
+impl_handler!(
+    ContributionHandler,
+    wire::ContributionSubmit,
+    ContributionAck,
+    submit_contribution
+);
 impl_handler!(VoteHandler, wire::VoteCast, VoteAck, record_vote);
-impl_handler!(DeferralRequestHandler, wire::DeferralRequest, DeferralRouting, submit_deferral);
-impl_handler!(DeferralResponseHandler, wire::DeferralResponse, DeferralResponseAck, record_deferral_response);
-impl_handler!(ExpertiseAttestationHandler, wire::ExpertiseAttestationPublish, ExpertiseAttestationAck, publish_expertise_attestation);
-impl_handler!(ModerationEventHandler, wire::ModerationEventPublish, ModerationEventAck, publish_moderation_event);
-impl_handler!(SlashingAttestationHandler, wire::SlashingAttestationPublish, SlashingAttestationAck, publish_slashing_attestation);
-impl_handler!(ReconsiderationRequestHandler, wire::ReconsiderationRequest, ReconsiderationRequestAck, submit_reconsideration_request);
+impl_handler!(
+    DeferralRequestHandler,
+    wire::DeferralRequest,
+    DeferralRouting,
+    submit_deferral
+);
+impl_handler!(
+    DeferralResponseHandler,
+    wire::DeferralResponse,
+    DeferralResponseAck,
+    record_deferral_response
+);
+impl_handler!(
+    ExpertiseAttestationHandler,
+    wire::ExpertiseAttestationPublish,
+    ExpertiseAttestationAck,
+    publish_expertise_attestation
+);
+impl_handler!(
+    ModerationEventHandler,
+    wire::ModerationEventPublish,
+    ModerationEventAck,
+    publish_moderation_event
+);
+impl_handler!(
+    SlashingAttestationHandler,
+    wire::SlashingAttestationPublish,
+    SlashingAttestationAck,
+    publish_slashing_attestation
+);
+impl_handler!(
+    ReconsiderationRequestHandler,
+    wire::ReconsiderationRequest,
+    ReconsiderationRequestAck,
+    submit_reconsideration_request
+);

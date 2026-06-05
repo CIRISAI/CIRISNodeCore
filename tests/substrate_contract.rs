@@ -73,7 +73,11 @@ impl NodeCoreService for SpikeMock {
             update.language,
             update.subject,
         );
-        self.state.lock().unwrap().credits.insert(key, update.new_balance);
+        self.state
+            .lock()
+            .unwrap()
+            .credits
+            .insert(key, update.new_balance);
         Ok(())
     }
 
@@ -104,7 +108,11 @@ impl NodeCoreService for SpikeMock {
         &self,
         req: ReconsiderationRequest,
     ) -> Result<(), SubstrateError> {
-        self.state.lock().unwrap().reconsideration_requests.push(req);
+        self.state
+            .lock()
+            .unwrap()
+            .reconsideration_requests
+            .push(req);
         Ok(())
     }
 
@@ -374,7 +382,10 @@ async fn vote_envelope_with_optional_contribution_id() {
     };
     mock.cast_vote(v2).await.unwrap();
 
-    let page = mock.list_votes(VotesFilter::default(), None, 10).await.unwrap();
+    let page = mock
+        .list_votes(VotesFilter::default(), None, 10)
+        .await
+        .unwrap();
     assert_eq!(page.items.len(), 2);
 }
 
@@ -424,13 +435,19 @@ async fn vote_weight_carries_full_composition() {
     assert_eq!(w.weight, 150.0);
     // Verify the four input fields multiply to `weight`. If persist's
     // formula drifts we'll catch it here.
-    assert_eq!(w.credits * w.expertise_multiplier * w.active_tier_multiplier, w.weight);
+    assert_eq!(
+        w.credits * w.expertise_multiplier * w.active_tier_multiplier,
+        w.weight
+    );
 }
 
 #[tokio::test]
 async fn routable_contributors_returns_richer_than_id() {
     let mock = SpikeMock::new();
-    let candidates = mock.routable_contributors("mental_health", "am").await.unwrap();
+    let candidates = mock
+        .routable_contributors("mental_health", "am")
+        .await
+        .unwrap();
     assert_eq!(candidates.len(), 2);
     // RoutableContributor is { contributor_id, expertise } — node-core
     // can rank by expertise without a second lookup, which matters for
@@ -483,7 +500,9 @@ async fn moderation_chain_round_trips() {
         attested_at: Utc::now(),
         signature: placeholder_signature(),
     };
-    mock.put_reconsideration_attestation(recon_att).await.unwrap();
+    mock.put_reconsideration_attestation(recon_att)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -528,9 +547,11 @@ async fn promotion_attestation_flips_targets_and_records_attestation() {
     // INSERTed — atomically.
     let st = mock.state.lock().unwrap();
     assert_eq!(st.promotion_attestations.len(), 1);
-    assert_eq!(
-        st.canonical.get(&env.contribution_id).copied().unwrap_or(false),
-        true,
+    assert!(
+        st.canonical
+            .get(&env.contribution_id)
+            .copied()
+            .unwrap_or(false),
         "target should be canonical post-promotion"
     );
 }

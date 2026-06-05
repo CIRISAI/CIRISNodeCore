@@ -95,7 +95,9 @@ where
     let min = preferences
         .and_then(|p| p.min_responders)
         .unwrap_or(DEFAULT_MIN) as usize;
-    let policy = preferences.and_then(|p| p.diversity).unwrap_or(DiversityPolicy::None);
+    let policy = preferences
+        .and_then(|p| p.diversity)
+        .unwrap_or(DiversityPolicy::None);
 
     let routed = select_with_diversity(candidates, policy, max, metadata);
 
@@ -138,7 +140,11 @@ fn select_with_diversity<M: ContributorMetadataProvider>(
         return Vec::new();
     }
     if let DiversityPolicy::None = policy {
-        return candidates.into_iter().take(max).map(|c| c.contributor_id).collect();
+        return candidates
+            .into_iter()
+            .take(max)
+            .map(|c| c.contributor_id)
+            .collect();
     }
 
     let mut remaining: Vec<(RoutableContributor, Option<String>)> = candidates
@@ -191,9 +197,7 @@ fn select_with_diversity<M: ContributorMetadataProvider>(
 
 // ── Deferral routing (composes trust + diversity) ────────────────────────
 
-use crate::trust::{
-    audit_err, list_vouched_for, AuditService, TrustGrantFilter, TrustPurpose,
-};
+use crate::trust::{audit_err, list_vouched_for, AuditService, TrustGrantFilter, TrustPurpose};
 
 /// Result of a full deferral-routing pass. Captures the resolver
 /// set plus the audit-trail metadata callers persist.
@@ -274,13 +278,14 @@ where
     // Enrich expertise from routable_contributors when language hint
     // available. v0.1.0-dev: single-cell assumption; multi-language
     // routing is a v0.1.0-cut concern.
-    let language = preferences
-        .and_then(|_p| None::<&str>)
-        .unwrap_or("");
+    let language = preferences.and(None::<&str>).unwrap_or("");
     if !language.is_empty() {
         let routable_with_expertise = engine.routable_contributors(&domain, language).await?;
         for c in &mut candidates {
-            if let Some(found) = routable_with_expertise.iter().find(|r| r.contributor_id == c.contributor_id) {
+            if let Some(found) = routable_with_expertise
+                .iter()
+                .find(|r| r.contributor_id == c.contributor_id)
+            {
                 c.expertise = found.expertise;
             }
         }

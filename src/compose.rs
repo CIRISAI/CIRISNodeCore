@@ -41,7 +41,7 @@ impl AttestationRow {
     }
 
     pub(crate) fn is_active_at(&self, now: DateTime<Utc>) -> bool {
-        self.expires_at.map_or(true, |exp| now <= exp)
+        self.expires_at.is_none_or(|exp| now <= exp)
     }
 }
 
@@ -143,8 +143,8 @@ pub(crate) fn compose_agent_state_at(
         .into_iter()
         .map(|(cell, (_, s))| (cell, s))
         .collect();
-    out.activity_tier = activity_latest
-        .map(|(_, s)| if s > 0.5 { "active" } else { "below_active" }.to_owned());
+    out.activity_tier =
+        activity_latest.map(|(_, s)| if s > 0.5 { "active" } else { "below_active" }.to_owned());
 
     serde_json::to_string(&out)
 }
@@ -422,7 +422,7 @@ pub(crate) fn compose_contribution_at(
     out.witness_diversity = diversity_latest.map(|(_, s)| s);
     out.truth_grounding = grounding_latest.map(|(_, s)| s);
     out.testimonial_witnesses
-        .sort_by(|a, b| b.asserted_at.cmp(&a.asserted_at));
+        .sort_by_key(|b| std::cmp::Reverse(b.asserted_at));
 
     serde_json::to_string(&out)
 }
@@ -554,8 +554,10 @@ pub(crate) fn compose_decision_hierarchy_at(
 
     // Restrict approaches to those linking to this goal (suffix == goal_id).
     approaches.retain(|e| e.key == goal_id);
-    let approach_ids: std::collections::HashSet<String> =
-        approaches.iter().map(|e| e.attestation_id.clone()).collect();
+    let approach_ids: std::collections::HashSet<String> = approaches
+        .iter()
+        .map(|e| e.attestation_id.clone())
+        .collect();
     // method:{approach_id}:{substrate_rung} — first segment is approach_id
     methods.retain(|e| {
         e.key
@@ -699,12 +701,24 @@ pub(crate) fn compose_wa_state_at(
                 asserted_at: row.asserted_at,
             });
         }
-        out.sort_by(|a, b| b.asserted_at.cmp(&a.asserted_at));
+        out.sort_by_key(|b| std::cmp::Reverse(b.asserted_at));
         Ok(out)
     }
 
-    let moderation_queue = bucket(moderation_attestations_json, "moderation:", now, &domain, &language)?;
-    let slashing_history = bucket(slashing_attestations_json, "slashing:", now, &domain, &language)?;
+    let moderation_queue = bucket(
+        moderation_attestations_json,
+        "moderation:",
+        now,
+        &domain,
+        &language,
+    )?;
+    let slashing_history = bucket(
+        slashing_attestations_json,
+        "slashing:",
+        now,
+        &domain,
+        &language,
+    )?;
     let reconsideration_appeals = bucket(
         reconsideration_attestations_json,
         "reconsideration:",
@@ -754,8 +768,16 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
 
         assert_eq!(parsed["key_id"], "key-foo");
-        assert_eq!(parsed["credits"]["mental_health/en/arc_question"].as_f64().unwrap(), 8.0);
-        assert_eq!(parsed["expertise"]["mental_health/en"].as_f64().unwrap(), 0.8);
+        assert_eq!(
+            parsed["credits"]["mental_health/en/arc_question"]
+                .as_f64()
+                .unwrap(),
+            8.0
+        );
+        assert_eq!(
+            parsed["expertise"]["mental_health/en"].as_f64().unwrap(),
+            0.8
+        );
         assert_eq!(parsed["activity_tier"], "active");
     }
 
@@ -818,7 +840,8 @@ mod tests {
               } }
         ]));
 
-        let filter = serde_json::json!({"domain": "mental_health:en", "kind": "witness"}).to_string();
+        let filter =
+            serde_json::json!({"domain": "mental_health:en", "kind": "witness"}).to_string();
         let out = compose_needs_feed_at(&rows, &filter, fixed_now()).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
 
@@ -972,7 +995,10 @@ mod tests {
         assert_eq!(parsed["moderation_queue"][0]["category"], "rogue_vote");
         assert_eq!(parsed["slashing_history"].as_array().unwrap().len(), 1);
         assert_eq!(parsed["slashing_history"][0]["category"], "PROVEN_ROGUE");
-        assert_eq!(parsed["reconsideration_appeals"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            parsed["reconsideration_appeals"].as_array().unwrap().len(),
+            1
+        );
         assert_eq!(
             parsed["reconsideration_appeals"][0]["category"],
             "new_evidence"
@@ -1023,7 +1049,10 @@ mod tests {
         let community = compose_community_feed(&contribs, "{}").unwrap();
         let community_parsed: serde_json::Value = serde_json::from_str(&community).unwrap();
         assert_eq!(community_parsed["items"].as_array().unwrap().len(), 1);
-        assert_eq!(community_parsed["items"][0]["contribution_id"], "c-community-1");
+        assert_eq!(
+            community_parsed["items"][0]["contribution_id"],
+            "c-community-1"
+        );
 
         // Global feed — federation/planet/species
         let global = compose_global_feed(&contribs, "{}").unwrap();
@@ -1225,11 +1254,7 @@ fn compose_feed_for_tier(
 
 fn external_content_entry_from(row: &ContributionRowProjection) -> Option<ExternalContentEntry> {
     let sub_kind = row.payload.get("sub_kind")?.as_str()?.to_owned();
-    let cohort_scope = row
-        .payload
-        .get("cohort_scope")?
-        .as_str()?
-        .to_owned();
+    let cohort_scope = row.payload.get("cohort_scope")?.as_str()?.to_owned();
     let entity_key_id = row
         .payload
         .get("entity_key_id")
@@ -1373,7 +1398,9 @@ pub(crate) fn compose_article_quality_at(
             }
             let Some(dim) = row.dimension() else { continue };
             let Some(score) = row.score() else { continue };
-            let Some(rest) = dim.strip_prefix(family_prefix) else { continue };
+            let Some(rest) = dim.strip_prefix(family_prefix) else {
+                continue;
+            };
 
             // rest is e.g. `accuracy:physics` or `NPOV_compliance` or
             // `bias:political_spectrum`. Split into (axis, optional_bucket).
@@ -1520,7 +1547,10 @@ mod article_quality_tests {
         let source_quality = &parsed["quality"]["source_quality"];
         assert_eq!(source_quality["attester_count"], 3);
         let nyt_mean = source_quality["buckets"]["nyt"].as_f64().unwrap();
-        assert!((nyt_mean - 0.875).abs() < 1e-9, "nyt mean ≈ 0.875, got {nyt_mean}");
+        assert!(
+            (nyt_mean - 0.875).abs() < 1e-9,
+            "nyt mean ≈ 0.875, got {nyt_mean}"
+        );
         let reuters_mean = source_quality["buckets"]["reuters"].as_f64().unwrap();
         assert!((reuters_mean - 0.92).abs() < 1e-9);
 
@@ -1552,7 +1582,11 @@ mod article_quality_tests {
         let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
 
         let quality = parsed["quality"].as_object().unwrap();
-        assert_eq!(quality.len(), 1, "only the encyclopedia: family is aggregated");
+        assert_eq!(
+            quality.len(),
+            1,
+            "only the encyclopedia: family is aggregated"
+        );
         assert!(quality.contains_key("accuracy"));
     }
 
@@ -1579,16 +1613,17 @@ mod article_quality_tests {
         let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
 
         let accuracy = &parsed["quality"]["accuracy"];
-        assert_eq!(accuracy["attester_count"], 1, "expired attestation excluded");
+        assert_eq!(
+            accuracy["attester_count"], 1,
+            "expired attestation excluded"
+        );
         assert!((accuracy["weighted_mean"].as_f64().unwrap() - 0.7).abs() < 1e-9);
     }
 
     #[test]
     fn unknown_sub_kind_returns_empty_quality_map() {
-        let attestations = serde_json::json!([
-            att("encyclopedia:accuracy:physics", 0.9),
-        ])
-        .to_string();
+        let attestations =
+            serde_json::json!([att("encyclopedia:accuracy:physics", 0.9),]).to_string();
 
         let out = compose_article_quality_at(
             &attestations,

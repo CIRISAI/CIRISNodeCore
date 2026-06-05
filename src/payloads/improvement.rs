@@ -45,7 +45,8 @@ mod tests {
         let p = ImprovementPayload {
             target_kind: "tooling".into(),
             target_ref: "CIRISAgent/qa_runner/safety_battery.py".into(),
-            rationale: "Add structured-output mode so per-faculty scores ride a typed channel.".into(),
+            rationale: "Add structured-output mode so per-faculty scores ride a typed channel."
+                .into(),
             diff: Some("--- a/foo.py\n+++ b/foo.py\n@@ ...".into()),
         };
         let json = serde_json::to_string(&p).unwrap();
