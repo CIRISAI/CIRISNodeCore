@@ -1342,6 +1342,23 @@ the source. Subjects not (yet) federation-enrolled are named by
 | `model_3d` | `[author_hash]` |
 | `event_listing` | `[organizer_hash]`; RSVPs ride `topical_relation:rsvps`, not the event's `subject_key_ids` |
 
+A `canonical_subject_hash` entry is a **bare lowercase 64-char hex**
+SHA-256 per CEG §0.6 (no prefix/separators). A consumer distinguishes
+it from a `federation_keys.key_id` (standard-base64 Ed25519 pubkey)
+by format: base64 carries `+`/`/`/`=` + mixed case; a canonical-hash
+is `[0-9a-f]{64}`. Revocation authority for a canonical-hash subject
+rides the CEG §3.2 rule-(3) `delegates_to` proxy chain (an agent
+holding data emits `delegates_to(canonical_hash → agent_key, scope:
+[consent_revocation])`), distinct from the `canonical_binding`
+retroactive-claim path (Ask 4).
+
+> **Provisional — CIRISRegistry#53.** Two aspects are NodeCore
+> conventions the CEG spec does not yet pin: the canonical-hash
+> **preimage** (`{platform}:{entity_kind}:{id}`, PIN-1, load-bearing
+> for cross-producer subject-identity stability) and confirmation of
+> the **bare-hex wire form** (CONFIRM-2). NodeCore aligns to whatever
+> §4.2.2 pins.
+
 `subject_key_ids: null/[]` is the status-quo shape (producer-only
 authority; all CEG ≤ 0.5 Contributions). The field is additive at the
 envelope layer; CEG 0.x consumers that don't read it see status-quo
@@ -1349,7 +1366,7 @@ behavior. Subjects discovered downstream (e.g. faces in photos that
 aren't tagged at ingest) are handled by separate `consent_record`
 emissions, not retroactive ingest-time mutation.
 
-[Spec — NodeCore#29 Asks 1/2/3/5 shipped: `build_consent_record_payload`, bilateral helpers, `canonical_subject_hash`, this doc. Ask 4 (`ingest_canonical_binding`) blocked on CIRISPersist substrate admission (Ask 6).]
+[Spec — NodeCore#29 Asks 1/2/3/5 shipped: `build_consent_record_payload`, bilateral helpers, `canonical_subject_hash`, this doc. Ask 4 (`ingest_canonical_binding`) blocked on CIRISPersist substrate admission (Ask 6). Wire-format boundary clarifications tracked at CIRISRegistry#53.]
 
 ---
 

@@ -2293,14 +2293,36 @@ fn compute_sha256(bytes: &[u8]) -> [u8; 32] {
 /// - Slack `user.id`          → `canonical_subject_hash("slack", "user", "U042")`
 /// - Twitter `author_id`      → `canonical_subject_hash("twitter", "user", "44196397")`
 ///
-/// The returned string is `canonical:sha256:{hex}` — the `canonical:`
-/// prefix distinguishes it from a bare `federation_keys.key_id` so
-/// downstream admission (CEG 0.6 §3.2.3 broadened withdraws rule) can
-/// route canonical-hash subjects through the `canonical_binding` path.
+/// # PROVISIONAL — pending CIRISRegistry#53
+///
+/// Two aspects of this derivation are NodeCore conventions the CEG spec
+/// does not yet pin, tracked at **CIRISRegistry#53**:
+///
+/// 1. **Preimage convention** (PIN-1, load-bearing). §4.2.2 says "a
+///    canonical string identifier" but does not fix the `{platform}:
+///    {entity_kind}:{id}` structure. Until Registry pins it normatively,
+///    canonical-hashes are only stable *within* NodeCore — a different
+///    producer hashing `discord:123` instead of `discord:user:123` for
+///    the same subject breaks the rule-(3) `delegates_to` proxy match.
+///
+/// 2. **Wire format** (CONFIRM-2). §4.2.2 + §0.6 read as a BARE lowercase
+///    64-char hex string (no prefix/separators). This fn currently
+///    returns that bare form. Disambiguation from a `federation_keys.key_id`
+///    is by format — key_ids are standard-base64 (contain `+`/`/`/`=`,
+///    mixed case); a canonical-hash is `[0-9a-f]{64}`. If Registry later
+///    blesses an explicit tag, this fn changes to match.
+///
+/// Revocation authority for the resulting canonical-hash subject rides
+/// the rule-(3) `delegates_to` proxy chain per CEG §3.2 (an agent holding
+/// data emits `delegates_to(canonical_hash → agent_key, scope:
+/// [consent_revocation])`), NOT a "canonical_binding" path —
+/// `canonical_binding` (NodeCore#29 Ask 4) is the distinct retroactive
+/// claim of a now-enrolled key over historical canonical-hash entries.
 pub fn canonical_subject_hash(platform: &str, entity_kind: &str, id: &str) -> String {
     let canonical = format!("{platform}:{entity_kind}:{id}");
     let digest = compute_sha256(canonical.as_bytes());
-    format!("canonical:sha256:{}", hex_encode(&digest))
+    // Bare lowercase 64-char hex per §0.6 (CONFIRM-2 at CIRISRegistry#53).
+    hex_encode(&digest)
 }
 
 /// Lowercase hex encoding for the 32-byte SHA-256 — content_sha256
@@ -3695,13 +3717,18 @@ mod tests {
     }
 
     #[test]
-    fn canonical_subject_hash_is_stable_and_prefixed() {
+    fn canonical_subject_hash_is_bare_lowercase_hex() {
+        // CONFIRM-2 (CIRISRegistry#53): bare lowercase 64-char hex per
+        // §0.6 — no prefix, no separators. Disambiguation from a
+        // base64 federation key_id is by format.
         let a = canonical_subject_hash("discord", "user", "123456789");
         let b = canonical_subject_hash("discord", "user", "123456789");
         assert_eq!(a, b, "deterministic");
-        assert!(a.starts_with("canonical:sha256:"));
-        // hex body is 64 chars
-        assert_eq!(a.strip_prefix("canonical:sha256:").unwrap().len(), 64);
+        assert_eq!(a.len(), 64, "bare 64-char hex, no prefix");
+        assert!(
+            a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "lowercase hex only per §0.6"
+        );
         // platform + id discriminate
         assert_ne!(
             canonical_subject_hash("discord", "user", "123456789"),
@@ -3715,10 +3742,9 @@ mod tests {
 
     #[test]
     fn canonical_subject_hash_known_vector() {
-        // SHA-256 of "discord:user:42"
-        let expected_input = "discord:user:42";
-        let digest = compute_sha256(expected_input.as_bytes());
-        let want = format!("canonical:sha256:{}", hex_encode(&digest));
-        assert_eq!(canonical_subject_hash("discord", "user", "42"), want);
+        // SHA-256 of "discord:user:42" — bare hex per §0.6.
+        // PROVISIONAL preimage convention (PIN-1, CIRISRegistry#53).
+        let digest = compute_sha256("discord:user:42".as_bytes());
+        assert_eq!(canonical_subject_hash("discord", "user", "42"), hex_encode(&digest));
     }
 }
