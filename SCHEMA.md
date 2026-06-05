@@ -1342,22 +1342,25 @@ the source. Subjects not (yet) federation-enrolled are named by
 | `model_3d` | `[author_hash]` |
 | `event_listing` | `[organizer_hash]`; RSVPs ride `topical_relation:rsvps`, not the event's `subject_key_ids` |
 
-A `canonical_subject_hash` entry is a **bare lowercase 64-char hex**
-SHA-256 per CEG §0.6 (no prefix/separators). A consumer distinguishes
-it from a `federation_keys.key_id` (standard-base64 Ed25519 pubkey)
-by format: base64 carries `+`/`/`/`=` + mixed case; a canonical-hash
-is `[0-9a-f]{64}`. Revocation authority for a canonical-hash subject
-rides the CEG §3.2 rule-(3) `delegates_to` proxy chain (an agent
-holding data emits `delegates_to(canonical_hash → agent_key, scope:
-[consent_revocation])`), distinct from the `canonical_binding`
-retroactive-claim path (Ask 4).
-
-> **Provisional — CIRISRegistry#53.** Two aspects are NodeCore
-> conventions the CEG spec does not yet pin: the canonical-hash
-> **preimage** (`{platform}:{entity_kind}:{id}`, PIN-1, load-bearing
-> for cross-producer subject-identity stability) and confirmation of
-> the **bare-hex wire form** (CONFIRM-2). NodeCore aligns to whatever
-> §4.2.2 pins.
+A `canonical_subject_hash` entry is the **tagged** wire form
+`canonical:sha256:{hex}`, normative per CEG §4.2.2.1 (the resolution
+of CIRISRegistry#53). The tag is MANDATORY, not cosmetic: a
+`federation_keys.key_id` is itself `hex(sha256(pubkey))` — a lowercase
+64-char hex string, format-indistinguishable from a bare canonical-hash
+— so the `canonical:sha256:` prefix is the tagged-union discriminator
+(exempt from §0.6's no-separators rule, which governs the `{hex}`
+segment only). Preimage per §4.2.2.1: `sha256_hex_lowercase("{platform}:
+{entity_kind}:{id}")`, parsed split-on-first-two-colons so `{id}` MAY
+contain colons (Matrix MXIDs survive); `{id}` MUST be the platform's
+stable immutable identifier (snowflake / MXID / UUID), never a mutable
+handle. Revocation rides the CEG §3.2.3 rule-(3) `delegates_to` proxy
+chain (`delegates_to(canonical_hash → agent_key, scope:
+[consent_revocation])`), distinct from `canonical_binding` (§4.2.2.2) —
+a retroactive identity claim shaped `delegates_to(canonical_hash →
+newly_enrolled_key, scope: [identity_binding])`, after which the bound
+subject signs `withdraws` directly under rule (2). NodeCore's
+`canonical_subject_hash` is verified byte-identical against the five
+§4.2.2.1 conformance vectors.
 
 `subject_key_ids: null/[]` is the status-quo shape (producer-only
 authority; all CEG ≤ 0.5 Contributions). The field is additive at the

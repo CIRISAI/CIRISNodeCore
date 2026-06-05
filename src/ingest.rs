@@ -2715,48 +2715,59 @@ fn compute_sha256(bytes: &[u8]) -> [u8; 32] {
     out
 }
 
-/// Derive a canonical-hash subject identifier for `subject_key_ids`
-/// population (CEG 0.6 §4.2.2). A subject who is not (yet) a
-/// federation_keys identity is named by the SHA-256 of a canonical
-/// `{platform}:{entity_kind}:{id}` triple, so the same person referenced
-/// across platforms before federation enrollment has a stable,
-/// content-derived key. Per NodeCore#29 Ask 1.
+/// Derive a tagged canonical-hash subject identifier for
+/// `subject_key_ids` population, normative per CEG §4.2.2.1 (the
+/// resolution of CIRISRegistry#53). A subject who is not a
+/// federation_keys identity is named by the SHA-256 of a
+/// `{platform}:{entity_kind}:{id}` preimage, tagged `canonical:sha256:`,
+/// so the same external party referenced by any conformant producer
+/// computes the same wire string.
 ///
-/// Examples (entity_kind = "user"):
-/// - Discord `author.user_id` → `canonical_subject_hash("discord", "user", "123")`
-/// - Slack `user.id`          → `canonical_subject_hash("slack", "user", "U042")`
-/// - Twitter `author_id`      → `canonical_subject_hash("twitter", "user", "44196397")`
+/// Returns the **tagged** wire form `canonical:sha256:{hex}` per
+/// §4.2.2.1. The tag is MANDATORY (not cosmetic): a `federation_keys.key_id`
+/// is itself `hex(sha256(pubkey))` — a lowercase 64-char hex string,
+/// format-indistinguishable from a bare canonical-hash — so the tag is
+/// the tagged-union discriminator. The `canonical:sha256:` prefix is
+/// exempt from §0.6's no-separators rule (which governs the `{hex}`
+/// segment only).
 ///
-/// # PROVISIONAL — pending CIRISRegistry#53
+/// Preimage convention (§4.2.2.1, load-bearing for cross-producer
+/// subject-identity stability):
 ///
-/// Two aspects of this derivation are NodeCore conventions the CEG spec
-/// does not yet pin, tracked at **CIRISRegistry#53**:
+/// ```text
+/// preimage = "{platform}:{entity_kind}:{id}"
+/// hex      = sha256_hex_lowercase(utf8(preimage))
+/// ```
 ///
-/// 1. **Preimage convention** (PIN-1, load-bearing). §4.2.2 says "a
-///    canonical string identifier" but does not fix the `{platform}:
-///    {entity_kind}:{id}` structure. Until Registry pins it normatively,
-///    canonical-hashes are only stable *within* NodeCore — a different
-///    producer hashing `discord:123` instead of `discord:user:123` for
-///    the same subject breaks the rule-(3) `delegates_to` proxy match.
+/// `{platform}` + `{entity_kind}` are lowercased open vocab (canonical
+/// seeds: discord/slack/twitter/matrix/email/phone/github/xmpp/irc ×
+/// user/channel/guild/room/group/address). `{id}` is the platform's
+/// **stable immutable** identifier, verbatim (case-preserved) — a
+/// numeric snowflake / MXID / UUID, NOT a mutable handle. The parse
+/// rule is split-on-first-two-colons, so `{id}` MAY itself contain
+/// colons (e.g. a Matrix MXID `@alice:example.org`); since this fn only
+/// *constructs* by joining exactly three parts with `:`, colons in
+/// `{id}` survive correctly.
 ///
-/// 2. **Wire format** (CONFIRM-2). §4.2.2 + §0.6 read as a BARE lowercase
-///    64-char hex string (no prefix/separators). This fn currently
-///    returns that bare form. Disambiguation from a `federation_keys.key_id`
-///    is by format — key_ids are standard-base64 (contain `+`/`/`/`=`,
-///    mixed case); a canonical-hash is `[0-9a-f]{64}`. If Registry later
-///    blesses an explicit tag, this fn changes to match.
+/// Examples:
+/// - Discord `author.user_id` → `canonical_subject_hash("discord", "user", "123456789012345678")`
+/// - Matrix MXID            → `canonical_subject_hash("matrix", "user", "@alice:example.org")`
+/// - Twitter numeric id     → `canonical_subject_hash("twitter", "user", "1455079377986420736")`
 ///
 /// Revocation authority for the resulting canonical-hash subject rides
-/// the rule-(3) `delegates_to` proxy chain per CEG §3.2 (an agent holding
+/// the CEG §3.2.3 rule-(3) `delegates_to` proxy chain (an agent holding
 /// data emits `delegates_to(canonical_hash → agent_key, scope:
-/// [consent_revocation])`), NOT a "canonical_binding" path —
-/// `canonical_binding` (NodeCore#29 Ask 4) is the distinct retroactive
-/// claim of a now-enrolled key over historical canonical-hash entries.
+/// [consent_revocation])`). This is DISTINCT from `canonical_binding`
+/// (NodeCore#29 Ask 4) — per §4.2.2.2, `canonical_binding` is a
+/// retroactive identity claim shaped as `delegates_to(canonical_hash →
+/// newly_enrolled_key, scope: [identity_binding])` (NOT a new admission
+/// rule); once bound, the subject signs `withdraws` directly under rule
+/// (2). Substrate-side proof-of-control is tracked at CIRISPersist#161.
 pub fn canonical_subject_hash(platform: &str, entity_kind: &str, id: &str) -> String {
-    let canonical = format!("{platform}:{entity_kind}:{id}");
-    let digest = compute_sha256(canonical.as_bytes());
-    // Bare lowercase 64-char hex per §0.6 (CONFIRM-2 at CIRISRegistry#53).
-    hex_encode(&digest)
+    let preimage = format!("{platform}:{entity_kind}:{id}");
+    let digest = compute_sha256(preimage.as_bytes());
+    // Tagged wire form per CEG §4.2.2.1: canonical:{hashalg}:{hex}.
+    format!("canonical:sha256:{}", hex_encode(&digest))
 }
 
 /// Lowercase hex encoding for the 32-byte SHA-256 — content_sha256
@@ -4194,18 +4205,24 @@ mod tests {
     }
 
     #[test]
-    fn canonical_subject_hash_is_bare_lowercase_hex() {
-        // CONFIRM-2 (CIRISRegistry#53): bare lowercase 64-char hex per
-        // §0.6 — no prefix, no separators. Disambiguation from a
-        // base64 federation key_id is by format.
+    fn canonical_subject_hash_is_tagged_per_4221() {
+        // CEG §4.2.2.1 (Registry#53 resolved): MANDATORY tag
+        // `canonical:sha256:{hex}`. The tag disambiguates from a
+        // federation key_id (also lowercase 64-char hex), so it is
+        // load-bearing, not cosmetic.
         let a = canonical_subject_hash("discord", "user", "123456789");
         let b = canonical_subject_hash("discord", "user", "123456789");
         assert_eq!(a, b, "deterministic");
-        assert_eq!(a.len(), 64, "bare 64-char hex, no prefix");
         assert!(
-            a.chars()
+            a.starts_with("canonical:sha256:"),
+            "tag mandatory per §4.2.2.1"
+        );
+        let hex = a.strip_prefix("canonical:sha256:").unwrap();
+        assert_eq!(hex.len(), 64, "{{hex}} is 64-char sha256");
+        assert!(
+            hex.chars()
                 .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
-            "lowercase hex only per §0.6"
+            "lowercase hex per §0.6"
         );
         // platform + id discriminate
         assert_ne!(
@@ -4219,13 +4236,31 @@ mod tests {
     }
 
     #[test]
-    fn canonical_subject_hash_known_vector() {
-        // SHA-256 of "discord:user:42" — bare hex per §0.6.
-        // PROVISIONAL preimage convention (PIN-1, CIRISRegistry#53).
-        let digest = compute_sha256("discord:user:42".as_bytes());
+    fn canonical_subject_hash_conformance_vectors() {
+        // Cross-implementation vectors published in CEG §4.2.2.1
+        // (CIRISConformance#9 envelope round-trip set).
         assert_eq!(
-            canonical_subject_hash("discord", "user", "42"),
-            hex_encode(&digest)
+            canonical_subject_hash("discord", "user", "123456789012345678"),
+            "canonical:sha256:ff7c5632dae6ef3ae7f6283bd35268bc7910332414aa8a1c35a1645ca0295f61"
+        );
+        assert_eq!(
+            canonical_subject_hash("discord", "channel", "987654321098765432"),
+            "canonical:sha256:af23411c3c6faa55a788660ea29719669b9c4e4ea4b6ab9568247d9f646f05dd"
+        );
+        // Matrix MXID — {id} contains colons; split-on-first-two-colons
+        // means `@alice:example.org` is the verbatim id.
+        assert_eq!(
+            canonical_subject_hash("matrix", "user", "@alice:example.org"),
+            "canonical:sha256:16d4d0bf478835a9af68cdaac730a29b36f82bf0dfe2073237ee4980f6b975d9"
+        );
+        // Twitter numeric id (NOT @handle).
+        assert_eq!(
+            canonical_subject_hash("twitter", "user", "1455079377986420736"),
+            "canonical:sha256:10243ba010bf159a45197d368f91c025ef6ac1eb7f42ca32e55b414d90c861c2"
+        );
+        assert_eq!(
+            canonical_subject_hash("email", "address", "alice@example.org"),
+            "canonical:sha256:04481a02fccfc8d99a47bde4f0563dd360d425b0734e8fcd8d5dd7198d0a263f"
         );
     }
 

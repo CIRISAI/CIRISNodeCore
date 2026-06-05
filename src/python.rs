@@ -802,11 +802,12 @@ fn build_bilateral_partnership_accept_payload(
     serde_json::to_string(&result).map_err(|e| json_err("serialize bilateral accept", e))
 }
 
-/// Derive a canonical-hash subject identifier for `subject_key_ids`
-/// population per CEG 0.6 §4.2.2 (NodeCore#29 Ask 1). Returns a bare
-/// lowercase 64-char hex string per §0.6. Example:
-/// `canonical_subject_hash("discord", "user", "123")`.
-/// (Preimage convention provisional — see CIRISRegistry#53.)
+/// Derive a tagged canonical-hash subject identifier for
+/// `subject_key_ids` population, normative per CEG §4.2.2.1
+/// (NodeCore#29 Ask 1). Returns the tagged wire form
+/// `canonical:sha256:{hex}` over the `{platform}:{entity_kind}:{id}`
+/// preimage. Example:
+/// `canonical_subject_hash("discord", "user", "123456789012345678")`.
 #[pyfunction]
 fn canonical_subject_hash(platform: String, entity_kind: String, id: String) -> String {
     crate::ingest::canonical_subject_hash(&platform, &entity_kind, &id)
