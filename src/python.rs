@@ -890,6 +890,75 @@ fn evaluate_consensus_protocol(
     serde_json::to_string(&json).map_err(|e| json_err("serialize consensus result", e))
 }
 
+// ─── CEG 0.8 community + location_proof + H3 helpers (NodeCore#31) ───────
+
+/// Build the payload JSON for a `community` Contribution per CEG 0.8
+/// §5.6.8.10 (NodeCore#31 Ask 1). `source_json` deserializes to
+/// `crate::ingest::CommunitySource`. Returns `{ "payload": {...} }`.
+#[pyfunction]
+fn build_community_payload(source_json: String) -> PyResult<String> {
+    let source: crate::ingest::CommunitySource =
+        serde_json::from_str(&source_json).map_err(|e| json_err("source_json", e))?;
+    let payload = crate::ingest::build_community_payload(&source)
+        .map_err(|e| ingest_err("build_community_payload", e))?;
+    let result = serde_json::json!({ "payload": payload });
+    serde_json::to_string(&result).map_err(|e| json_err("serialize community", e))
+}
+
+/// Build the payload JSON for a `location_proof` Contribution per CEG
+/// 0.8 §5.6.8.11 (NodeCore#31 Ask 2). Enforces the rough-only bound
+/// (`cell_resolution ≤ 7`) + cell canonical-form client-side. Returns
+/// `{ "payload": {...} }`.
+#[pyfunction]
+fn build_location_proof_payload(source_json: String) -> PyResult<String> {
+    let source: crate::ingest::LocationProofSource =
+        serde_json::from_str(&source_json).map_err(|e| json_err("source_json", e))?;
+    let payload = crate::ingest::build_location_proof_payload(&source)
+        .map_err(|e| ingest_err("build_location_proof_payload", e))?;
+    let result = serde_json::json!({ "payload": payload });
+    serde_json::to_string(&result).map_err(|e| json_err("serialize location_proof", e))
+}
+
+/// H3: lat/lon → canonical cell_id at the given resolution (CEG §0.8).
+#[pyfunction]
+fn h3_cell_from_latlon(lat: f64, lon: f64, resolution: u8) -> PyResult<String> {
+    crate::ingest::h3_cell_from_latlon(lat, lon, resolution)
+        .map_err(|e| ingest_err("h3_cell_from_latlon", e))
+}
+
+/// H3: parent cell at `target_resolution` (CEG §0.8.2).
+#[pyfunction]
+fn h3_parent_cell(cell_id: String, target_resolution: u8) -> PyResult<String> {
+    crate::ingest::h3_parent_cell(&cell_id, target_resolution)
+        .map_err(|e| ingest_err("h3_parent_cell", e))
+}
+
+/// H3: is `contained_cell` within `container_cell`? (CEG §0.8.2).
+#[pyfunction]
+fn h3_cell_contained(
+    contained_cell_id: String,
+    contained_resolution: u8,
+    container_cell_id: String,
+    container_resolution: u8,
+) -> PyResult<bool> {
+    crate::ingest::h3_cell_contained(
+        &contained_cell_id,
+        contained_resolution,
+        &container_cell_id,
+        container_resolution,
+    )
+    .map_err(|e| ingest_err("h3_cell_contained", e))
+}
+
+/// H3: validate a cell_id's canonical form + resolution-redundancy
+/// (CEG §0.8). Returns `true` on success; raises on malformed/mismatch.
+#[pyfunction]
+fn h3_validate_canonical_form(cell_id: String, cell_resolution: u8) -> PyResult<bool> {
+    crate::ingest::h3_validate_canonical_form(&cell_id, cell_resolution)
+        .map(|()| true)
+        .map_err(|e| ingest_err("h3_validate_canonical_form", e))
+}
+
 /// Build the payload JSON for a `moderation_event` Contribution —
 /// the **universal reporting envelope** per `FSD/MEDIA_SHARING.md`
 /// §11.2 + SCHEMA §4.11.
@@ -1130,6 +1199,13 @@ fn ciris_node_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_identity_occurrence_payload, m)?)?;
     m.add_function(wrap_pyfunction!(build_family_payload, m)?)?;
     m.add_function(wrap_pyfunction!(evaluate_consensus_protocol, m)?)?;
+    // CEG 0.8 community + location_proof + H3 (NodeCore#31)
+    m.add_function(wrap_pyfunction!(build_community_payload, m)?)?;
+    m.add_function(wrap_pyfunction!(build_location_proof_payload, m)?)?;
+    m.add_function(wrap_pyfunction!(h3_cell_from_latlon, m)?)?;
+    m.add_function(wrap_pyfunction!(h3_parent_cell, m)?)?;
+    m.add_function(wrap_pyfunction!(h3_cell_contained, m)?)?;
+    m.add_function(wrap_pyfunction!(h3_validate_canonical_form, m)?)?;
     m.add_function(wrap_pyfunction!(build_moderator_delegation_payload, m)?)?;
     m.add_function(wrap_pyfunction!(build_moderator_revocation_payload, m)?)?;
     Ok(())

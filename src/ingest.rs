@@ -2497,6 +2497,283 @@ pub fn evaluate_consensus_protocol(
     }
 }
 
+// ─── CEG 0.8 — community + location_proof + H3 helpers (NodeCore#31) ─────
+
+/// A community member per CEG 0.8 §5.6.8.10. Wire shape is identical to
+/// [`FamilyMember`] (`{key_id, joined_at, role}`) — the member is an
+/// IDENTITY key, role is open vocab (`founder` / `member`).
+pub type CommunityMember = FamilyMember;
+
+/// Geographic constraint for a `cohort_subkind: geographic` community
+/// (CEG 0.8 §5.6.8.10). The community's bounding H3 cell; member
+/// `location_proof`s must be contained within it (§0.8.2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeographicConstraint {
+    /// H3 cell id, canonical lowercase hex per §0.8.
+    pub cell_id: String,
+    /// H3 resolution. Community-side cells may be ANY resolution
+    /// (only `location_proof` is bounded to ≤ 7 per §0.8.1).
+    pub cell_resolution: u8,
+}
+
+/// Subkind-specific payload for a `community` (CEG 0.8 §5.6.8.10).
+/// `geographic` is the one canonical subkind; operator vocab extends
+/// via `Custom`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "subkind", rename_all = "snake_case")]
+pub enum CohortSubkindPayload {
+    /// Geographic community — carries the bounding H3 cell.
+    Geographic(GeographicConstraint),
+    /// Operator-defined subkind with an opaque payload. Serializes as
+    /// `{"subkind": "custom", "name": "<x>", "payload": {...}}` — the
+    /// internal `subkind` tag is the variant discriminator; `name`
+    /// carries the operator subkind identifier.
+    Custom {
+        /// The operator-defined subkind identifier.
+        name: String,
+        /// The subkind's opaque payload.
+        payload: serde_json::Value,
+    },
+}
+
+/// Source for a `community` Contribution per CEG 0.8 §5.6.8.10 — a
+/// larger node-collective. Sibling to `family` but content federates
+/// (emits `holds_bytes:*`, no DEK cascade). Rides a `scores`
+/// attestation; 1+4 lockdown preserved.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommunitySource {
+    /// The community's own federation_keys identity.
+    pub community_key_id: String,
+    /// Human-readable name; non-unique.
+    pub community_name: String,
+    /// Subkind discriminator — open vocab; canonical: `geographic`.
+    pub cohort_subkind: String,
+    /// Subkind-specific payload (required + validated for `geographic`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cohort_subkind_payload: Option<CohortSubkindPayload>,
+    /// Current membership roster (identity keys).
+    pub members: Vec<CommunityMember>,
+    /// When the community was founded (RFC 3339 canonical).
+    pub founded_at: DateTime<Utc>,
+    /// Membership-change rule — same six canonical kinds as family
+    /// (`evaluate_consensus_protocol`). `quorum:M/N` is absolute-M per
+    /// CEG §8.1.12.3.1, applied identically to community admission.
+    pub consensus_protocol: String,
+    /// If true, `consensus_protocol` may not be amended via its own rule.
+    pub consensus_protocol_entrenched: bool,
+}
+
+/// Build the canonical `payload` JSON for a `community` Contribution
+/// per CEG 0.8 §5.6.8.10. Pure builder, no I/O. Used for both creation
+/// and membership-change proposals (the latter rides `supersedes`).
+///
+/// For `cohort_subkind: geographic`, the `cohort_subkind_payload` MUST
+/// be `Geographic` with a valid H3 cell (validated here); the
+/// per-member location_proof-containment check is a substrate / engine
+/// concern (see `evaluate_subkind_admission`, deferred).
+pub fn build_community_payload(source: &CommunitySource) -> Result<serde_json::Value, IngestError> {
+    if source.community_key_id.trim().is_empty() {
+        return Err(IngestError::EmptyCommunityKey);
+    }
+    if source.cohort_subkind.trim().is_empty() {
+        return Err(IngestError::EmptyCohortSubkind);
+    }
+    if source.consensus_protocol.trim().is_empty() {
+        return Err(IngestError::EmptyConsensusProtocol);
+    }
+    parse_consensus_protocol(&source.consensus_protocol).ok_or_else(|| {
+        IngestError::MalformedConsensusProtocol(source.consensus_protocol.clone())
+    })?;
+    if source.members.is_empty() {
+        return Err(IngestError::EmptyCommunityMembers);
+    }
+    // geographic subkind requires a Geographic payload with a valid cell.
+    if source.cohort_subkind == "geographic" {
+        match &source.cohort_subkind_payload {
+            Some(CohortSubkindPayload::Geographic(g)) => {
+                h3_validate_canonical_form(&g.cell_id, g.cell_resolution)?;
+            }
+            _ => return Err(IngestError::MissingGeographicConstraint),
+        }
+    }
+    let payload = serde_json::json!({
+        "subject_kind": "community",
+        "community_key_id": source.community_key_id,
+        "community_name": source.community_name,
+        "cohort_subkind": source.cohort_subkind,
+        "cohort_subkind_payload": source.cohort_subkind_payload,
+        "members": source.members.iter().map(|m| {
+            let mut mj = serde_json::json!({ "key_id": m.key_id, "joined_at": m.joined_at });
+            if let Some(ref r) = m.role {
+                mj["role"] = serde_json::Value::String(r.clone());
+            }
+            mj
+        }).collect::<Vec<_>>(),
+        "founded_at": source.founded_at,
+        "consensus_protocol": source.consensus_protocol,
+        "consensus_protocol_entrenched": source.consensus_protocol_entrenched,
+    });
+    Ok(payload)
+}
+
+/// Source for a `location_proof` Contribution per CEG 0.8 §5.6.8.11 —
+/// a subject's rough-location declaration. Required for `geographic`
+/// community admission; may stand alone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocationProofSource {
+    /// The asserting party's federation_keys.key_id.
+    pub subject_key_id: String,
+    /// H3 cell id, canonical lowercase hex per §0.8.
+    pub cell_id: String,
+    /// H3 resolution — MUST be ≤ 7 (rough-only, §0.8.1).
+    pub cell_resolution: u8,
+    /// When asserted (RFC 3339 canonical).
+    pub asserted_at: DateTime<Utc>,
+    /// Optional expiry — `None` = indefinite (consumer policy SHOULD
+    /// treat as stale after 30 days for liveness).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_until: Option<DateTime<Utc>>,
+    /// Optional hardware-attested location blob (TPM / SE GNSS fix),
+    /// base64. `None` = software-only / self-asserted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation_evidence: Option<String>,
+}
+
+/// Maximum H3 resolution for a `location_proof` — rough-only invariant
+/// per CEG §0.8.1 (resolution 7 ≈ 5 km² hexagons).
+pub const LOCATION_PROOF_MAX_RESOLUTION: u8 = 7;
+
+/// Build the canonical `payload` JSON for a `location_proof`
+/// Contribution per CEG 0.8 §5.6.8.11. Pure builder, no I/O.
+///
+/// **Client-side rough-only enforcement (defense in depth)**: returns
+/// [`IngestError::LocationResolutionTooFine`] if `cell_resolution > 7`
+/// BEFORE any substrate round-trip — the substrate is the second line
+/// of defense per §0.8.1. Also validates the cell canonical form +
+/// resolution-redundancy (§0.8).
+pub fn build_location_proof_payload(
+    source: &LocationProofSource,
+) -> Result<serde_json::Value, IngestError> {
+    if source.subject_key_id.trim().is_empty() {
+        return Err(IngestError::EmptySubjectKey);
+    }
+    // Rough-only gate FIRST (the load-bearing §0.8.1 invariant).
+    if source.cell_resolution > LOCATION_PROOF_MAX_RESOLUTION {
+        return Err(IngestError::LocationResolutionTooFine {
+            got: source.cell_resolution,
+            max: LOCATION_PROOF_MAX_RESOLUTION,
+        });
+    }
+    // Canonical form + resolution-redundancy (§0.8).
+    h3_validate_canonical_form(&source.cell_id, source.cell_resolution)?;
+
+    let mut payload = serde_json::json!({
+        "subject_kind": "location_proof",
+        "subject_key_id": source.subject_key_id,
+        "cell_id": source.cell_id,
+        "cell_resolution": source.cell_resolution,
+        "asserted_at": source.asserted_at,
+    });
+    if let Some(vu) = source.valid_until {
+        payload["valid_until"] = serde_json::json!(vu);
+    }
+    if let Some(ref ev) = source.attestation_evidence {
+        payload["attestation_evidence"] = serde_json::Value::String(ev.clone());
+    }
+    Ok(payload)
+}
+
+// ── H3 cell helpers (CEG §0.8; NodeCore is the substrate's H3 chooser) ──
+//
+// Backed by `h3o` (pure-Rust H3 port, MIT). NodeCore picks the library;
+// CIRISPersist follows. h3o's canonical string form matches the §0.8
+// example (`8001fffffffffff` for res-0) and its `.resolution()` matches
+// the spec's resolution-redundancy intent (NB: the §0.8 prose "high 4
+// bits encode resolution" is imprecise — the res-0 example's high nibble
+// is the H3 mode marker `8`, not `0`; flagged to Registry).
+
+fn h3_resolution_from_u8(r: u8) -> Result<h3o::Resolution, IngestError> {
+    h3o::Resolution::try_from(r)
+        .map_err(|_| IngestError::MalformedH3Cell(format!("resolution {r} out of range [0,15]")))
+}
+
+fn h3_parse(cell_id: &str) -> Result<h3o::CellIndex, IngestError> {
+    cell_id
+        .parse::<h3o::CellIndex>()
+        .map_err(|e| IngestError::MalformedH3Cell(format!("{cell_id}: {e}")))
+}
+
+/// Convert a lat/lon to the canonical H3 cell_id at the given
+/// resolution (CEG §0.8). Returns the lowercase-hex canonical string.
+pub fn h3_cell_from_latlon(lat: f64, lon: f64, resolution: u8) -> Result<String, IngestError> {
+    let res = h3_resolution_from_u8(resolution)?;
+    let ll = h3o::LatLng::new(lat, lon)
+        .map_err(|e| IngestError::MalformedH3Cell(format!("lat/lon ({lat},{lon}): {e}")))?;
+    Ok(ll.to_cell(res).to_string())
+}
+
+/// Walk up the H3 hierarchy to the parent cell at `target_resolution`
+/// (CEG §0.8.2). Errors if the target is finer than the cell's own
+/// resolution.
+pub fn h3_parent_cell(cell_id: &str, target_resolution: u8) -> Result<String, IngestError> {
+    let cell = h3_parse(cell_id)?;
+    let target = h3_resolution_from_u8(target_resolution)?;
+    cell.parent(target).map(|p| p.to_string()).ok_or_else(|| {
+        IngestError::MalformedH3Cell(format!(
+            "{cell_id} (res {}) has no parent at finer resolution {target_resolution}",
+            u8::from(cell.resolution())
+        ))
+    })
+}
+
+/// Containment per CEG §0.8.2: is `contained_cell` (at
+/// `contained_resolution`) within `container_cell` (at
+/// `container_resolution`)? True iff `contained_resolution >=
+/// container_resolution` AND the parent-walk reaches the container.
+pub fn h3_cell_contained(
+    contained_cell_id: &str,
+    contained_resolution: u8,
+    container_cell_id: &str,
+    container_resolution: u8,
+) -> Result<bool, IngestError> {
+    // Validate both cells against their declared resolutions first.
+    h3_validate_canonical_form(contained_cell_id, contained_resolution)?;
+    h3_validate_canonical_form(container_cell_id, container_resolution)?;
+    if contained_resolution < container_resolution {
+        return Ok(false); // contained cell is coarser — cannot be inside
+    }
+    let contained = h3_parse(contained_cell_id)?;
+    let container = h3_parse(container_cell_id)?;
+    let container_res = h3_resolution_from_u8(container_resolution)?;
+    Ok(contained.parent(container_res) == Some(container))
+}
+
+/// Validate a cell_id against CEG §0.8 canonical form: parseable H3
+/// index, canonical lowercase hex string, and the resolution-redundancy
+/// check (the index's own resolution MUST equal `cell_resolution`).
+pub fn h3_validate_canonical_form(cell_id: &str, cell_resolution: u8) -> Result<(), IngestError> {
+    let cell = h3_parse(cell_id)?;
+    // Canonical lowercase-hex form: the parsed cell re-serialized MUST
+    // equal the input verbatim (catches uppercase, leading-zero, or
+    // non-canonical encodings).
+    if cell.to_string() != cell_id {
+        return Err(IngestError::MalformedH3Cell(format!(
+            "{cell_id} is not canonical form (expected {})",
+            cell
+        )));
+    }
+    // Resolution-redundancy (§0.8): index resolution MUST match the
+    // declared cell_resolution.
+    let actual = u8::from(cell.resolution());
+    if actual != cell_resolution {
+        return Err(IngestError::H3ResolutionMismatch {
+            declared: cell_resolution,
+            actual,
+        });
+    }
+    Ok(())
+}
+
 /// Build the canonical `payload` JSON for a scope-promotion of an
 /// existing `external_content` Contribution.
 ///
@@ -2675,6 +2952,40 @@ pub enum IngestError {
     /// (§8.1.12.3 — e.g. malformed `quorum:M/N`).
     #[error("malformed consensus_protocol: {0}")]
     MalformedConsensusProtocol(String),
+    /// community requires a non-empty community_key_id (§5.6.8.10).
+    #[error("community_key_id must be non-empty for community")]
+    EmptyCommunityKey,
+    /// community requires a non-empty cohort_subkind (§5.6.8.10).
+    #[error("cohort_subkind must be non-empty for community")]
+    EmptyCohortSubkind,
+    /// community requires at least one member (§5.6.8.10).
+    #[error("community must have at least one member")]
+    EmptyCommunityMembers,
+    /// `cohort_subkind: geographic` requires a `Geographic`
+    /// cohort_subkind_payload with a valid H3 cell (§5.6.8.10).
+    #[error("cohort_subkind: geographic requires a Geographic constraint payload")]
+    MissingGeographicConstraint,
+    /// location_proof `cell_resolution` exceeds the rough-only bound
+    /// (§0.8.1 — MUST be ≤ 7).
+    #[error("location_proof cell_resolution {got} exceeds rough-only max {max} (§0.8.1)")]
+    LocationResolutionTooFine {
+        /// The resolution the producer attempted.
+        got: u8,
+        /// The rough-only maximum (7).
+        max: u8,
+    },
+    /// H3 cell_id is not a parseable / canonical H3 index (§0.8).
+    #[error("malformed H3 cell: {0}")]
+    MalformedH3Cell(String),
+    /// H3 cell_id's own resolution does not match the declared
+    /// `cell_resolution` (§0.8 resolution-redundancy check).
+    #[error("H3 resolution mismatch: declared {declared}, cell encodes {actual}")]
+    H3ResolutionMismatch {
+        /// The `cell_resolution` field value.
+        declared: u8,
+        /// The resolution the cell_id actually encodes.
+        actual: u8,
+    },
     /// Image / video require non-empty alt text or captions for
     /// `cohort_scope ≥ community` (accessibility, per FSD/MEDIA_SHARING
     /// §2.1 + §2.3).
@@ -4641,6 +4952,236 @@ mod tests {
         assert_eq!(
             evaluate_consensus_protocol("quorum:2/3", &members, &["y".into()], &[], None, None),
             ConsensusResult::Insufficient { needed: 2, got: 1 }
+        );
+    }
+
+    // ─── CEG 0.8 community + location_proof + H3 (NodeCore#31) ───────────
+
+    // Austin metro at resolution 5 (~250 km²); a downtown point at res 7.
+    fn austin_r5() -> (String, u8) {
+        (h3_cell_from_latlon(30.2672, -97.7431, 5).unwrap(), 5)
+    }
+
+    #[test]
+    fn h3_canonical_form_and_redundancy() {
+        // The §0.8 res-0 example round-trips canonical.
+        assert!(h3_validate_canonical_form("8001fffffffffff", 0).is_ok());
+        // Resolution-redundancy: declared res must match the cell.
+        assert!(matches!(
+            h3_validate_canonical_form("8001fffffffffff", 5),
+            Err(IngestError::H3ResolutionMismatch {
+                declared: 5,
+                actual: 0
+            })
+        ));
+        // Uppercase is non-canonical (§0.6 lowercase rule).
+        assert!(matches!(
+            h3_validate_canonical_form("8001FFFFFFFFFFF", 0),
+            Err(IngestError::MalformedH3Cell(_))
+        ));
+        // Garbage is malformed.
+        assert!(matches!(
+            h3_validate_canonical_form("not-a-cell", 0),
+            Err(IngestError::MalformedH3Cell(_))
+        ));
+    }
+
+    #[test]
+    fn h3_latlon_parent_containment() {
+        let (a7, _) = (h3_cell_from_latlon(30.2672, -97.7431, 7).unwrap(), 7u8);
+        let parent5 = h3_parent_cell(&a7, 5).unwrap();
+        // the res-7 downtown cell is contained in its res-5 metro parent
+        assert!(h3_cell_contained(&a7, 7, &parent5, 5).unwrap());
+        // a coarser cell is NOT contained in a finer one
+        assert!(!h3_cell_contained(&parent5, 5, &a7, 7).unwrap());
+        // a different metro (Tokyo) is not contained in Austin's parent
+        let tokyo7 = h3_cell_from_latlon(35.6762, 139.6503, 7).unwrap();
+        assert!(!h3_cell_contained(&tokyo7, 7, &parent5, 5).unwrap());
+    }
+
+    #[test]
+    fn h3_containment_edge_cases() {
+        // Antimeridian (±180 lon) and polar points must produce valid
+        // cells that round-trip + self-contain.
+        for (lat, lon) in [
+            (0.0, 180.0),  // antimeridian equator
+            (0.0, -180.0), // antimeridian (other side)
+            (89.9, 0.0),   // near north pole
+            (-89.9, 45.0), // near south pole
+        ] {
+            let c7 = h3_cell_from_latlon(lat, lon, 7).unwrap();
+            h3_validate_canonical_form(&c7, 7).unwrap();
+            // self-containment at same resolution
+            assert!(h3_cell_contained(&c7, 7, &c7, 7).unwrap());
+            // contained in its own res-3 parent
+            let p3 = h3_parent_cell(&c7, 3).unwrap();
+            assert!(h3_cell_contained(&c7, 7, &p3, 3).unwrap());
+        }
+    }
+
+    #[test]
+    fn location_proof_rough_only_gate() {
+        let (cell5, _) = austin_r5();
+        let ok = LocationProofSource {
+            subject_key_id: "alice".into(),
+            cell_id: cell5.clone(),
+            cell_resolution: 5,
+            asserted_at: parse_dt("2026-06-05T12:00:00Z"),
+            valid_until: None,
+            attestation_evidence: None,
+        };
+        let payload = build_location_proof_payload(&ok).unwrap();
+        assert_eq!(payload["subject_kind"], "location_proof");
+        assert_eq!(payload["cell_id"], cell5);
+        assert_eq!(payload["cell_resolution"], 5);
+
+        // Resolution 8 (finer than 7) is rejected client-side.
+        let fine_cell = h3_cell_from_latlon(30.2672, -97.7431, 8).unwrap();
+        let too_fine = LocationProofSource {
+            subject_key_id: "alice".into(),
+            cell_id: fine_cell,
+            cell_resolution: 8,
+            asserted_at: parse_dt("2026-06-05T12:00:00Z"),
+            valid_until: None,
+            attestation_evidence: None,
+        };
+        assert!(matches!(
+            build_location_proof_payload(&too_fine),
+            Err(IngestError::LocationResolutionTooFine { got: 8, max: 7 })
+        ));
+    }
+
+    #[test]
+    fn location_proof_validates_cell_redundancy() {
+        let (cell5, _) = austin_r5();
+        // declared resolution 6 but cell is res 5 → mismatch
+        let mismatch = LocationProofSource {
+            subject_key_id: "alice".into(),
+            cell_id: cell5,
+            cell_resolution: 6,
+            asserted_at: parse_dt("2026-06-05T12:00:00Z"),
+            valid_until: None,
+            attestation_evidence: None,
+        };
+        assert!(matches!(
+            build_location_proof_payload(&mismatch),
+            Err(IngestError::H3ResolutionMismatch {
+                declared: 6,
+                actual: 5
+            })
+        ));
+    }
+
+    fn austin_community() -> CommunitySource {
+        let (cell5, _) = austin_r5();
+        CommunitySource {
+            community_key_id: "austin-metro".into(),
+            community_name: "Austin Metro".into(),
+            cohort_subkind: "geographic".into(),
+            cohort_subkind_payload: Some(CohortSubkindPayload::Geographic(GeographicConstraint {
+                cell_id: cell5,
+                cell_resolution: 5,
+            })),
+            members: vec![FamilyMember {
+                key_id: "alice_root".into(),
+                joined_at: parse_dt("2026-01-01T00:00:00Z"),
+                role: Some(MEMBER_ROLE_FOUNDER.into()),
+            }],
+            founded_at: parse_dt("2026-01-01T00:00:00Z"),
+            consensus_protocol: "majority".into(),
+            consensus_protocol_entrenched: false,
+        }
+    }
+
+    #[test]
+    fn community_geographic_round_trips() {
+        let payload = build_community_payload(&austin_community()).unwrap();
+        assert_eq!(payload["subject_kind"], "community");
+        assert_eq!(payload["community_key_id"], "austin-metro");
+        assert_eq!(payload["cohort_subkind"], "geographic");
+        assert_eq!(payload["cohort_subkind_payload"]["subkind"], "geographic");
+        assert!(payload["cohort_subkind_payload"]["cell_id"].is_string());
+        assert_eq!(payload["cohort_subkind_payload"]["cell_resolution"], 5);
+        assert_eq!(payload["consensus_protocol"], "majority");
+        assert_eq!(payload["members"][0]["role"], "founder");
+    }
+
+    #[test]
+    fn community_geographic_requires_valid_constraint() {
+        let mut bad = austin_community();
+        bad.cohort_subkind_payload = None;
+        assert!(matches!(
+            build_community_payload(&bad),
+            Err(IngestError::MissingGeographicConstraint)
+        ));
+        // a Custom payload for a geographic subkind is also rejected
+        let mut wrong = austin_community();
+        wrong.cohort_subkind_payload = Some(CohortSubkindPayload::Custom {
+            name: "x".into(),
+            payload: serde_json::json!({}),
+        });
+        assert!(matches!(
+            build_community_payload(&wrong),
+            Err(IngestError::MissingGeographicConstraint)
+        ));
+    }
+
+    #[test]
+    fn community_custom_subkind_serializes() {
+        let mut c = austin_community();
+        c.cohort_subkind = "professional".into();
+        c.cohort_subkind_payload = Some(CohortSubkindPayload::Custom {
+            name: "professional".into(),
+            payload: serde_json::json!({ "field": "med_board" }),
+        });
+        let payload = build_community_payload(&c).unwrap();
+        assert_eq!(payload["cohort_subkind"], "professional");
+        assert_eq!(payload["cohort_subkind_payload"]["subkind"], "custom");
+        assert_eq!(payload["cohort_subkind_payload"]["name"], "professional");
+        assert_eq!(
+            payload["cohort_subkind_payload"]["payload"]["field"],
+            "med_board"
+        );
+    }
+
+    #[test]
+    fn community_rejects_empty_and_malformed() {
+        let mut no_members = austin_community();
+        no_members.members.clear();
+        assert!(matches!(
+            build_community_payload(&no_members),
+            Err(IngestError::EmptyCommunityMembers)
+        ));
+        let mut bad_protocol = austin_community();
+        bad_protocol.consensus_protocol = "quorum:9".into();
+        assert!(matches!(
+            build_community_payload(&bad_protocol),
+            Err(IngestError::MalformedConsensusProtocol(_))
+        ));
+    }
+
+    #[test]
+    fn community_admission_reuses_absolute_m_quorum() {
+        // §8.1.13.2: community admission uses the SAME absolute-M
+        // consensus evaluator as family (NodeCore#30, confirmed by the
+        // §8.1.12.3.1 pin). A quorum:2/3 community admits at 2 sigs.
+        let members = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ];
+        // grown to 4 members; quorum:2/3 still admits at 2 (absolute-M)
+        assert_eq!(
+            evaluate_consensus_protocol(
+                "quorum:2/3",
+                &members,
+                &["a".into(), "b".into()],
+                &[],
+                None,
+                None
+            ),
+            ConsensusResult::Satisfied
         );
     }
 }

@@ -1475,6 +1475,104 @@ to his, and the single-key device identities receive directly.
 
 [Spec — NodeCore#30 Asks 1/2/4/5/6 shipped: `build_identity_occurrence_payload`, `build_family_payload`, `evaluate_consensus_protocol` (+ resolver trait hooks), PyO3 surface, this doc. Ask 3 (`cohort_scope: self|family` on existing helpers) deferred (mechanical, wide blast radius). Async ingest + membership-change admission paths gated on CIRISPersist#152 substrate admission gate.]
 
+### 4.32 `community` + `location_proof` (CEG 0.8)
+
+Larger node-collectives + rough-location declarations, per CEG 0.8
+§5.6.8.10 + §5.6.8.11 (NodeCore#31). Both ride a `scores` attestation
+with a `subject_kind` discriminator — no new structural primitive.
+
+#### `community` (§5.6.8.10)
+
+Sibling to `family` (§4.31) but content **federates** within the
+cohort (emits `holds_bytes:*`, no DEK cascade; structural-invisibility
+is self/family only). Carries a `cohort_subkind` discriminator (open
+vocab; canonical `geographic`).
+
+Payload (`build_community_payload`):
+
+```json
+{
+  "subject_kind": "community",
+  "community_key_id": "<the community's own federation key>",
+  "community_name": "<human-readable; non-unique>",
+  "cohort_subkind": "geographic | <open vocab>",
+  "cohort_subkind_payload": { "subkind": "geographic", "cell_id": "...", "cell_resolution": 5 },
+  "members": [ { "key_id": "...", "joined_at": "<rfc3339>", "role": "founder | member" } ],
+  "founded_at": "<rfc3339_canonical>",
+  "consensus_protocol": "founder_only | unanimous | majority | quorum:{m}/{n} | weighted:{rubric} | custom:{id}",
+  "consensus_protocol_entrenched": false
+}
+```
+
+Membership-change admission uses the **same** `evaluate_consensus_protocol`
+as family (§8.1.13.2); `quorum:M/N` is **absolute-M** (§8.1.12.3.1) —
+a `quorum:2/3` community grown to 5 members still admits at 2 sigs.
+For `cohort_subkind: geographic`, the `cohort_subkind_payload` MUST be
+a `Geographic` constraint with a valid H3 cell (validated at build
+time); per-member `location_proof`-containment is the substrate /
+engine gate (deferred `evaluate_subkind_admission`).
+
+A `Custom` subkind serializes as `{"subkind": "custom", "name": "<x>",
+"payload": {...}}`.
+
+#### `location_proof` (§5.6.8.11)
+
+A subject's rough-location declaration — required for `geographic`
+community admission, usable standalone.
+
+Payload (`build_location_proof_payload`):
+
+```json
+{
+  "subject_kind": "location_proof",
+  "subject_key_id": "<asserting party's federation key>",
+  "cell_id": "<H3 cell, lowercase hex per §0.8>",
+  "cell_resolution": 5,
+  "asserted_at": "<rfc3339_canonical>",
+  "valid_until": "<rfc3339 — optional>",
+  "attestation_evidence": "<base64 TPM/SE GNSS blob — optional>"
+}
+```
+
+**Rough-only is client-enforced** (defense in depth): the builder
+returns `LocationResolutionTooFine` if `cell_resolution > 7` BEFORE the
+substrate round-trip (§0.8.1). It also validates the cell canonical
+form + resolution-redundancy (the cell's own resolution MUST equal
+`cell_resolution`, §0.8). **The substrate does not verify location
+truth** — no GPS oracle at this layer; truth-grounding is consumer-side
+(community consensus admission + optional `attestation_evidence` +
+LensCore repeat-offender detection).
+
+#### H3 cell helpers (CEG §0.8)
+
+Backed by `h3o` (pure-Rust H3 port, MIT) — NodeCore is the substrate's
+H3 chooser; persist follows. PyO3-exposed:
+
+- `h3_cell_from_latlon(lat, lon, resolution)` → canonical cell_id
+- `h3_parent_cell(cell_id, target_resolution)` → parent cell (§0.8.2)
+- `h3_cell_contained(contained, contained_res, container, container_res)` → bool (§0.8.2)
+- `h3_validate_canonical_form(cell_id, cell_resolution)` → canonical + resolution-redundancy check (§0.8)
+
+> **Boundary note — CIRISRegistry (flagged).** CEG §0.8 prose says "the
+> high 4 bits [of `cell_id`] encode the resolution," but the spec's own
+> res-0 example `8001fffffffffff` has high nibble `8` (the H3 *mode*
+> marker, not resolution `0`). NodeCore implements the standard-H3
+> reading — resolution via the H3 index's resolution field, which
+> matches the example — and flagged the prose inconsistency to Registry.
+
+#### Worked example — the Austin Metro community
+
+A `geographic` community `austin-metro` bounds itself at H3 resolution
+5 (~250 km² hexagon over Austin), `consensus_protocol: majority`.
+Alice emits a `location_proof` with a resolution-5 cell inside the
+metro hexagon; her cell is `h3_cell_contained` within the community's
+constraint, so the existing members can `majority`-admit her. A
+resolution-8 proof (street-level) would be rejected client-side by the
+§0.8.1 rough-only gate before it ever reaches the substrate — *rough
+is rough by protocol*.
+
+[Spec — NodeCore#31 Asks 1/2/3/7/8 shipped: `build_community_payload`, `build_location_proof_payload`, 4 H3 helpers (h3o), PyO3, this doc. Deferred: Ask 4 (`cohort_scope: community` on existing helpers, mechanical), Ask 5 (`evaluate_subkind_admission` — needs engine for location_proof lookup), Ask 6 (optional civic/emergency convenience builders), async ingest + admission paths (gated on the CIRISPersist substrate community gate).]
+
 ---
 
 ## 5. Vote
