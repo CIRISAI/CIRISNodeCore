@@ -1,6 +1,6 @@
 [package]
 name = "ciris-node-core"
-version = "0.1.0-dev"
+version = "0.1.0"
 edition = "2021"
 description = "Second-tier consensus runtime for the CIRIS federation: contributions, votes, expertise/credits ledgers, moderation, slashing, reconsideration"
 license = "AGPL-3.0-or-later"
