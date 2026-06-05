@@ -1266,6 +1266,91 @@ Federation directory walks of the `supersedes` chain reconstruct the promotion h
 
 [Spec — Phase 1 of NodeCore#19. Phase 2 ships the import pipeline; Phase 3 ships consumer-side composition + UI surface.]
 
+### 4.30 `consent_record` (CEG 0.6)
+
+Subject-side consent authority over a Contribution, per CEG 0.6
+§5.6.8.7 (NodeCore#29). The ceremony-shape over the underlying
+`consent:*` `scores` primitive — used for standalone partnership
+grants, DSAR-shape consent declarations, multi-party contracts, and
+explicit consent ceremonies with locked field schemas.
+
+**Rides the existing `scores` attestation_type** with a
+`subject_kind = consent_record` discriminator. No new attestation_type;
+1+4 wire-format lockdown preserved. The bare-`scores`-on-`consent:state:*`
+primitive is the common case; `consent_record` is the explicit-ceremony
+envelope shape over it.
+
+Payload (`build_consent_record_payload`):
+
+```json
+{
+  "subject_kind": "consent_record",
+  "subject_key_id": "<federation_keys.key_id OR canonical:sha256:...>",
+  "target_key_id": "<producer/recipient key — optional, bilateral grants>",
+  "stance": "granted | revoked | expired",
+  "scope": ["retain", "share", "analyze", "train", "publish"],
+  "asserted_at": "<rfc3339_canonical>",
+  "valid_until": "<rfc3339 — optional, null=indefinite>",
+  "deletion_sla_days": 30,
+  "decay_protocol": "ciris-agent-90day",
+  "bilateral_pair_id": "<uuid — optional, bilateral grants>"
+}
+```
+
+| Field | Required | Notes |
+|---|---|---|
+| `subject_key_id` | yes | The subject declaring stance. A `federation_keys.key_id` OR a `canonical:sha256:{hex}` identifier (CEG 0.6 §4.2.2). |
+| `target_key_id` | optional | Producer / recipient for bilateral grants. Required when `bilateral_pair_id` is set. |
+| `stance` | yes | Closed-set: `granted` (affirm) / `revoked` (withdraw — producer must delete within SLA) / `expired` (substrate emission when `valid_until` passes). |
+| `scope` | optional | Open vocab per CEG 0.6 §5.6.8.6. Canonical: `retain`, `share`, `analyze`, `train`, `publish`. |
+| `asserted_at` | yes | RFC-3339 canonical (§0.5). |
+| `valid_until` | optional | `null` = indefinite. |
+| `deletion_sla_days` | optional | For revocations — producer's deletion-obligation window. Composes with `consent:deletion_sla:{days}`. |
+| `decay_protocol` | optional | Named multi-stage decay path (e.g. `ciris-agent-90day`). |
+| `bilateral_pair_id` | optional | Pairs subject-half + producer-half via `topical_relation:bilateral_pair`. |
+
+**Self-consent vs bilateral.** When the envelope `author_id` (the
+asserter) equals `subject_key_id`, the Contribution is a self-consent
+ceremony (CEG 0.6 §4.2.3 — agent attesting consent-authority over its
+own identity claims). When distinct, it's the producer-half of a
+bilateral grant (§8.1.11.4).
+
+**Bilateral pair pattern** (PARTNERED ceremony, CIRISAgent CEM):
+
+1. Subject emits `consent_record(subject_key_id, stance: granted, bilateral_pair_id: <fresh-uuid>)` + `scores` on `consent:partnership_grant` — built by `build_bilateral_partnership_request_payload`.
+2. Producer emits `consent_record(subject_key_id, target_key_id: subject_key_id, stance: granted, bilateral_pair_id: <same-uuid>)` + `scores` on `consent:partnership_accept` — built by `build_bilateral_partnership_accept_payload`.
+3. `topical_relation:bilateral_pair` links the two Contributions.
+4. Consumer policy treats the partnership as ratified iff both halves present under the same `bilateral_pair_id` with `stance: granted`.
+
+Fresh pair ids via `build_bilateral_pair_id()` (UUID v4).
+
+**The `subject_key_ids` envelope field (CEG 0.6 §4.2).** Orthogonal to
+`cohort_scope` (visibility) and `delivery_mode` (delivery) — names the
+parties with consent-revocation authority over a Contribution. Populated
+at content-ingest time when subject identification is unambiguous from
+the source. Subjects not (yet) federation-enrolled are named by
+`canonical_subject_hash(platform, entity_kind, id)` →
+`canonical:sha256:{hex}` (CEG 0.6 §4.2.2):
+
+| sub_kind | `subject_key_ids` population |
+|---|---|
+| `chat_message` | `[canonical_subject_hash(platform, "user", author_id)]`; group chat adds all named participants |
+| `blog_post` | `[canonical_subject_hash(platform, "user", author)]` |
+| `image` | `[author_canonical_hash]` if identifiable; photographed-people identification is consumer/UI-side, not substrate |
+| `audio` | `[producer_hash, ...artist_hashes]` |
+| `video` / `film` | `[director_hash, producer_hash, ...]` |
+| `model_3d` | `[author_hash]` |
+| `event_listing` | `[organizer_hash]`; RSVPs ride `topical_relation:rsvps`, not the event's `subject_key_ids` |
+
+`subject_key_ids: null/[]` is the status-quo shape (producer-only
+authority; all CEG ≤ 0.5 Contributions). The field is additive at the
+envelope layer; CEG 0.x consumers that don't read it see status-quo
+behavior. Subjects discovered downstream (e.g. faces in photos that
+aren't tagged at ingest) are handled by separate `consent_record`
+emissions, not retroactive ingest-time mutation.
+
+[Spec — NodeCore#29 Asks 1/2/3/5 shipped: `build_consent_record_payload`, bilateral helpers, `canonical_subject_hash`, this doc. Ask 4 (`ingest_canonical_binding`) blocked on CIRISPersist substrate admission (Ask 6).]
+
 ---
 
 ## 5. Vote

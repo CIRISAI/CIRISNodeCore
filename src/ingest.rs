@@ -1890,6 +1890,194 @@ pub fn build_event_listing_payload(
     Ok((payload, sha256))
 }
 
+// ─── CEG 0.6 — consent_record + bilateral consent ceremony (NodeCore#29) ─
+
+/// Subject-side consent stance over a Contribution. Closed-set enum per
+/// CEG 0.6 §5.6.8.7. `Expired` is substrate-emitted when a granted
+/// record's `valid_until` passes without renewal; producers + subjects
+/// emit `Granted` / `Revoked`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsentStance {
+    /// Subject affirms; processing may proceed within scope + valid_until.
+    Granted,
+    /// Subject withdraws; producer must initiate deletion within the
+    /// `deletion_sla_days` window.
+    Revoked,
+    /// Substrate emission when `valid_until` passes without renewal.
+    Expired,
+}
+
+impl ConsentStance {
+    /// Wire string per CEG 0.6 §5.6.8.7 ConsentStance closed-set.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ConsentStance::Granted => "granted",
+            ConsentStance::Revoked => "revoked",
+            ConsentStance::Expired => "expired",
+        }
+    }
+}
+
+/// Source for a `consent_record` Contribution per CEG 0.6 §5.6.8.7.
+/// The ceremony-shape over the underlying `consent:*` `scores`
+/// primitive — used for standalone partnership grants, DSAR-shape
+/// consent declarations, multi-party contracts, and explicit consent
+/// ceremonies with locked field schemas.
+///
+/// Rides the existing `scores` attestation_type with a
+/// `subject_kind=consent_record` discriminator. No new attestation_type;
+/// 1+4 wire-format lockdown preserved.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsentRecordSource {
+    /// The subject declaring stance — a `federation_keys.key_id` OR a
+    /// canonical-hash identifier per CEG 0.6 §4.2.2.
+    pub subject_key_id: String,
+    /// Optional producer / recipient for bilateral grants. When set
+    /// with `bilateral_pair_id`, this is the producer-half of a
+    /// PARTNERED ceremony.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_key_id: Option<String>,
+    /// The consent stance (granted / revoked / expired).
+    pub stance: ConsentStance,
+    /// Consent scope — open vocab per CEG 0.6 §5.6.8.6. Canonical
+    /// values: `retain`, `share`, `analyze`, `train`, `publish`.
+    #[serde(default)]
+    pub scope: Vec<String>,
+    /// When this stance was asserted (RFC 3339 canonical, per §0.5).
+    pub asserted_at: DateTime<Utc>,
+    /// Optional expiry — `None` = indefinite. After this passes, the
+    /// substrate may emit an `Expired` record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_until: Option<DateTime<Utc>>,
+    /// For revocations: the producer's deletion-obligation window in
+    /// days. Composes with the `consent:deletion_sla:{days}` dimension.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletion_sla_days: Option<u32>,
+    /// Optional named multi-stage decay path (e.g. "ciris-agent-90day").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decay_protocol: Option<String>,
+    /// For bilateral grants: pairs the subject + producer Contributions
+    /// via `topical_relation:bilateral_pair`. Both halves share this id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bilateral_pair_id: Option<String>,
+}
+
+/// Build the canonical `payload` JSON for a `consent_record`
+/// Contribution per CEG 0.6 §5.6.8.7. Pure builder — no I/O, no blob
+/// (consent_record rides a `scores` attestation, not external_content).
+///
+/// The caller wraps the returned payload in a `ContributionEnvelope`
+/// with `subject_kind = "consent_record"` and the appropriate
+/// `subject_key_ids` (the envelope field naming the consent holder).
+/// When `asserter_key_id == subject_key_id` the Contribution is a
+/// self-consent ceremony (CEG 0.6 §4.2.3); when distinct, it's the
+/// producer-half of a bilateral grant (§8.1.11.4).
+pub fn build_consent_record_payload(
+    source: &ConsentRecordSource,
+) -> Result<serde_json::Value, IngestError> {
+    if source.subject_key_id.trim().is_empty() {
+        return Err(IngestError::EmptySubjectKey);
+    }
+    // A bilateral grant requires both target_key_id AND bilateral_pair_id;
+    // a bare pair_id without a target is a malformed ceremony half.
+    if source.bilateral_pair_id.is_some() && source.target_key_id.is_none() {
+        return Err(IngestError::IncompleteBilateralPair);
+    }
+    let mut payload = serde_json::json!({
+        "subject_kind": "consent_record",
+        "subject_key_id": source.subject_key_id,
+        "stance": source.stance.as_str(),
+        "scope": source.scope,
+        "asserted_at": source.asserted_at,
+    });
+    if let Some(ref t) = source.target_key_id {
+        payload["target_key_id"] = serde_json::Value::String(t.clone());
+    }
+    if let Some(vu) = source.valid_until {
+        payload["valid_until"] = serde_json::json!(vu);
+    }
+    if let Some(sla) = source.deletion_sla_days {
+        payload["deletion_sla_days"] = serde_json::json!(sla);
+    }
+    if let Some(ref dp) = source.decay_protocol {
+        payload["decay_protocol"] = serde_json::Value::String(dp.clone());
+    }
+    if let Some(ref pid) = source.bilateral_pair_id {
+        payload["bilateral_pair_id"] = serde_json::Value::String(pid.clone());
+    }
+    Ok(payload)
+}
+
+/// Generate a fresh bilateral-pair id (UUID v4) per CEG 0.6 §5.6.8.7
+/// PARTNERED ceremony. The subject-half and producer-half Contributions
+/// carry the same id so a consumer can ratify the partnership only when
+/// both halves are present under one id.
+pub fn build_bilateral_pair_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+/// Build the subject-half of a bilateral partnership request per CEG 0.6
+/// §5.6.8.7 step 1. The subject grants consent and opens the pairing;
+/// the returned payload is a `consent_record` with `stance: granted` +
+/// the fresh `bilateral_pair_id`. The caller emits a `scores` on
+/// `consent:partnership_grant` alongside (the dimension is the
+/// ceremony's semantic discriminator).
+pub fn build_bilateral_partnership_request_payload(
+    subject_key_id: &str,
+    target_producer_key_id: &str,
+    scope: Vec<String>,
+    pair_id: &str,
+    asserted_at: DateTime<Utc>,
+) -> Result<serde_json::Value, IngestError> {
+    if pair_id.trim().is_empty() {
+        return Err(IngestError::EmptyPairId);
+    }
+    let source = ConsentRecordSource {
+        subject_key_id: subject_key_id.to_owned(),
+        target_key_id: Some(target_producer_key_id.to_owned()),
+        stance: ConsentStance::Granted,
+        scope,
+        asserted_at,
+        valid_until: None,
+        deletion_sla_days: None,
+        decay_protocol: None,
+        bilateral_pair_id: Some(pair_id.to_owned()),
+    };
+    build_consent_record_payload(&source)
+}
+
+/// Build the producer-half of a bilateral partnership accept per CEG 0.6
+/// §5.6.8.7 step 2. The producer affirms the same `bilateral_pair_id`
+/// the subject opened; the caller emits a `scores` on
+/// `consent:partnership_accept` alongside. Consumer policy treats the
+/// partnership as ratified iff both halves present under the same id
+/// with `stance: granted`.
+pub fn build_bilateral_partnership_accept_payload(
+    producer_key_id: &str,
+    subject_key_id: &str,
+    pair_id: &str,
+    asserted_at: DateTime<Utc>,
+) -> Result<serde_json::Value, IngestError> {
+    if pair_id.trim().is_empty() {
+        return Err(IngestError::EmptyPairId);
+    }
+    // producer_key_id is the asserter (envelope author_id); the payload
+    // names the subject as subject_key_id and the producer as target.
+    let source = ConsentRecordSource {
+        subject_key_id: subject_key_id.to_owned(),
+        target_key_id: Some(producer_key_id.to_owned()),
+        stance: ConsentStance::Granted,
+        scope: Vec::new(),
+        asserted_at,
+        valid_until: None,
+        deletion_sla_days: None,
+        decay_protocol: None,
+        bilateral_pair_id: Some(pair_id.to_owned()),
+    };
+    build_consent_record_payload(&source)
+}
+
 /// Build the canonical `payload` JSON for a scope-promotion of an
 /// existing `external_content` Contribution.
 ///
@@ -2043,6 +2231,16 @@ pub enum IngestError {
     /// Event listing requires `ends_at` >= `starts_at` when ends_at is set.
     #[error("ends_at must be >= starts_at for event_listing")]
     InvalidEventTimeRange,
+    /// consent_record requires a non-empty subject_key_id (CEG 0.6 §5.6.8.7).
+    #[error("subject_key_id must be non-empty for consent_record")]
+    EmptySubjectKey,
+    /// A bilateral pair half carries a pair_id but no target_key_id —
+    /// a malformed ceremony half (CEG 0.6 §5.6.8.7).
+    #[error("bilateral_pair_id requires target_key_id (incomplete bilateral pair)")]
+    IncompleteBilateralPair,
+    /// Bilateral partnership helpers require a non-empty pair_id.
+    #[error("bilateral_pair_id must be non-empty")]
+    EmptyPairId,
     /// Image / video require non-empty alt text or captions for
     /// `cohort_scope ≥ community` (accessibility, per FSD/MEDIA_SHARING
     /// §2.1 + §2.3).
@@ -2081,6 +2279,28 @@ fn compute_sha256(bytes: &[u8]) -> [u8; 32] {
     let mut out = [0u8; 32];
     out.copy_from_slice(&digest);
     out
+}
+
+/// Derive a canonical-hash subject identifier for `subject_key_ids`
+/// population (CEG 0.6 §4.2.2). A subject who is not (yet) a
+/// federation_keys identity is named by the SHA-256 of a canonical
+/// `{platform}:{entity_kind}:{id}` triple, so the same person referenced
+/// across platforms before federation enrollment has a stable,
+/// content-derived key. Per NodeCore#29 Ask 1.
+///
+/// Examples (entity_kind = "user"):
+/// - Discord `author.user_id` → `canonical_subject_hash("discord", "user", "123")`
+/// - Slack `user.id`          → `canonical_subject_hash("slack", "user", "U042")`
+/// - Twitter `author_id`      → `canonical_subject_hash("twitter", "user", "44196397")`
+///
+/// The returned string is `canonical:sha256:{hex}` — the `canonical:`
+/// prefix distinguishes it from a bare `federation_keys.key_id` so
+/// downstream admission (CEG 0.6 §3.2.3 broadened withdraws rule) can
+/// route canonical-hash subjects through the `canonical_binding` path.
+pub fn canonical_subject_hash(platform: &str, entity_kind: &str, id: &str) -> String {
+    let canonical = format!("{platform}:{entity_kind}:{id}");
+    let digest = compute_sha256(canonical.as_bytes());
+    format!("canonical:sha256:{}", hex_encode(&digest))
 }
 
 /// Lowercase hex encoding for the 32-byte SHA-256 — content_sha256
@@ -3340,5 +3560,165 @@ mod tests {
         let (payload, sha) = build_encyclopedia_payload(&src).unwrap();
         assert_eq!(payload["content_sha256"], expected);
         assert_eq!(hex_encode(&sha), expected);
+    }
+
+    // ─── CEG 0.6 consent_record + bilateral tests (NodeCore#29) ──────
+
+    fn consent_src() -> ConsentRecordSource {
+        ConsentRecordSource {
+            subject_key_id: "subject-alice-key".into(),
+            target_key_id: None,
+            stance: ConsentStance::Granted,
+            scope: vec!["retain".into(), "analyze".into()],
+            asserted_at: parse_dt("2026-06-05T12:00:00Z"),
+            valid_until: None,
+            deletion_sla_days: None,
+            decay_protocol: None,
+            bilateral_pair_id: None,
+        }
+    }
+
+    #[test]
+    fn consent_record_minimal_grant_round_trips() {
+        let payload = build_consent_record_payload(&consent_src()).unwrap();
+        assert_eq!(payload["subject_kind"], "consent_record");
+        assert_eq!(payload["subject_key_id"], "subject-alice-key");
+        assert_eq!(payload["stance"], "granted");
+        assert_eq!(payload["scope"][0], "retain");
+        assert_eq!(payload["scope"][1], "analyze");
+        // optional fields omitted when None
+        assert!(payload.get("target_key_id").is_none());
+        assert!(payload.get("valid_until").is_none());
+        assert!(payload.get("deletion_sla_days").is_none());
+        assert!(payload.get("bilateral_pair_id").is_none());
+    }
+
+    #[test]
+    fn consent_record_revocation_with_sla() {
+        let mut src = consent_src();
+        src.stance = ConsentStance::Revoked;
+        src.deletion_sla_days = Some(30);
+        src.decay_protocol = Some("ciris-agent-90day".into());
+        let payload = build_consent_record_payload(&src).unwrap();
+        assert_eq!(payload["stance"], "revoked");
+        assert_eq!(payload["deletion_sla_days"], 30);
+        assert_eq!(payload["decay_protocol"], "ciris-agent-90day");
+    }
+
+    #[test]
+    fn consent_record_expired_stance_serializes() {
+        let mut src = consent_src();
+        src.stance = ConsentStance::Expired;
+        src.valid_until = Some(parse_dt("2026-06-01T00:00:00Z"));
+        let payload = build_consent_record_payload(&src).unwrap();
+        assert_eq!(payload["stance"], "expired");
+        assert_eq!(payload["valid_until"], "2026-06-01T00:00:00Z");
+    }
+
+    #[test]
+    fn consent_record_rejects_empty_subject() {
+        let mut src = consent_src();
+        src.subject_key_id = "   ".into();
+        assert!(matches!(
+            build_consent_record_payload(&src),
+            Err(IngestError::EmptySubjectKey)
+        ));
+    }
+
+    #[test]
+    fn consent_record_rejects_pair_without_target() {
+        let mut src = consent_src();
+        src.bilateral_pair_id = Some("pair-123".into());
+        src.target_key_id = None;
+        assert!(matches!(
+            build_consent_record_payload(&src),
+            Err(IngestError::IncompleteBilateralPair)
+        ));
+    }
+
+    #[test]
+    fn bilateral_pair_id_is_uuid_v4_shaped() {
+        let id = build_bilateral_pair_id();
+        // UUID v4 canonical form: 8-4-4-4-12 hex, version nibble = 4.
+        assert_eq!(id.len(), 36);
+        let parts: Vec<&str> = id.split('-').collect();
+        assert_eq!(parts.len(), 5);
+        assert_eq!(parts[0].len(), 8);
+        assert_eq!(parts[2].chars().next(), Some('4')); // version 4
+        // distinct each call
+        assert_ne!(build_bilateral_pair_id(), build_bilateral_pair_id());
+    }
+
+    #[test]
+    fn bilateral_partnership_request_and_accept_share_pair_id() {
+        let pair = build_bilateral_pair_id();
+        let at = parse_dt("2026-06-05T12:00:00Z");
+        let req = build_bilateral_partnership_request_payload(
+            "subject-alice",
+            "producer-bob",
+            vec!["train".into()],
+            &pair,
+            at,
+        )
+        .unwrap();
+        let acc = build_bilateral_partnership_accept_payload(
+            "producer-bob",
+            "subject-alice",
+            &pair,
+            at,
+        )
+        .unwrap();
+        // both halves carry the same pair_id with stance granted
+        assert_eq!(req["bilateral_pair_id"], acc["bilateral_pair_id"]);
+        assert_eq!(req["stance"], "granted");
+        assert_eq!(acc["stance"], "granted");
+        // subject-half: subject names producer as target
+        assert_eq!(req["subject_key_id"], "subject-alice");
+        assert_eq!(req["target_key_id"], "producer-bob");
+        assert_eq!(req["scope"][0], "train");
+        // producer-half: subject named, producer is target (asserter)
+        assert_eq!(acc["subject_key_id"], "subject-alice");
+        assert_eq!(acc["target_key_id"], "producer-bob");
+    }
+
+    #[test]
+    fn bilateral_helpers_reject_empty_pair_id() {
+        let at = parse_dt("2026-06-05T12:00:00Z");
+        assert!(matches!(
+            build_bilateral_partnership_request_payload("s", "p", vec![], "  ", at),
+            Err(IngestError::EmptyPairId)
+        ));
+        assert!(matches!(
+            build_bilateral_partnership_accept_payload("p", "s", "", at),
+            Err(IngestError::EmptyPairId)
+        ));
+    }
+
+    #[test]
+    fn canonical_subject_hash_is_stable_and_prefixed() {
+        let a = canonical_subject_hash("discord", "user", "123456789");
+        let b = canonical_subject_hash("discord", "user", "123456789");
+        assert_eq!(a, b, "deterministic");
+        assert!(a.starts_with("canonical:sha256:"));
+        // hex body is 64 chars
+        assert_eq!(a.strip_prefix("canonical:sha256:").unwrap().len(), 64);
+        // platform + id discriminate
+        assert_ne!(
+            canonical_subject_hash("discord", "user", "123456789"),
+            canonical_subject_hash("slack", "user", "123456789")
+        );
+        assert_ne!(
+            canonical_subject_hash("discord", "user", "1"),
+            canonical_subject_hash("discord", "user", "2")
+        );
+    }
+
+    #[test]
+    fn canonical_subject_hash_known_vector() {
+        // SHA-256 of "discord:user:42"
+        let expected_input = "discord:user:42";
+        let digest = compute_sha256(expected_input.as_bytes());
+        let want = format!("canonical:sha256:{}", hex_encode(&digest));
+        assert_eq!(canonical_subject_hash("discord", "user", "42"), want);
     }
 }

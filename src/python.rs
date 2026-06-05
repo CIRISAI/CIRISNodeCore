@@ -658,6 +658,15 @@ fn ingest_err(field: &str, e: crate::ingest::IngestError) -> PyErr {
     PyValueError::new_err(format!("{field}: {e}"))
 }
 
+/// Parse an RFC-3339 timestamp string into a UTC `DateTime` for the
+/// consent-ceremony pyfunctions. The builders keep timestamps as a
+/// caller-supplied parameter (purity discipline — no ambient clock).
+fn parse_rfc3339(s: &str) -> PyResult<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .map_err(|e| PyValueError::new_err(format!("asserted_at (RFC-3339): {e}")))
+}
+
 /// Build the canonical payload + content_sha256 for an `image`
 /// external_content Contribution. Per `FSD/MEDIA_SHARING.md` §2.1 +
 /// SCHEMA §4.29.
@@ -731,6 +740,92 @@ fn build_event_listing_payload(source_json: String) -> PyResult<String> {
     let (payload, sha256) = crate::ingest::build_event_listing_payload(&source)
         .map_err(|e| ingest_err("build_event_listing_payload", e))?;
     build_multimedia_result(payload, sha256)
+}
+
+/// Build the payload JSON for a `consent_record` Contribution per
+/// CEG 0.6 §5.6.8.7 (NodeCore#29 Ask 2). The ceremony-shape over the
+/// underlying `consent:*` `scores` primitive — used for standalone
+/// partnership grants, DSAR-shape consent declarations, multi-party
+/// contracts. Rides a `scores` attestation (no blob).
+///
+/// `source_json` deserializes to `crate::ingest::ConsentRecordSource`.
+/// Returns `{ "payload": {...} }` — the caller wraps with
+/// `build_contribution_envelope(contribution_type="proposal",
+/// subject_kind="consent_record", subject_key_ids=[...])`.
+#[pyfunction]
+fn build_consent_record_payload(source_json: String) -> PyResult<String> {
+    let source: crate::ingest::ConsentRecordSource =
+        serde_json::from_str(&source_json).map_err(|e| json_err("source_json", e))?;
+    let payload = crate::ingest::build_consent_record_payload(&source)
+        .map_err(|e| ingest_err("build_consent_record_payload", e))?;
+    let result = serde_json::json!({ "payload": payload });
+    serde_json::to_string(&result).map_err(|e| json_err("serialize consent payload", e))
+}
+
+/// Generate a fresh bilateral-pair id (UUID v4) per CEG 0.6 §5.6.8.7
+/// PARTNERED ceremony (NodeCore#29 Ask 3). The subject-half and
+/// producer-half Contributions carry the same id.
+#[pyfunction]
+fn build_bilateral_pair_id() -> String {
+    crate::ingest::build_bilateral_pair_id()
+}
+
+/// Build the subject-half of a bilateral partnership request per CEG
+/// 0.6 §5.6.8.7 step 1 (NodeCore#29 Ask 3). Returns `{ "payload": {...} }`.
+///
+/// Arguments: subject_key_id, target_producer_key_id, scope (JSON array
+/// of strings), pair_id, asserted_at (RFC-3339).
+#[pyfunction]
+fn build_bilateral_partnership_request_payload(
+    subject_key_id: String,
+    target_producer_key_id: String,
+    scope_json: String,
+    pair_id: String,
+    asserted_at: String,
+) -> PyResult<String> {
+    let scope: Vec<String> =
+        serde_json::from_str(&scope_json).map_err(|e| json_err("scope_json", e))?;
+    let at = parse_rfc3339(&asserted_at)?;
+    let payload = crate::ingest::build_bilateral_partnership_request_payload(
+        &subject_key_id,
+        &target_producer_key_id,
+        scope,
+        &pair_id,
+        at,
+    )
+    .map_err(|e| ingest_err("build_bilateral_partnership_request_payload", e))?;
+    let result = serde_json::json!({ "payload": payload });
+    serde_json::to_string(&result).map_err(|e| json_err("serialize bilateral request", e))
+}
+
+/// Build the producer-half of a bilateral partnership accept per CEG
+/// 0.6 §5.6.8.7 step 2 (NodeCore#29 Ask 3). Returns `{ "payload": {...} }`.
+#[pyfunction]
+fn build_bilateral_partnership_accept_payload(
+    producer_key_id: String,
+    subject_key_id: String,
+    pair_id: String,
+    asserted_at: String,
+) -> PyResult<String> {
+    let at = parse_rfc3339(&asserted_at)?;
+    let payload = crate::ingest::build_bilateral_partnership_accept_payload(
+        &producer_key_id,
+        &subject_key_id,
+        &pair_id,
+        at,
+    )
+    .map_err(|e| ingest_err("build_bilateral_partnership_accept_payload", e))?;
+    let result = serde_json::json!({ "payload": payload });
+    serde_json::to_string(&result).map_err(|e| json_err("serialize bilateral accept", e))
+}
+
+/// Derive a canonical-hash subject identifier for `subject_key_ids`
+/// population per CEG 0.6 §4.2.2 (NodeCore#29 Ask 1). Returns
+/// `canonical:sha256:{hex}`. Example:
+/// `canonical_subject_hash("discord", "user", "123") → "canonical:sha256:..."`.
+#[pyfunction]
+fn canonical_subject_hash(platform: String, entity_kind: String, id: String) -> String {
+    crate::ingest::canonical_subject_hash(&platform, &entity_kind, &id)
 }
 
 /// Build the payload JSON for a `moderation_event` Contribution —
@@ -957,6 +1052,12 @@ fn ciris_node_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_model_3d_payload, m)?)?;
     m.add_function(wrap_pyfunction!(build_event_listing_payload, m)?)?;
     m.add_function(wrap_pyfunction!(build_moderation_event_payload, m)?)?;
+    // CEG 0.6 consent ceremony (NodeCore#29)
+    m.add_function(wrap_pyfunction!(build_consent_record_payload, m)?)?;
+    m.add_function(wrap_pyfunction!(build_bilateral_pair_id, m)?)?;
+    m.add_function(wrap_pyfunction!(build_bilateral_partnership_request_payload, m)?)?;
+    m.add_function(wrap_pyfunction!(build_bilateral_partnership_accept_payload, m)?)?;
+    m.add_function(wrap_pyfunction!(canonical_subject_hash, m)?)?;
     m.add_function(wrap_pyfunction!(build_moderator_delegation_payload, m)?)?;
     m.add_function(wrap_pyfunction!(build_moderator_revocation_payload, m)?)?;
     Ok(())
