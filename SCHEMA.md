@@ -1368,6 +1368,110 @@ emissions, not retroactive ingest-time mutation.
 
 [Spec — NodeCore#29 Asks 1/2/3/5 shipped: `build_consent_record_payload`, bilateral helpers, `canonical_subject_hash`, this doc. Ask 4 (`ingest_canonical_binding`) blocked on CIRISPersist substrate admission (Ask 6). Wire-format boundary clarifications tracked at CIRISRegistry#53.]
 
+### 4.31 `identity_occurrence` + `family` (CEG 0.7)
+
+Self / family membership primitives, per CEG 0.7 §5.6.8.8 + §5.6.8.9
+(NodeCore#30). Both ride a `scores` attestation with a `subject_kind`
+discriminator — no new structural primitive, 1+4 lockdown preserved.
+
+#### `identity_occurrence` (§5.6.8.8)
+
+The wire-format binding that lets the substrate know `key_phone` +
+`key_laptop` + `key_my_agent` all represent one logical identity. With
+it, `cohort_scope: self` content reaches the user's other
+devices/agents — at-rest encryption (CIRISPersist#152) wraps DEKs to
+all admitted occurrences.
+
+Payload (`build_identity_occurrence_payload`):
+
+```json
+{
+  "subject_kind": "identity_occurrence",
+  "identity_key_id": "<root identity key>",
+  "occurrence_key_id": "<this participant's signing key>",
+  "device_class": "phone | laptop | server | embedded | agent | service",
+  "hardware_attestation": "<base64 TPM/SE/StrongBox/SGX blob — optional>",
+  "asserted_at": "<rfc3339_canonical>",
+  "valid_until": "<rfc3339 — optional, null=indefinite>"
+}
+```
+
+`device_class: agent` and `service` are load-bearing for the
+CIRISAgent#840 CEG-native agent — a key with its own signature that
+speaks AS the identity. **Admission** (substrate-side): admitted when
+the envelope `attesting_key_id == identity_key_id` (identity claims the
+key) OR `attesting_key_id` is already an admitted occurrence (Signal-
+style "trust any device I've onboarded"). The caller sets the envelope
+`author_id` accordingly.
+
+#### `family` (§5.6.8.9)
+
+A group of trusted node identities — the wire-format primitive for
+`cohort_scope: family` visibility. Members are IDENTITY keys (not
+occurrence keys); the substrate does not walk into each member's
+occurrence set at family-resolution time (§8.1.12.3).
+
+Payload (`build_family_payload`):
+
+```json
+{
+  "subject_kind": "family",
+  "family_key_id": "<the family's own federation_keys identity>",
+  "family_name": "<human-readable; non-unique>",
+  "members": [
+    { "key_id": "<member identity key>", "joined_at": "<rfc3339>", "role": "founder | member | <open vocab>" }
+  ],
+  "founded_at": "<rfc3339_canonical>",
+  "consensus_protocol": "founder_only | unanimous | majority | quorum:{m}/{n} | weighted:{rubric} | custom:{id}",
+  "consensus_protocol_entrenched": false
+}
+```
+
+`role` is **open vocab** (canonical: `founder` / `member`).
+`consensus_protocol` is the family's membership-change rule, locked at
+creation; amendable via its own rule unless
+`consensus_protocol_entrenched`. The canonical entrenched form is the
+§9 HUMANITY_ACCORD: a `family` with `quorum:2/3` +
+`consensus_protocol_entrenched: true`.
+
+**Membership-change ceremony**: a member proposes a `supersedes` on the
+latest family Contribution with the new roster; the substrate
+(CIRISPersist#152 admission gate) evaluates the CURRENT family's
+`consensus_protocol` against the signatures via NodeCore's
+`evaluate_consensus_protocol` (§8.1.12.3). On an ADD, a `key_grant`
+cascade (§8.1.12.4) retroactively wraps all `cohort_scope: family` DEKs
+to the new member. On a REMOVE, Option A (§8.1.12.5) — the removed
+member keeps existing grants; the substrate stops wrapping new ones.
+
+**The `evaluate_consensus_protocol` contract** (NodeCore-owned, Ask 5).
+NodeCore provides the canonical evaluators; the persist admission gate
+calls into them. Six kinds: `founder_only` (any founder signs) /
+`unanimous` (all members) / `majority` (>50%) / `quorum:{m}/{n}` (any m
+of n) / `weighted:{rubric}` (weight sum ≥ threshold, needs
+`WeightedRubricResolver`) / `custom:{id}` (needs
+`CustomPredicateResolver`). Non-member signatures are filtered;
+duplicate signatures from one member count once. `quorum:M/N` evaluates
+against M; roster-rebasing when the current size differs from the
+recorded N is operator-policy per §8.1.12.3.
+
+#### Worked example — the Acme Household
+
+Members `{alice_root, bob_root, roku_living_room, kitchen_tablet,
+nest_thermostat}`, `consensus_protocol: founder_only` (Alice + Bob are
+founders). Alice's identity has three occurrences — `alice_phone`
+(self), `alice_laptop` (self), `alice_agent` (agent) — bound via
+`identity_occurrence`. **The phone-is-self / Roku-is-family
+distinction**: Alice's phone is an *occurrence of her identity*
+(`cohort_scope: self` reaches all her devices+agent); the Roku is a
+*distinct identity that is a member of the family* (`cohort_scope:
+family` reaches it). When Alice's phone publishes a `cohort_scope:
+family` dinner photo with `family_id: acme-household`, the substrate
+wraps the DEK under each of the 5 member identity keys; `alice_root`
+then re-wraps to her self-collective (phone, laptop, agent), `bob_root`
+to his, and the single-key device identities receive directly.
+
+[Spec — NodeCore#30 Asks 1/2/4/5/6 shipped: `build_identity_occurrence_payload`, `build_family_payload`, `evaluate_consensus_protocol` (+ resolver trait hooks), PyO3 surface, this doc. Ask 3 (`cohort_scope: self|family` on existing helpers) deferred (mechanical, wide blast radius). Async ingest + membership-change admission paths gated on CIRISPersist#152 substrate admission gate.]
+
 ---
 
 ## 5. Vote

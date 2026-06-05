@@ -2078,6 +2078,397 @@ pub fn build_bilateral_partnership_accept_payload(
     build_consent_record_payload(&source)
 }
 
+// ─── CEG 0.7 — identity_occurrence + family + consensus (NodeCore#30) ────
+
+/// Device/participant class for an `identity_occurrence` per CEG 0.7
+/// §5.6.8.8. Closed-set enum. `Agent` + `Service` are load-bearing for
+/// the CIRISAgent#840 CEG-native agent pattern — a key that has its own
+/// signature but speaks AS the identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OccurrenceDeviceClass {
+    /// Mobile device (iOS / Android); typically hardware-rooted.
+    Phone,
+    /// Personal computing device (macOS / Linux / Windows).
+    Laptop,
+    /// Always-on infrastructure node (home server, VPS).
+    Server,
+    /// IoT / hardware peripheral / signing dongle.
+    Embedded,
+    /// An AI agent acting on the identity's behalf (CIRISAgent#840).
+    Agent,
+    /// Background service / scheduled job / API integration.
+    Service,
+}
+
+impl OccurrenceDeviceClass {
+    /// Wire string per §5.6.8.8 DeviceClass closed-set.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OccurrenceDeviceClass::Phone => "phone",
+            OccurrenceDeviceClass::Laptop => "laptop",
+            OccurrenceDeviceClass::Server => "server",
+            OccurrenceDeviceClass::Embedded => "embedded",
+            OccurrenceDeviceClass::Agent => "agent",
+            OccurrenceDeviceClass::Service => "service",
+        }
+    }
+}
+
+/// Source for an `identity_occurrence` Contribution per CEG 0.7
+/// §5.6.8.8 — the wire-format binding that lets the substrate know
+/// `key_phone` + `key_laptop` + `key_my_agent` all represent one
+/// logical identity. Rides a `scores` attestation (no blob); 1+4
+/// lockdown preserved.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdentityOccurrenceSource {
+    /// The root identity (the user's logical identity key).
+    pub identity_key_id: String,
+    /// This participant's signing key.
+    pub occurrence_key_id: String,
+    /// Device/participant class.
+    pub device_class: OccurrenceDeviceClass,
+    /// TPM / Secure Enclave / StrongBox / SGX attestation blob,
+    /// base64-encoded. `None` = software-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hardware_attestation: Option<String>,
+    /// When this binding was asserted (RFC 3339 canonical, §0.5).
+    pub asserted_at: DateTime<Utc>,
+    /// Optional expiry — `None` = indefinite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_until: Option<DateTime<Utc>>,
+}
+
+/// Build the canonical `payload` JSON for an `identity_occurrence`
+/// Contribution per CEG 0.7 §5.6.8.8. Pure builder, no I/O.
+///
+/// Admission (substrate-side, CIRISPersist#152): admitted when the
+/// envelope `attesting_key_id == identity_key_id` (the identity claims
+/// the key) OR `attesting_key_id` is itself a currently-admitted
+/// occurrence (Signal-style "trust any device I've already onboarded").
+/// The caller sets the envelope `author_id` accordingly.
+pub fn build_identity_occurrence_payload(
+    source: &IdentityOccurrenceSource,
+) -> Result<serde_json::Value, IngestError> {
+    if source.identity_key_id.trim().is_empty() {
+        return Err(IngestError::EmptyIdentityKey);
+    }
+    if source.occurrence_key_id.trim().is_empty() {
+        return Err(IngestError::EmptyOccurrenceKey);
+    }
+    let mut payload = serde_json::json!({
+        "subject_kind": "identity_occurrence",
+        "identity_key_id": source.identity_key_id,
+        "occurrence_key_id": source.occurrence_key_id,
+        "device_class": source.device_class.as_str(),
+        "asserted_at": source.asserted_at,
+    });
+    if let Some(ref att) = source.hardware_attestation {
+        payload["hardware_attestation"] = serde_json::Value::String(att.clone());
+    }
+    if let Some(vu) = source.valid_until {
+        payload["valid_until"] = serde_json::json!(vu);
+    }
+    Ok(payload)
+}
+
+/// Canonical `MemberRole` value: bootstrapping signer recorded at
+/// `founded_at`. Per CEG 0.7 §5.6.8.9 — role is OPEN VOCAB, so this is
+/// a canonical constant, not a closed enum variant.
+pub const MEMBER_ROLE_FOUNDER: &str = "founder";
+/// Canonical `MemberRole` value: standard member.
+pub const MEMBER_ROLE_MEMBER: &str = "member";
+
+/// A family member per CEG 0.7 §5.6.8.9. `key_id` is the member's
+/// IDENTITY key (NOT an occurrence key) — the substrate does not walk
+/// into each member's occurrence set at family-resolution time (§8.1.12.3).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FamilyMember {
+    /// The member's identity key.
+    pub key_id: String,
+    /// When this member joined (RFC 3339 canonical).
+    pub joined_at: DateTime<Utc>,
+    /// Role — open vocab per §5.6.8.9; canonical: `founder` / `member`.
+    /// `None` = unspecified (defaults to standard-member rights).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+}
+
+/// Source for a `family` Contribution per CEG 0.7 §5.6.8.9 — a group of
+/// trusted node identities, the wire-format primitive for
+/// `cohort_scope: family` visibility scoping.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FamilySource {
+    /// The family's own federation_keys identity.
+    pub family_key_id: String,
+    /// Human-readable name; non-unique.
+    pub family_name: String,
+    /// Current membership roster (identity keys).
+    pub members: Vec<FamilyMember>,
+    /// When the family was founded (RFC 3339 canonical).
+    pub founded_at: DateTime<Utc>,
+    /// The family's consensus mechanism for membership changes. Open
+    /// vocab; canonical kinds: `founder_only` / `unanimous` / `majority`
+    /// / `quorum:{m}/{n}` / `weighted:{rubric}` / `custom:{id}`.
+    pub consensus_protocol: String,
+    /// If true, `consensus_protocol` may not be amended even via its own
+    /// rules — replacement requires an out-of-band ceremony (the §9
+    /// HUMANITY_ACCORD shape).
+    pub consensus_protocol_entrenched: bool,
+}
+
+/// Build the canonical `payload` JSON for a `family` Contribution per
+/// CEG 0.7 §5.6.8.9. Pure builder, no I/O. Used for both family creation
+/// and membership-change proposals (the latter rides `supersedes` on the
+/// prior family Contribution — the caller sets the envelope `supersedes`).
+pub fn build_family_payload(source: &FamilySource) -> Result<serde_json::Value, IngestError> {
+    if source.family_key_id.trim().is_empty() {
+        return Err(IngestError::EmptyFamilyKey);
+    }
+    if source.consensus_protocol.trim().is_empty() {
+        return Err(IngestError::EmptyConsensusProtocol);
+    }
+    // Validate the protocol parses to a recognized canonical shape (open
+    // vocab still admits custom:*, but a malformed quorum:M/N is caught).
+    parse_consensus_protocol(&source.consensus_protocol)
+        .ok_or_else(|| IngestError::MalformedConsensusProtocol(source.consensus_protocol.clone()))?;
+    if source.members.is_empty() {
+        return Err(IngestError::EmptyFamilyMembers);
+    }
+    let payload = serde_json::json!({
+        "subject_kind": "family",
+        "family_key_id": source.family_key_id,
+        "family_name": source.family_name,
+        "members": source.members.iter().map(|m| {
+            let mut mj = serde_json::json!({
+                "key_id": m.key_id,
+                "joined_at": m.joined_at,
+            });
+            if let Some(ref r) = m.role {
+                mj["role"] = serde_json::Value::String(r.clone());
+            }
+            mj
+        }).collect::<Vec<_>>(),
+        "founded_at": source.founded_at,
+        "consensus_protocol": source.consensus_protocol,
+        "consensus_protocol_entrenched": source.consensus_protocol_entrenched,
+    });
+    Ok(payload)
+}
+
+/// Parsed form of a `consensus_protocol` string per CEG 0.7 §8.1.12.3.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConsensusProtocol {
+    /// Any founder is the sole admission authority.
+    FounderOnly,
+    /// Every current member must sign.
+    Unanimous,
+    /// > 50% of current members must sign.
+    Majority,
+    /// Any `m` of `n` current members must sign.
+    Quorum {
+        /// Threshold count of signatures required.
+        m: u32,
+        /// Recorded roster size at protocol-definition time.
+        n: u32,
+    },
+    /// Sum of member weights (per a named rubric) must exceed threshold.
+    Weighted {
+        /// The named operator rubric resolving member weights + threshold.
+        rubric: String,
+    },
+    /// Operator-defined custom predicate.
+    Custom {
+        /// The operator-defined predicate identifier.
+        id: String,
+    },
+}
+
+/// Parse a `consensus_protocol` string into a [`ConsensusProtocol`].
+/// Returns `None` for malformed canonical kinds (e.g. `quorum:2` without
+/// `/N`, or `quorum:x/y` with non-integer parts). Open-vocab `custom:*`
+/// and `weighted:*` always parse (their payload is operator-resolved).
+pub fn parse_consensus_protocol(s: &str) -> Option<ConsensusProtocol> {
+    match s {
+        "founder_only" => Some(ConsensusProtocol::FounderOnly),
+        "unanimous" => Some(ConsensusProtocol::Unanimous),
+        "majority" => Some(ConsensusProtocol::Majority),
+        _ => {
+            if let Some(rest) = s.strip_prefix("quorum:") {
+                let (m, n) = rest.split_once('/')?;
+                let m: u32 = m.parse().ok()?;
+                let n: u32 = n.parse().ok()?;
+                if m == 0 || n == 0 || m > n {
+                    return None;
+                }
+                Some(ConsensusProtocol::Quorum { m, n })
+            } else if let Some(rubric) = s.strip_prefix("weighted:") {
+                if rubric.is_empty() {
+                    return None;
+                }
+                Some(ConsensusProtocol::Weighted { rubric: rubric.to_owned() })
+            } else if let Some(id) = s.strip_prefix("custom:") {
+                if id.is_empty() {
+                    return None;
+                }
+                Some(ConsensusProtocol::Custom { id: id.to_owned() })
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Outcome of evaluating a `consensus_protocol` against a signature set.
+/// NodeCore-owned return type (CIRISPersist#152 admission gate consumes
+/// this — it's the contract NodeCore owns per NodeCore#30 Ask 5).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConsensusResult {
+    /// The protocol rule is satisfied — admit the membership change.
+    Satisfied,
+    /// Not enough qualifying signatures yet.
+    Insufficient {
+        /// Signatures the protocol requires.
+        needed: u32,
+        /// Signatures collected so far.
+        got: u32,
+    },
+    /// The change is rejected outright (e.g. an entrenched-protocol
+    /// amendment, or a resolver-requiring protocol with no resolver).
+    Rejected {
+        /// Human-readable reason.
+        reason: String,
+    },
+}
+
+/// Resolver for `weighted:{rubric}` member weights. Operator-provided —
+/// NodeCore ships the trait; deployments implement the rubric.
+pub trait WeightedRubricResolver {
+    /// Return the voting weight of `member_key_id` under `rubric`.
+    fn weight(&self, rubric: &str, member_key_id: &str) -> f64;
+    /// The threshold the weighted sum must meet or exceed.
+    fn threshold(&self, rubric: &str) -> f64;
+}
+
+/// Resolver for `custom:{id}` predicates. Operator-provided.
+pub trait CustomPredicateResolver {
+    /// Evaluate the custom predicate: do these signers satisfy the
+    /// `custom:{id}` protocol against the current roster?
+    fn evaluate(&self, custom_id: &str, current_members: &[String], signers: &[String]) -> bool;
+}
+
+/// Evaluate a `consensus_protocol` against the signers on a proposed
+/// membership change, per CEG 0.7 §8.1.12.3. NodeCore owns this
+/// evaluator; the CIRISPersist#152 admission gate calls into it.
+///
+/// `current_members` is the family's current roster (identity keys);
+/// `signers` is the set of member keys whose signatures are present on
+/// the proposed `supersedes` Contribution. (Signature *verification* is
+/// the caller's job — this evaluates the *rule* over verified signers.)
+///
+/// `founder_keys` lists which current members carry the `founder` role
+/// (needed for `founder_only`). `weighted:*` / `custom:*` require the
+/// corresponding resolver; absent it, the result is `Rejected`.
+pub fn evaluate_consensus_protocol(
+    protocol: &str,
+    current_members: &[String],
+    signers: &[String],
+    founder_keys: &[String],
+    rubric_resolver: Option<&dyn WeightedRubricResolver>,
+    custom_resolver: Option<&dyn CustomPredicateResolver>,
+) -> ConsensusResult {
+    let parsed = match parse_consensus_protocol(protocol) {
+        Some(p) => p,
+        None => {
+            return ConsensusResult::Rejected {
+                reason: format!("malformed consensus_protocol: {protocol}"),
+            }
+        }
+    };
+    // Count signers that are actually current members.
+    let member_set: std::collections::BTreeSet<&str> =
+        current_members.iter().map(|s| s.as_str()).collect();
+    let qualifying: Vec<&str> = signers
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|s| member_set.contains(s))
+        .collect::<std::collections::BTreeSet<&str>>() // dedup
+        .into_iter()
+        .collect();
+    let got = qualifying.len() as u32;
+    let roster = current_members.len() as u32;
+
+    match parsed {
+        ConsensusProtocol::FounderOnly => {
+            let founder_set: std::collections::BTreeSet<&str> =
+                founder_keys.iter().map(|s| s.as_str()).collect();
+            let any_founder_signed = qualifying.iter().any(|s| founder_set.contains(s));
+            if any_founder_signed {
+                ConsensusResult::Satisfied
+            } else {
+                ConsensusResult::Insufficient { needed: 1, got: 0 }
+            }
+        }
+        ConsensusProtocol::Unanimous => {
+            if got >= roster && roster > 0 {
+                ConsensusResult::Satisfied
+            } else {
+                ConsensusResult::Insufficient { needed: roster, got }
+            }
+        }
+        ConsensusProtocol::Majority => {
+            let needed = roster / 2 + 1; // strictly > 50%
+            if got >= needed {
+                ConsensusResult::Satisfied
+            } else {
+                ConsensusResult::Insufficient { needed, got }
+            }
+        }
+        ConsensusProtocol::Quorum { m, .. } => {
+            // Spec §8.1.12.3: N == len(current); operator policy resolves
+            // rebasing when the roster size differs from the recorded N.
+            // We evaluate against M (the threshold); rebasing is the
+            // caller's policy.
+            if got >= m {
+                ConsensusResult::Satisfied
+            } else {
+                ConsensusResult::Insufficient { needed: m, got }
+            }
+        }
+        ConsensusProtocol::Weighted { rubric } => match rubric_resolver {
+            Some(r) => {
+                let sum: f64 = qualifying.iter().map(|s| r.weight(&rubric, s)).sum();
+                if sum >= r.threshold(&rubric) {
+                    ConsensusResult::Satisfied
+                } else {
+                    ConsensusResult::Rejected {
+                        reason: format!(
+                            "weighted:{rubric} sum {sum} below threshold {}",
+                            r.threshold(&rubric)
+                        ),
+                    }
+                }
+            }
+            None => ConsensusResult::Rejected {
+                reason: format!("weighted:{rubric} requires a WeightedRubricResolver"),
+            },
+        },
+        ConsensusProtocol::Custom { id } => match custom_resolver {
+            Some(r) => {
+                let signer_strs: Vec<String> = qualifying.iter().map(|s| s.to_string()).collect();
+                if r.evaluate(&id, current_members, &signer_strs) {
+                    ConsensusResult::Satisfied
+                } else {
+                    ConsensusResult::Insufficient { needed: 0, got }
+                }
+            }
+            None => ConsensusResult::Rejected {
+                reason: format!("custom:{id} requires a CustomPredicateResolver"),
+            },
+        },
+    }
+}
+
 /// Build the canonical `payload` JSON for a scope-promotion of an
 /// existing `external_content` Contribution.
 ///
@@ -2241,6 +2632,25 @@ pub enum IngestError {
     /// Bilateral partnership helpers require a non-empty pair_id.
     #[error("bilateral_pair_id must be non-empty")]
     EmptyPairId,
+    /// identity_occurrence requires a non-empty identity_key_id (§5.6.8.8).
+    #[error("identity_key_id must be non-empty for identity_occurrence")]
+    EmptyIdentityKey,
+    /// identity_occurrence requires a non-empty occurrence_key_id (§5.6.8.8).
+    #[error("occurrence_key_id must be non-empty for identity_occurrence")]
+    EmptyOccurrenceKey,
+    /// family requires a non-empty family_key_id (§5.6.8.9).
+    #[error("family_key_id must be non-empty for family")]
+    EmptyFamilyKey,
+    /// family requires a non-empty consensus_protocol (§5.6.8.9).
+    #[error("consensus_protocol must be non-empty for family")]
+    EmptyConsensusProtocol,
+    /// family requires at least one member (§5.6.8.9).
+    #[error("family must have at least one member")]
+    EmptyFamilyMembers,
+    /// consensus_protocol does not parse to a recognized canonical shape
+    /// (§8.1.12.3 — e.g. malformed `quorum:M/N`).
+    #[error("malformed consensus_protocol: {0}")]
+    MalformedConsensusProtocol(String),
     /// Image / video require non-empty alt text or captions for
     /// `cohort_scope ≥ community` (accessibility, per FSD/MEDIA_SHARING
     /// §2.1 + §2.3).
@@ -3746,5 +4156,295 @@ mod tests {
         // PROVISIONAL preimage convention (PIN-1, CIRISRegistry#53).
         let digest = compute_sha256("discord:user:42".as_bytes());
         assert_eq!(canonical_subject_hash("discord", "user", "42"), hex_encode(&digest));
+    }
+
+    // ─── CEG 0.7 identity_occurrence + family + consensus (NodeCore#30) ──
+
+    #[test]
+    fn identity_occurrence_agent_class_round_trips() {
+        let src = IdentityOccurrenceSource {
+            identity_key_id: "alice-root".into(),
+            occurrence_key_id: "alice-agent-key".into(),
+            device_class: OccurrenceDeviceClass::Agent,
+            hardware_attestation: None,
+            asserted_at: parse_dt("2026-06-05T12:00:00Z"),
+            valid_until: None,
+        };
+        let payload = build_identity_occurrence_payload(&src).unwrap();
+        assert_eq!(payload["subject_kind"], "identity_occurrence");
+        assert_eq!(payload["identity_key_id"], "alice-root");
+        assert_eq!(payload["occurrence_key_id"], "alice-agent-key");
+        assert_eq!(payload["device_class"], "agent");
+        assert!(payload.get("hardware_attestation").is_none());
+        assert!(payload.get("valid_until").is_none());
+    }
+
+    #[test]
+    fn identity_occurrence_hardware_attested_phone() {
+        let src = IdentityOccurrenceSource {
+            identity_key_id: "alice-root".into(),
+            occurrence_key_id: "alice-phone".into(),
+            device_class: OccurrenceDeviceClass::Phone,
+            hardware_attestation: Some("base64-tpm-blob".into()),
+            asserted_at: parse_dt("2026-06-05T12:00:00Z"),
+            valid_until: Some(parse_dt("2027-06-05T12:00:00Z")),
+        };
+        let payload = build_identity_occurrence_payload(&src).unwrap();
+        assert_eq!(payload["device_class"], "phone");
+        assert_eq!(payload["hardware_attestation"], "base64-tpm-blob");
+        assert_eq!(payload["valid_until"], "2027-06-05T12:00:00Z");
+    }
+
+    #[test]
+    fn identity_occurrence_all_device_classes_serialize() {
+        for (dc, want) in [
+            (OccurrenceDeviceClass::Phone, "phone"),
+            (OccurrenceDeviceClass::Laptop, "laptop"),
+            (OccurrenceDeviceClass::Server, "server"),
+            (OccurrenceDeviceClass::Embedded, "embedded"),
+            (OccurrenceDeviceClass::Agent, "agent"),
+            (OccurrenceDeviceClass::Service, "service"),
+        ] {
+            assert_eq!(dc.as_str(), want);
+        }
+    }
+
+    #[test]
+    fn identity_occurrence_rejects_empty_keys() {
+        let mut src = IdentityOccurrenceSource {
+            identity_key_id: "".into(),
+            occurrence_key_id: "k".into(),
+            device_class: OccurrenceDeviceClass::Phone,
+            hardware_attestation: None,
+            asserted_at: parse_dt("2026-06-05T12:00:00Z"),
+            valid_until: None,
+        };
+        assert!(matches!(
+            build_identity_occurrence_payload(&src),
+            Err(IngestError::EmptyIdentityKey)
+        ));
+        src.identity_key_id = "i".into();
+        src.occurrence_key_id = "  ".into();
+        assert!(matches!(
+            build_identity_occurrence_payload(&src),
+            Err(IngestError::EmptyOccurrenceKey)
+        ));
+    }
+
+    fn acme_household() -> FamilySource {
+        FamilySource {
+            family_key_id: "acme-household".into(),
+            family_name: "Acme Household".into(),
+            members: vec![
+                FamilyMember {
+                    key_id: "alice_root".into(),
+                    joined_at: parse_dt("2026-01-01T00:00:00Z"),
+                    role: Some(MEMBER_ROLE_FOUNDER.into()),
+                },
+                FamilyMember {
+                    key_id: "bob_root".into(),
+                    joined_at: parse_dt("2026-01-01T00:00:00Z"),
+                    role: Some(MEMBER_ROLE_FOUNDER.into()),
+                },
+                FamilyMember {
+                    key_id: "roku_living_room".into(),
+                    joined_at: parse_dt("2026-02-01T00:00:00Z"),
+                    role: Some(MEMBER_ROLE_MEMBER.into()),
+                },
+            ],
+            founded_at: parse_dt("2026-01-01T00:00:00Z"),
+            consensus_protocol: "founder_only".into(),
+            consensus_protocol_entrenched: false,
+        }
+    }
+
+    #[test]
+    fn family_create_round_trips() {
+        let payload = build_family_payload(&acme_household()).unwrap();
+        assert_eq!(payload["subject_kind"], "family");
+        assert_eq!(payload["family_key_id"], "acme-household");
+        assert_eq!(payload["family_name"], "Acme Household");
+        assert_eq!(payload["members"][0]["key_id"], "alice_root");
+        assert_eq!(payload["members"][0]["role"], "founder");
+        assert_eq!(payload["members"][2]["key_id"], "roku_living_room");
+        assert_eq!(payload["members"][2]["role"], "member");
+        assert_eq!(payload["consensus_protocol"], "founder_only");
+        assert_eq!(payload["consensus_protocol_entrenched"], false);
+    }
+
+    #[test]
+    fn family_member_role_omitted_when_none() {
+        let mut fam = acme_household();
+        fam.members[2].role = None;
+        let payload = build_family_payload(&fam).unwrap();
+        assert!(payload["members"][2].get("role").is_none());
+    }
+
+    #[test]
+    fn family_rejects_empty_members_and_keys() {
+        let mut fam = acme_household();
+        fam.members.clear();
+        assert!(matches!(
+            build_family_payload(&fam),
+            Err(IngestError::EmptyFamilyMembers)
+        ));
+        let mut fam2 = acme_household();
+        fam2.family_key_id = "  ".into();
+        assert!(matches!(
+            build_family_payload(&fam2),
+            Err(IngestError::EmptyFamilyKey)
+        ));
+    }
+
+    #[test]
+    fn family_rejects_malformed_consensus_protocol() {
+        let mut fam = acme_household();
+        fam.consensus_protocol = "quorum:5".into(); // missing /N
+        assert!(matches!(
+            build_family_payload(&fam),
+            Err(IngestError::MalformedConsensusProtocol(_))
+        ));
+    }
+
+    #[test]
+    fn parse_consensus_protocol_canonical_kinds() {
+        assert_eq!(parse_consensus_protocol("founder_only"), Some(ConsensusProtocol::FounderOnly));
+        assert_eq!(parse_consensus_protocol("unanimous"), Some(ConsensusProtocol::Unanimous));
+        assert_eq!(parse_consensus_protocol("majority"), Some(ConsensusProtocol::Majority));
+        assert_eq!(
+            parse_consensus_protocol("quorum:2/3"),
+            Some(ConsensusProtocol::Quorum { m: 2, n: 3 })
+        );
+        assert_eq!(
+            parse_consensus_protocol("weighted:board_seats"),
+            Some(ConsensusProtocol::Weighted { rubric: "board_seats".into() })
+        );
+        assert_eq!(
+            parse_consensus_protocol("custom:time_locked_v2"),
+            Some(ConsensusProtocol::Custom { id: "time_locked_v2".into() })
+        );
+        // malformed
+        assert_eq!(parse_consensus_protocol("quorum:5"), None);
+        assert_eq!(parse_consensus_protocol("quorum:0/3"), None);
+        assert_eq!(parse_consensus_protocol("quorum:4/3"), None); // m > n
+        assert_eq!(parse_consensus_protocol("weighted:"), None);
+        assert_eq!(parse_consensus_protocol("nonsense"), None);
+    }
+
+    #[test]
+    fn consensus_founder_only_needs_a_founder_signature() {
+        let members = vec!["alice".to_string(), "bob".to_string(), "roku".to_string()];
+        let founders = vec!["alice".to_string(), "bob".to_string()];
+        // a founder signs → satisfied
+        assert_eq!(
+            evaluate_consensus_protocol("founder_only", &members, &["alice".into()], &founders, None, None),
+            ConsensusResult::Satisfied
+        );
+        // only a non-founder signs → insufficient
+        assert_eq!(
+            evaluate_consensus_protocol("founder_only", &members, &["roku".into()], &founders, None, None),
+            ConsensusResult::Insufficient { needed: 1, got: 0 }
+        );
+    }
+
+    #[test]
+    fn consensus_unanimous_and_majority() {
+        let members = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        // unanimous: all three
+        assert_eq!(
+            evaluate_consensus_protocol("unanimous", &members,
+                &["a".into(), "b".into(), "c".into()], &[], None, None),
+            ConsensusResult::Satisfied
+        );
+        assert_eq!(
+            evaluate_consensus_protocol("unanimous", &members,
+                &["a".into(), "b".into()], &[], None, None),
+            ConsensusResult::Insufficient { needed: 3, got: 2 }
+        );
+        // majority of 3 = 2
+        assert_eq!(
+            evaluate_consensus_protocol("majority", &members,
+                &["a".into(), "b".into()], &[], None, None),
+            ConsensusResult::Satisfied
+        );
+        assert_eq!(
+            evaluate_consensus_protocol("majority", &members, &["a".into()], &[], None, None),
+            ConsensusResult::Insufficient { needed: 2, got: 1 }
+        );
+    }
+
+    #[test]
+    fn consensus_quorum_and_dedup_and_non_member_filter() {
+        let members = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        // quorum:2/3 — two distinct member signers
+        assert_eq!(
+            evaluate_consensus_protocol("quorum:2/3", &members,
+                &["a".into(), "b".into()], &[], None, None),
+            ConsensusResult::Satisfied
+        );
+        // duplicate signature from same member counts once
+        assert_eq!(
+            evaluate_consensus_protocol("quorum:2/3", &members,
+                &["a".into(), "a".into()], &[], None, None),
+            ConsensusResult::Insufficient { needed: 2, got: 1 }
+        );
+        // non-member signatures are filtered out
+        assert_eq!(
+            evaluate_consensus_protocol("quorum:2/3", &members,
+                &["a".into(), "intruder".into()], &[], None, None),
+            ConsensusResult::Insufficient { needed: 2, got: 1 }
+        );
+    }
+
+    #[test]
+    fn consensus_weighted_and_custom_require_resolvers() {
+        let members = vec!["a".to_string(), "b".to_string()];
+        // no resolver → rejected
+        assert!(matches!(
+            evaluate_consensus_protocol("weighted:seats", &members, &["a".into()], &[], None, None),
+            ConsensusResult::Rejected { .. }
+        ));
+        assert!(matches!(
+            evaluate_consensus_protocol("custom:x", &members, &["a".into()], &[], None, None),
+            ConsensusResult::Rejected { .. }
+        ));
+
+        struct Rubric;
+        impl WeightedRubricResolver for Rubric {
+            fn weight(&self, _r: &str, k: &str) -> f64 { if k == "a" { 3.0 } else { 1.0 } }
+            fn threshold(&self, _r: &str) -> f64 { 2.5 }
+        }
+        // a alone (weight 3.0) exceeds threshold 2.5
+        assert_eq!(
+            evaluate_consensus_protocol("weighted:seats", &members, &["a".into()], &[],
+                Some(&Rubric), None),
+            ConsensusResult::Satisfied
+        );
+
+        struct Pred;
+        impl CustomPredicateResolver for Pred {
+            fn evaluate(&self, _id: &str, _m: &[String], signers: &[String]) -> bool {
+                signers.contains(&"a".to_string())
+            }
+        }
+        assert_eq!(
+            evaluate_consensus_protocol("custom:x", &members, &["a".into()], &[], None, Some(&Pred)),
+            ConsensusResult::Satisfied
+        );
+    }
+
+    #[test]
+    fn consensus_humanity_accord_shape_quorum_2_of_3() {
+        // §9: HUMANITY_ACCORD is family with quorum:2/3 + entrenched.
+        let members = vec!["x".to_string(), "y".to_string(), "z".to_string()];
+        assert_eq!(
+            evaluate_consensus_protocol("quorum:2/3", &members,
+                &["x".into(), "z".into()], &[], None, None),
+            ConsensusResult::Satisfied
+        );
+        assert_eq!(
+            evaluate_consensus_protocol("quorum:2/3", &members, &["y".into()], &[], None, None),
+            ConsensusResult::Insufficient { needed: 2, got: 1 }
+        );
     }
 }

@@ -820,12 +820,90 @@ fn build_bilateral_partnership_accept_payload(
 }
 
 /// Derive a canonical-hash subject identifier for `subject_key_ids`
-/// population per CEG 0.6 §4.2.2 (NodeCore#29 Ask 1). Returns
-/// `canonical:sha256:{hex}`. Example:
-/// `canonical_subject_hash("discord", "user", "123") → "canonical:sha256:..."`.
+/// population per CEG 0.6 §4.2.2 (NodeCore#29 Ask 1). Returns a bare
+/// lowercase 64-char hex string per §0.6. Example:
+/// `canonical_subject_hash("discord", "user", "123")`.
+/// (Preimage convention provisional — see CIRISRegistry#53.)
 #[pyfunction]
 fn canonical_subject_hash(platform: String, entity_kind: String, id: String) -> String {
     crate::ingest::canonical_subject_hash(&platform, &entity_kind, &id)
+}
+
+// ─── CEG 0.7 identity_occurrence + family + consensus (NodeCore#30) ──────
+
+/// Build the payload JSON for an `identity_occurrence` Contribution per
+/// CEG 0.7 §5.6.8.8 (NodeCore#30 Ask 1). Rides a `scores` attestation.
+///
+/// `source_json` deserializes to `crate::ingest::IdentityOccurrenceSource`.
+/// Returns `{ "payload": {...} }`.
+#[pyfunction]
+fn build_identity_occurrence_payload(source_json: String) -> PyResult<String> {
+    let source: crate::ingest::IdentityOccurrenceSource =
+        serde_json::from_str(&source_json).map_err(|e| json_err("source_json", e))?;
+    let payload = crate::ingest::build_identity_occurrence_payload(&source)
+        .map_err(|e| ingest_err("build_identity_occurrence_payload", e))?;
+    let result = serde_json::json!({ "payload": payload });
+    serde_json::to_string(&result).map_err(|e| json_err("serialize identity_occurrence", e))
+}
+
+/// Build the payload JSON for a `family` Contribution per CEG 0.7
+/// §5.6.8.9 (NodeCore#30 Ask 2). Used for both family creation and
+/// membership-change proposals (the latter rides `supersedes`).
+///
+/// `source_json` deserializes to `crate::ingest::FamilySource`.
+/// Returns `{ "payload": {...} }`.
+#[pyfunction]
+fn build_family_payload(source_json: String) -> PyResult<String> {
+    let source: crate::ingest::FamilySource =
+        serde_json::from_str(&source_json).map_err(|e| json_err("source_json", e))?;
+    let payload = crate::ingest::build_family_payload(&source)
+        .map_err(|e| ingest_err("build_family_payload", e))?;
+    let result = serde_json::json!({ "payload": payload });
+    serde_json::to_string(&result).map_err(|e| json_err("serialize family", e))
+}
+
+/// Evaluate a `consensus_protocol` against a signer set per CEG 0.7
+/// §8.1.12.3 (NodeCore#30 Ask 5). The CIRISPersist#152 admission gate
+/// calls into the Rust evaluator; this exposes the founder/unanimous/
+/// majority/quorum kinds to Python callers. `weighted:*` / `custom:*`
+/// require operator resolvers not crossable through this surface — they
+/// return a `rejected` result here (call the Rust evaluator directly
+/// with resolvers for those).
+///
+/// Returns JSON: `{"result": "satisfied"}` |
+/// `{"result": "insufficient", "needed": N, "got": M}` |
+/// `{"result": "rejected", "reason": "..."}`.
+#[pyfunction]
+fn evaluate_consensus_protocol(
+    protocol: String,
+    current_members_json: String,
+    signers_json: String,
+    founder_keys_json: String,
+) -> PyResult<String> {
+    let current_members: Vec<String> =
+        serde_json::from_str(&current_members_json).map_err(|e| json_err("current_members_json", e))?;
+    let signers: Vec<String> =
+        serde_json::from_str(&signers_json).map_err(|e| json_err("signers_json", e))?;
+    let founder_keys: Vec<String> =
+        serde_json::from_str(&founder_keys_json).map_err(|e| json_err("founder_keys_json", e))?;
+    let result = crate::ingest::evaluate_consensus_protocol(
+        &protocol,
+        &current_members,
+        &signers,
+        &founder_keys,
+        None,
+        None,
+    );
+    let json = match result {
+        crate::ingest::ConsensusResult::Satisfied => serde_json::json!({"result": "satisfied"}),
+        crate::ingest::ConsensusResult::Insufficient { needed, got } => {
+            serde_json::json!({"result": "insufficient", "needed": needed, "got": got})
+        }
+        crate::ingest::ConsensusResult::Rejected { reason } => {
+            serde_json::json!({"result": "rejected", "reason": reason})
+        }
+    };
+    serde_json::to_string(&json).map_err(|e| json_err("serialize consensus result", e))
 }
 
 /// Build the payload JSON for a `moderation_event` Contribution —
@@ -1058,6 +1136,10 @@ fn ciris_node_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_bilateral_partnership_request_payload, m)?)?;
     m.add_function(wrap_pyfunction!(build_bilateral_partnership_accept_payload, m)?)?;
     m.add_function(wrap_pyfunction!(canonical_subject_hash, m)?)?;
+    // CEG 0.7 identity_occurrence + family + consensus (NodeCore#30)
+    m.add_function(wrap_pyfunction!(build_identity_occurrence_payload, m)?)?;
+    m.add_function(wrap_pyfunction!(build_family_payload, m)?)?;
+    m.add_function(wrap_pyfunction!(evaluate_consensus_protocol, m)?)?;
     m.add_function(wrap_pyfunction!(build_moderator_delegation_payload, m)?)?;
     m.add_function(wrap_pyfunction!(build_moderator_revocation_payload, m)?)?;
     Ok(())
