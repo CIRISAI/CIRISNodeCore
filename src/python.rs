@@ -75,6 +75,45 @@ fn json_err(field: &str, e: serde_json::Error) -> PyErr {
     PyValueError::new_err(format!("{field}: {e}"))
 }
 
+/// Default page limit for persist read calls — single-page assumption
+/// matching [`crate::aggregate`] (v0.1 pre-cursor-iteration; a hardening
+/// pass adds cursor walking when production rows spill).
+const PERSIST_READ_LIMIT: i64 = 10_000;
+
+/// Call persist's v4.0 `list_attestations(filter, cursor, limit, caller)`
+/// with single-page defaults (no cursor, Unauthenticated caller).
+///
+/// persist v4.0 (V4_0_DATA_ACCESS_SURFACE) reshaped this PyEngine method
+/// from `list_attestations(filter)` to the 4-arg DAS form; the compose
+/// surfaces read at Unauthenticated scope (they admit only the
+/// non-suppressed cohort tiers per CEG §10.1.4).
+fn persist_list_attestations(engine: &Bound<'_, PyAny>, filter_json: &str) -> PyResult<String> {
+    engine
+        .call_method1(
+            "list_attestations",
+            (
+                filter_json,
+                None::<&str>,
+                PERSIST_READ_LIMIT,
+                None::<String>,
+            ),
+        )?
+        .extract()
+}
+
+/// Call persist's v4.0 `cirisnode_list_contributions(filter, cursor, limit)`.
+///
+/// persist v4.0 renamed the PyEngine method `list_contributions` →
+/// `cirisnode_list_contributions` and added cursor + limit.
+fn persist_list_contributions(engine: &Bound<'_, PyAny>, filter_json: &str) -> PyResult<String> {
+    engine
+        .call_method1(
+            "cirisnode_list_contributions",
+            (filter_json, None::<&str>, PERSIST_READ_LIMIT),
+        )?
+        .extract()
+}
+
 /// Build + sign a `ContributionEnvelope`. Returns the signed
 /// envelope as canonical JSON.
 ///
@@ -191,9 +230,7 @@ fn agent_state(engine: &Bound<'_, PyAny>, key_id: String) -> PyResult<String> {
 /// [`crate::compose::compose_needs_feed`]).
 #[pyfunction]
 fn needs_feed(engine: &Bound<'_, PyAny>, filter_json: String) -> PyResult<String> {
-    let attestations_json: String = engine
-        .call_method1("list_attestations", (&filter_json,))?
-        .extract()?;
+    let attestations_json: String = persist_list_attestations(engine, &filter_json)?;
     crate::compose::compose_needs_feed(&attestations_json, &filter_json)
         .map_err(|e| json_err("compose_needs_feed", e))
 }
@@ -218,9 +255,7 @@ fn contribution(engine: &Bound<'_, PyAny>, contribution_id: String) -> PyResult<
         "dimension_substring": contribution_id
     })
     .to_string();
-    let attestations_json: String = engine
-        .call_method1("list_attestations", (&filter_json,))?
-        .extract()?;
+    let attestations_json: String = persist_list_attestations(engine, &filter_json)?;
     crate::compose::compose_contribution(contribution_id, &attestations_json)
         .map_err(|e| json_err("compose_contribution", e))
 }
@@ -232,9 +267,7 @@ fn contribution(engine: &Bound<'_, PyAny>, contribution_id: String) -> PyResult<
 fn decision_hierarchy(engine: &Bound<'_, PyAny>, goal_id: String) -> PyResult<String> {
     fn list_with_prefix(engine: &Bound<'_, PyAny>, prefix: &str) -> PyResult<String> {
         let filter = serde_json::json!({"dimension_prefix": prefix}).to_string();
-        engine
-            .call_method1("list_attestations", (filter,))?
-            .extract()
+        persist_list_attestations(engine, &filter)
     }
 
     let goals_json = list_with_prefix(engine, "goal:")?;
@@ -259,9 +292,7 @@ fn decision_hierarchy(engine: &Bound<'_, PyAny>, goal_id: String) -> PyResult<St
 fn wa_state(engine: &Bound<'_, PyAny>, domain: String, language: String) -> PyResult<String> {
     fn list_with_prefix(engine: &Bound<'_, PyAny>, prefix: &str) -> PyResult<String> {
         let filter = serde_json::json!({"dimension_prefix": prefix}).to_string();
-        engine
-            .call_method1("list_attestations", (filter,))?
-            .extract()
+        persist_list_attestations(engine, &filter)
     }
 
     let moderation_json = list_with_prefix(engine, "moderation:")?;
@@ -312,9 +343,7 @@ fn local_feed(engine: &Bound<'_, PyAny>, owner_key_id: String) -> PyResult<Strin
         "author_id": owner_key_id,
     })
     .to_string();
-    let contributions_json: String = engine
-        .call_method1("list_contributions", (filter,))?
-        .extract()?;
+    let contributions_json: String = persist_list_contributions(engine, &filter)?;
     crate::compose::compose_local_feed(&contributions_json, &owner_key_id)
         .map_err(|e| json_err("compose_local_feed", e))
 }
@@ -329,9 +358,7 @@ fn local_feed(engine: &Bound<'_, PyAny>, owner_key_id: String) -> PyResult<Strin
 #[pyfunction]
 fn community_feed(engine: &Bound<'_, PyAny>, filter_json: String) -> PyResult<String> {
     let persist_filter = serde_json::json!({"subject_kind": "external_content"}).to_string();
-    let contributions_json: String = engine
-        .call_method1("list_contributions", (persist_filter,))?
-        .extract()?;
+    let contributions_json: String = persist_list_contributions(engine, &persist_filter)?;
     crate::compose::compose_community_feed(&contributions_json, &filter_json)
         .map_err(|e| json_err("compose_community_feed", e))
 }
@@ -342,9 +369,7 @@ fn community_feed(engine: &Bound<'_, PyAny>, filter_json: String) -> PyResult<St
 #[pyfunction]
 fn global_feed(engine: &Bound<'_, PyAny>, filter_json: String) -> PyResult<String> {
     let persist_filter = serde_json::json!({"subject_kind": "external_content"}).to_string();
-    let contributions_json: String = engine
-        .call_method1("list_contributions", (persist_filter,))?
-        .extract()?;
+    let contributions_json: String = persist_list_contributions(engine, &persist_filter)?;
     crate::compose::compose_global_feed(&contributions_json, &filter_json)
         .map_err(|e| json_err("compose_global_feed", e))
 }

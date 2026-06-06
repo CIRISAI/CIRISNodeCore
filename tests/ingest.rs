@@ -88,6 +88,23 @@ impl BlobStorage for MockBlobStorage {
         }
     }
 
+    // persist 4.0 (V4_0_DATA_ACCESS_SURFACE) — local-write blob path
+    // (no holder attestation; local-truth write).
+    fn store_blob_local(
+        &self,
+        sha256: &[u8; 32],
+        body: BlobBody,
+        media_type: Option<&str>,
+    ) -> impl std::future::Future<Output = Result<(), BlobError>> + Send {
+        let state = self.state.clone();
+        let sha = *sha256;
+        let media = media_type.map(|s| s.to_string());
+        async move {
+            state.lock().unwrap().blobs.insert(sha, (body, media));
+            Ok(())
+        }
+    }
+
     fn get_blob(
         &self,
         sha256: &[u8; 32],

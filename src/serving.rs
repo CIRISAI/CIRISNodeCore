@@ -216,6 +216,16 @@ mod tests {
             async { unimplemented!("not exercised in compute_serving_response tests") }
         }
 
+        // persist 4.0 (V4_0_DATA_ACCESS_SURFACE) — local-write blob path.
+        fn store_blob_local(
+            &self,
+            _sha256: &[u8; 32],
+            _body: BlobBody,
+            _media_type: Option<&str>,
+        ) -> impl std::future::Future<Output = Result<(), BlobError>> + Send {
+            async { unimplemented!("not exercised in compute_serving_response tests") }
+        }
+
         fn get_blob(
             &self,
             sha256: &[u8; 32],

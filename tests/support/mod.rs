@@ -36,10 +36,12 @@ use ciris_node_core::trust::{
     TrustPurpose, TrustRelationship, TrustRow,
 };
 
-// Other FederationDirectory types — needed for the 14 stubbed methods
-// (public-key + attestation + revocation + PQC fill-in surfaces).
+// Other FederationDirectory types — needed for the stubbed methods
+// (public-key + attestation + revocation + PQC fill-in + CEG 0.7/0.8
+// identity_occurrence / family / community surfaces).
 use ciris_persist::federation::{
-    Attestation, HybridPendingRow, KeyRecord, Revocation, SignedAttestation, SignedKeyRecord,
+    Attestation, Community, Family, HybridPendingRow, IdentityOccurrence, KeyRecord, Revocation,
+    SignedAttestation, SignedCommunity, SignedFamily, SignedIdentityOccurrence, SignedKeyRecord,
     SignedRevocation,
 };
 
@@ -869,6 +871,61 @@ impl FederationDirectory for MockEngine {
         _limit: i64,
     ) -> Result<Vec<HybridPendingRow>, FedErr> {
         Err(fed_stub("list_hybrid_pending_revocations"))
+    }
+
+    // ── CEG 0.7/0.8 substrate (persist V059 identity/family + V060
+    //    community; landed in the persist 4.0 catch-up). NodeCore's
+    //    trust tests don't exercise these; stub to NotImplemented. ──
+
+    async fn put_identity_occurrence(
+        &self,
+        _occurrence: SignedIdentityOccurrence,
+    ) -> Result<(), FedErr> {
+        Err(fed_stub("put_identity_occurrence"))
+    }
+
+    async fn list_identity_occurrences_for(
+        &self,
+        _identity_key_id: &str,
+    ) -> Result<Vec<IdentityOccurrence>, FedErr> {
+        Err(fed_stub("list_identity_occurrences_for"))
+    }
+
+    async fn lookup_identity_for_occurrence(
+        &self,
+        _occurrence_key_id: &str,
+    ) -> Result<Option<IdentityOccurrence>, FedErr> {
+        Err(fed_stub("lookup_identity_for_occurrence"))
+    }
+
+    async fn put_family(&self, _family: SignedFamily) -> Result<(), FedErr> {
+        Err(fed_stub("put_family"))
+    }
+
+    async fn lookup_family(&self, _family_key_id: &str) -> Result<Option<Family>, FedErr> {
+        Err(fed_stub("lookup_family"))
+    }
+
+    async fn list_families_for_member(
+        &self,
+        _member_identity_key_id: &str,
+    ) -> Result<Vec<Family>, FedErr> {
+        Err(fed_stub("list_families_for_member"))
+    }
+
+    async fn put_community(&self, _community: SignedCommunity) -> Result<(), FedErr> {
+        Err(fed_stub("put_community"))
+    }
+
+    async fn lookup_community(&self, _community_key_id: &str) -> Result<Option<Community>, FedErr> {
+        Err(fed_stub("lookup_community"))
+    }
+
+    async fn list_communities_for_member(
+        &self,
+        _member_identity_key_id: &str,
+    ) -> Result<Vec<Community>, FedErr> {
+        Err(fed_stub("list_communities_for_member"))
     }
 }
 
