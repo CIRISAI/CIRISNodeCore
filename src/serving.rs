@@ -81,10 +81,18 @@ pub async fn compute_serving_response<S: BlobStorage + ?Sized>(
                 attestation_ref: None,
             })
         }
-        Ok(Some(BlobBody::External(_))) => ServingResponse::Miss(ContentMiss {
-            sha256: fetch.sha256,
-            reason: MissReason::NotHeld,
-        }),
+        // External refs + chunk-DAG streams (persist 4.4 / edge 1.3
+        // streaming substrate) are not resolvable via the single-shot
+        // ContentFetch wire: External lives in S3/URL; ChunkDag is a
+        // streamed multi-chunk blob served over the chunk-fetch path
+        // (the live_stream Phase 2 surface, NodeCore#26). Both return
+        // NotHeld from this inline-only holder.
+        Ok(Some(BlobBody::External(_) | BlobBody::ChunkDag(_))) => {
+            ServingResponse::Miss(ContentMiss {
+                sha256: fetch.sha256,
+                reason: MissReason::NotHeld,
+            })
+        }
         Ok(None) => ServingResponse::Miss(ContentMiss {
             sha256: fetch.sha256,
             reason: MissReason::NotHeld,
@@ -298,6 +306,106 @@ mod tests {
         > + Send
                + 's {
             async { Ok(ciris_persist::federation::EvictActorReport::default()) }
+        }
+
+        // persist 4.4 (V4_4) + edge 1.3 streaming substrate — chunk-DAG
+        // blob writes, stream STH / Merkle proofs, and delivery
+        // receipts (the live_stream Phase 2 surface, NodeCore#26). Not
+        // exercised by the inline-only compute_serving_response tests;
+        // stubs only.
+        fn put_blob_chunks(
+            &self,
+            _manifest: ciris_persist::federation::ChunkManifest,
+            _chunks: Vec<([u8; 32], BlobBody)>,
+        ) -> impl std::future::Future<Output = Result<(), BlobError>> + Send {
+            async { unimplemented!("not exercised in compute_serving_response tests") }
+        }
+
+        fn put_blob_chunk(
+            &self,
+            _stream_id: &str,
+            _seq: u64,
+            _body: BlobBody,
+            _epoch: u64,
+        ) -> impl std::future::Future<Output = Result<[u8; 32], BlobError>> + Send {
+            async { unimplemented!("not exercised in compute_serving_response tests") }
+        }
+
+        fn seal_stream(
+            &self,
+            _stream_id: &str,
+        ) -> impl std::future::Future<Output = Result<[u8; 32], BlobError>> + Send {
+            async { unimplemented!("not exercised in compute_serving_response tests") }
+        }
+
+        fn put_stream_sth(
+            &self,
+            _sth: ciris_verify_core::transparency::SignedTreeHead,
+            _producer_key_id: &str,
+        ) -> impl std::future::Future<Output = Result<(), BlobError>> + Send {
+            async { unimplemented!("not exercised in compute_serving_response tests") }
+        }
+
+        fn latest_stream_sth(
+            &self,
+            _stream_id: &str,
+        ) -> impl std::future::Future<
+            Output = Result<Option<ciris_verify_core::transparency::SignedTreeHead>, BlobError>,
+        > + Send {
+            async { Ok(None) }
+        }
+
+        fn stream_inclusion_proof(
+            &self,
+            _stream_id: &str,
+            _leaf_index: u64,
+            _tree_size: u64,
+        ) -> impl std::future::Future<
+            Output = Result<Option<ciris_verify_core::transparency::MerkleProof>, BlobError>,
+        > + Send {
+            async { Ok(None) }
+        }
+
+        fn stream_consistency_proof(
+            &self,
+            _stream_id: &str,
+            _from_size: u64,
+            _to_size: u64,
+        ) -> impl std::future::Future<
+            Output = Result<Option<ciris_verify_core::transparency::ConsistencyProof>, BlobError>,
+        > + Send {
+            async { Ok(None) }
+        }
+
+        fn put_delivery_receipt(
+            &self,
+            _receipt: ciris_persist::federation::stream_receipt::DeliveryReceipt,
+        ) -> impl std::future::Future<Output = Result<(), BlobError>> + Send {
+            async { unimplemented!("not exercised in compute_serving_response tests") }
+        }
+
+        fn list_delivery_receipts_for(
+            &self,
+            _stream_id: &str,
+            _limit: i64,
+        ) -> impl std::future::Future<
+            Output = Result<
+                Vec<ciris_persist::federation::stream_receipt::DeliveryReceipt>,
+                BlobError,
+            >,
+        > + Send {
+            async { Ok(Vec::new()) }
+        }
+
+        fn get_blob_range(
+            &self,
+            _sha256: &[u8; 32],
+            _range_start: u64,
+            _range_end_inclusive: u64,
+        ) -> impl std::future::Future<
+            Output = Result<Option<ciris_persist::federation::BlobRange>, BlobError>,
+        > + Send {
+            async { Ok(None) }
         }
     }
 

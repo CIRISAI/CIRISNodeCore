@@ -647,6 +647,17 @@ impl NodeCoreService for MockEngine {
     > + Send {
         async move { Ok(ciris_persist::cirisnode::service::RetireKeyGrantsReport::default()) }
     }
+
+    // persist 4.4 (V064) — stream/epoch-addressed key_grant catch-up
+    // read for the epoch-DEK cascade (live_stream delivery). NodeCore
+    // tests don't exercise the streaming read path; empty stub.
+    fn list_key_grants_for_stream_epoch(
+        &self,
+        _stream_id: &str,
+        _epoch: u64,
+    ) -> impl Future<Output = Result<Vec<ContributionEnvelope>, SubstrateError>> + Send {
+        async move { Ok(Vec::new()) }
+    }
 }
 
 // Convenience alias for the federation directory's error type.
@@ -806,6 +817,23 @@ impl FederationDirectory for MockEngine {
 
     async fn put_attestation(&self, _attestation: SignedAttestation) -> Result<(), FedErr> {
         Err(fed_stub("put_attestation"))
+    }
+
+    // persist 4.4 (V4_4 Shared Attestation Surface, CIRISPersist#171) —
+    // local-tier self-attestation upsert/insert. NodeCore tests touch
+    // only the trust subset; these are stubbed like the rest.
+    async fn attestation_upsert_local(
+        &self,
+        _input: ciris_persist::federation::types::LocalAttestationInput,
+    ) -> Result<String, FedErr> {
+        Err(fed_stub("attestation_upsert_local"))
+    }
+
+    async fn attestation_insert_local(
+        &self,
+        _input: ciris_persist::federation::types::LocalAttestationInput,
+    ) -> Result<String, FedErr> {
+        Err(fed_stub("attestation_insert_local"))
     }
 
     async fn list_attestations_for(

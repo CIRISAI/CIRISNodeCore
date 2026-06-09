@@ -162,6 +162,101 @@ impl BlobStorage for MockBlobStorage {
            + 's {
         async move { Ok(ciris_persist::federation::EvictActorReport::default()) }
     }
+
+    // persist 4.4 + edge 1.3 streaming substrate — chunk-DAG blob
+    // writes, stream STH / Merkle proofs, delivery receipts (live_stream
+    // Phase 2, NodeCore#26). Not exercised by the ingest tests; stubs.
+    fn put_blob_chunks(
+        &self,
+        _manifest: ciris_persist::federation::ChunkManifest,
+        _chunks: Vec<([u8; 32], BlobBody)>,
+    ) -> impl std::future::Future<Output = Result<(), BlobError>> + Send {
+        async { unimplemented!("not exercised in ingest tests") }
+    }
+
+    fn put_blob_chunk(
+        &self,
+        _stream_id: &str,
+        _seq: u64,
+        _body: BlobBody,
+        _epoch: u64,
+    ) -> impl std::future::Future<Output = Result<[u8; 32], BlobError>> + Send {
+        async { unimplemented!("not exercised in ingest tests") }
+    }
+
+    fn seal_stream(
+        &self,
+        _stream_id: &str,
+    ) -> impl std::future::Future<Output = Result<[u8; 32], BlobError>> + Send {
+        async { unimplemented!("not exercised in ingest tests") }
+    }
+
+    fn put_stream_sth(
+        &self,
+        _sth: ciris_verify_core::transparency::SignedTreeHead,
+        _producer_key_id: &str,
+    ) -> impl std::future::Future<Output = Result<(), BlobError>> + Send {
+        async { unimplemented!("not exercised in ingest tests") }
+    }
+
+    fn latest_stream_sth(
+        &self,
+        _stream_id: &str,
+    ) -> impl std::future::Future<
+        Output = Result<Option<ciris_verify_core::transparency::SignedTreeHead>, BlobError>,
+    > + Send {
+        async { Ok(None) }
+    }
+
+    fn stream_inclusion_proof(
+        &self,
+        _stream_id: &str,
+        _leaf_index: u64,
+        _tree_size: u64,
+    ) -> impl std::future::Future<
+        Output = Result<Option<ciris_verify_core::transparency::MerkleProof>, BlobError>,
+    > + Send {
+        async { Ok(None) }
+    }
+
+    fn stream_consistency_proof(
+        &self,
+        _stream_id: &str,
+        _from_size: u64,
+        _to_size: u64,
+    ) -> impl std::future::Future<
+        Output = Result<Option<ciris_verify_core::transparency::ConsistencyProof>, BlobError>,
+    > + Send {
+        async { Ok(None) }
+    }
+
+    fn put_delivery_receipt(
+        &self,
+        _receipt: ciris_persist::federation::stream_receipt::DeliveryReceipt,
+    ) -> impl std::future::Future<Output = Result<(), BlobError>> + Send {
+        async { unimplemented!("not exercised in ingest tests") }
+    }
+
+    fn list_delivery_receipts_for(
+        &self,
+        _stream_id: &str,
+        _limit: i64,
+    ) -> impl std::future::Future<
+        Output = Result<Vec<ciris_persist::federation::stream_receipt::DeliveryReceipt>, BlobError>,
+    > + Send {
+        async { Ok(Vec::new()) }
+    }
+
+    fn get_blob_range(
+        &self,
+        _sha256: &[u8; 32],
+        _range_start: u64,
+        _range_end_inclusive: u64,
+    ) -> impl std::future::Future<
+        Output = Result<Option<ciris_persist::federation::BlobRange>, BlobError>,
+    > + Send {
+        async { Ok(None) }
+    }
 }
 
 fn test_signer() -> Arc<LocalSigner> {

@@ -297,6 +297,15 @@ impl NodeCoreService for SpikeMock {
     ) -> Result<ciris_persist::cirisnode::service::RetireKeyGrantsReport, SubstrateError> {
         Ok(ciris_persist::cirisnode::service::RetireKeyGrantsReport::default())
     }
+
+    // persist 4.4 (V064) — stream/epoch key_grant catch-up read.
+    async fn list_key_grants_for_stream_epoch(
+        &self,
+        _stream_id: &str,
+        _epoch: u64,
+    ) -> Result<Vec<ContributionEnvelope>, SubstrateError> {
+        Ok(Vec::new())
+    }
 }
 
 // ── Contract-fit tests ──────────────────────────────────────────────────
