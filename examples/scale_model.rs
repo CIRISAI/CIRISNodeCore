@@ -130,6 +130,149 @@ const TB: f64 = 1024.0 * GB;
 const PB: f64 = 1024.0 * TB;
 const EB: f64 = 1024.0 * PB;
 
+// ─── Fountain replication model (v0.7) ───────────────────────────────
+//
+// v0.6 and earlier modelled WHOLE-COPY replication: every holder of a
+// content stored the full bytes, and the replication factor was the
+// *emergent* effective trust-set size (effective_R). The v3.8.0→v4.1.x
+// holonomic substrate (CIRISEdge v4.1.1 `holonomic::fountain_defaults` +
+// `swarm_rarity`; CIRISPersist v8.1.0 `FountainContentV1`; CEG 1.0-RC11
+// §19) ships PER-SYMBOL fountain retention instead:
+//
+//   * content is RaptorQ-coded into N source + K repair symbols;
+//   * each holder stores ONE symbol = content_size / N (≈ 5%);
+//   * the swarm converges to a fixed TARGET_HOLDERS H (a policy
+//     constant, NOT a function of trust-set size);
+//   * network overhead = H / N = 1.5× (vs 5× whole-copy → 3.3× better).
+//
+// The replication factor is therefore DECOUPLED from trust radius: the
+// trust graph still decides *who is eligible* to hold, but the *count*
+// of holders is capped at H by active convergence (`should_eject_above_
+// target`). See edge `docs/NETWORK_CAPACITY_MODEL.md` (v4.1.1).
+
+/// Source-symbol count (`fountain_defaults::DEFAULT_N_SOURCE`).
+const N_SOURCE: f64 = 20.0;
+/// Repair-symbol count (`DEFAULT_K_REPAIR`). RaptorQ FEC headroom (~N/4).
+const K_REPAIR: f64 = 6.0;
+/// Target holders per content at convergence (`DEFAULT_TARGET_HOLDERS`).
+/// The §R-policy reference default at q≈0.85 medium churn (CIRISRegistry
+/// #86). Survival-floor sensitive: ~22 at q=0.95 → ~38 at q=0.70 — see
+/// `survival_probability` + `print_fountain_model`. Reference value only;
+/// deployments tune it to their churn.
+const TARGET_HOLDERS: f64 = 30.0;
+/// Min viable symbols = the BLINKING_DOT reconstruction floor
+/// (`DEFAULT_MIN_VIABLE_SYMBOLS`).
+const MIN_VIABLE_SYMBOLS: f64 = 5.0;
+/// Over-target safety margin (`swarm_rarity::EJECT_ABOVE_TARGET_SAFETY_
+/// MARGIN_PCT`). Eject-above-target threshold = H × (1 + S/100) = 34.5.
+const EJECT_SAFETY_MARGIN_PCT: f64 = 15.0;
+/// The pre-v3.10.0 whole-copy overhead the toy used to assume, kept for
+/// the side-by-side efficiency comparison.
+const WHOLE_COPY_OVERHEAD_BASELINE: f64 = 5.0;
+
+/// Per-content network overhead under fountain coding = H / N.
+fn fountain_overhead(h: f64, n: f64) -> f64 {
+    h / n
+}
+
+/// What a single holder stores per content it participates in: one
+/// symbol = 1/N of the content (≈ 5% at defaults).
+fn per_peer_symbol_fraction(n: f64) -> f64 {
+    1.0 / n
+}
+
+/// Distinct-content capacity carryable by `total_disk` bytes at a given
+/// replication `overhead` (whole-copy 5× vs fountain 1.5×).
+fn content_capacity(total_disk: f64, overhead: f64) -> f64 {
+    total_disk / overhead
+}
+
+/// Eject-above-target threshold H × (1 + S/100).
+fn over_target_threshold() -> f64 {
+    TARGET_HOLDERS * (1.0 + EJECT_SAFETY_MARGIN_PCT / 100.0)
+}
+
+/// `P(reconstruction | R holders, N threshold, per-peer availability q)`
+/// = `P(Binomial(R, q) ≥ N)` — the survival floor. Computed via the
+/// binomial pmf summed over the upper tail; integer-rounded `R`.
+fn survival_probability(holders: f64, n_threshold: f64, q: f64) -> f64 {
+    let r = holders.round() as i64;
+    let n = n_threshold.ceil() as i64;
+    if n <= 0 {
+        return 1.0;
+    }
+    if r < n {
+        return 0.0;
+    }
+    // pmf(k) = C(r,k) q^k (1-q)^(r-k), built iteratively from pmf(0).
+    let mut pmf = (1.0 - q).powi(r as i32); // pmf(0)
+    let mut tail = 0.0;
+    for k in 0..=r {
+        if k >= n {
+            tail += pmf;
+        }
+        if k < r {
+            // pmf(k+1) = pmf(k) × (r-k)/(k+1) × q/(1-q)
+            pmf *= ((r - k) as f64) / ((k + 1) as f64) * (q / (1.0 - q).max(1e-12));
+        }
+    }
+    tail.clamp(0.0, 1.0)
+}
+
+// ─── Smart ejection (v0.7 — CEG §19.3 N5 / edge `should_eject_above_target`) ─
+//
+// The active-convergence half of swarm rarity: a proactive trim that
+// drives the swarm toward H holders instead of relying only on reactive
+// rarity bias. The §19.3 N5 guardrail is load-bearing here: a REVOKED
+// content is HARD-deleted (irreversible) — it MUST NOT be tier-shed to a
+// freeable/refetchable tier, or revoked content stays recoverable.
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ConsentState {
+    Live,
+    Revoked,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum EjectionVerdict {
+    /// Irreversible delete — revocation/withdrawal. NEVER refetchable.
+    EjectHardDelete,
+    /// Free a refetchable symbol (DiskPressure tier). Availability-only,
+    /// consent-live content only.
+    EjectToTier,
+    Keep,
+}
+
+/// Port of edge `should_eject_above_target`. `local_symbol_common` =
+/// the local symbol is widely held (rarity gate passed); a rare local
+/// symbol is load-bearing and kept.
+fn should_eject_above_target(
+    holders_observed: f64,
+    consent: ConsentState,
+    local_symbol_common: bool,
+) -> EjectionVerdict {
+    // §19.3 N5: revocation dominates rarity and is HARD-delete, never tier.
+    if consent == ConsentState::Revoked {
+        return EjectionVerdict::EjectHardDelete;
+    }
+    if holders_observed <= over_target_threshold() {
+        return EjectionVerdict::Keep;
+    }
+    // Over target. A rare local symbol is kept ONLY when consent is
+    // confirmed live; unknown consent is fail-secure (loses rare-keep
+    // protection → eject-eligible, but to the freeable tier, not hard
+    // delete, since unknown ≠ revoked).
+    match (consent, local_symbol_common) {
+        (ConsentState::Live, false) => EjectionVerdict::Keep,
+        _ => EjectionVerdict::EjectToTier,
+    }
+}
+
+/// What a holder stores per admitted content under fountain: a symbol.
+/// Replaces the whole-copy assumption in `per_actor`.
+const FOUNTAIN_STORE_FRACTION: f64 = 1.0 / N_SOURCE;
+
 // ─── Environment (energy + CO2) ────────────────────────────────────
 //
 // Numbers are rough; the toy shows the math so anyone can dispute the
@@ -1023,12 +1166,16 @@ fn per_actor(tier: Tier, s: &Scenario) -> ActorCosts {
             let trust_budget = remaining_budget * trust_share_of_remaining;
             let cache_budget = remaining_budget - trust_budget;
 
-            let effective_days = if daily_admitted > 0.0 {
-                trust_budget / daily_admitted
+            // v0.7 fountain: a holder stores a SYMBOL (1/N), not a whole
+            // copy. The disk still fills, but holds N× more distinct
+            // content + retains N× longer; network overhead is H/N=1.5×.
+            let daily_admitted_stored = daily_admitted * FOUNTAIN_STORE_FRACTION;
+            let effective_days = if daily_admitted_stored > 0.0 {
+                trust_budget / daily_admitted_stored
             } else {
                 0.0
             };
-            let admitted_trust_held = (daily_admitted * effective_days).min(trust_budget);
+            let admitted_trust_held = (daily_admitted_stored * effective_days).min(trust_budget);
 
             let cache_hit_rate = (s.cache_hit_rate - 0.1).max(0.1);
             // Inline fetch contributes to bandwidth AND cache; external
@@ -1088,14 +1235,21 @@ fn per_actor(tier: Tier, s: &Scenario) -> ActorCosts {
             let trust_budget = remaining_budget * trust_share_of_remaining;
             let cache_budget = remaining_budget - trust_budget;
 
-            let effective_days = if daily_admitted_plus_traces > 0.0 {
-                trust_budget / daily_admitted_plus_traces
+            // v0.7 fountain: hold a SYMBOL (1/N) per admitted content, not
+            // a whole copy (CEG §19.3 / edge `FountainContentV1`). The disk
+            // still fills, but with N× more distinct content + N× longer
+            // retention; network overhead is H/N=1.5×, not effective_R.
+            let stored_rate = daily_admitted_plus_traces * FOUNTAIN_STORE_FRACTION;
+            let effective_days = if stored_rate > 0.0 {
+                trust_budget / stored_rate
             } else {
                 0.0
             };
-            let admitted_trust_held = (daily_admitted * effective_days).min(trust_budget * 0.85);
+            let admitted_trust_held = (daily_admitted * FOUNTAIN_STORE_FRACTION * effective_days)
+                .min(trust_budget * 0.85);
             let replicated_traces_held =
-                (traces_in_per_day * effective_days).min(trust_budget * 0.15);
+                (traces_in_per_day * FOUNTAIN_STORE_FRACTION * effective_days)
+                    .min(trust_budget * 0.15);
 
             // Cache holds the hot-fetch tail; effective_days for cache
             // is the same since both ride the same eviction sweeper.
@@ -1112,15 +1266,15 @@ fn per_actor(tier: Tier, s: &Scenario) -> ActorCosts {
             // Total verify load: admitted-trust + inline cache misses
             // + own traces. External fetches don't verify in our substrate
             // (publisher's S3 handles its own auth).
-            let verify_envs = (daily_admitted_plus_traces + cache_inbound) / s.avg_envelope_bytes;
-            // Scrub: replicated agent traces (scrubbed at admission).
-            let scrub_bytes = traces_in_per_day;
+            let verify_envs = (stored_rate + cache_inbound) / s.avg_envelope_bytes;
+            // Scrub: replicated agent-trace symbols (scrubbed at admission).
+            let scrub_bytes = traces_in_per_day * FOUNTAIN_STORE_FRACTION;
             // Outbound fanout: own × wide-scope steward set.
             let wide = s.cohort.species + s.cohort.planet + s.cohort.federation;
             let narrow = s.cohort.community + s.cohort.affiliations;
             let fanout = 1.0 + narrow * 4.0 + wide * 64.0;
 
-            let inbound_total = daily_admitted_plus_traces + total_fetch_bw;
+            let inbound_total = stored_rate + total_fetch_bw;
             let traces_total = replicated_traces_held;
             // Bundle traces into the trust slice for storage column.
             (
@@ -2632,19 +2786,177 @@ fn print_fav_findings(s: &Scenario, lat: &LatencyEstimate) {
     println!("  every claim above is conditional on.");
 }
 
-fn main() {
-    println!("CIRIS Federation Scaling Model — toy v0.6 (post Verify Fed TM v1.1)");
-    println!("Empirical baseline : Verify v2.8.0 + Edge v0.10.0 + Persist v3.3.0");
+/// Illustrative populated-locality count for the per-locality coverage
+/// line. Operator parameter in the real model (edge NETWORK_CAPACITY_
+/// MODEL.md); fixed here for the worked example.
+const ILLUSTRATIVE_LOCALITIES: f64 = 10.0;
+
+/// The v0.7 headline: fountain (per-symbol) replication vs the v0.6
+/// whole-copy assumption. Mirrors edge `docs/NETWORK_CAPACITY_MODEL.md`
+/// (v4.1.1) + CEG 1.0-RC11 §19. Federation-disk numbers come from the
+/// passed scenario's tier mix × per-tier budgets.
+fn print_fountain_model(s: &Scenario) {
+    let n_cli = s.n_users * s.tier_mix.client;
+    let n_prx = s.n_users * s.tier_mix.proxy;
+    let n_srv = s.n_users * s.tier_mix.server;
+    let total_disk =
+        n_cli * s.disk_budget_client + n_prx * s.disk_budget_proxy + n_srv * s.disk_budget_server;
+
+    let fountain = fountain_overhead(TARGET_HOLDERS, N_SOURCE);
+    let whole_copy = WHOLE_COPY_OVERHEAD_BASELINE;
+    let efficiency = whole_copy / fountain;
+
+    println!();
+    println!("══ Fountain replication model (v0.7) — {} ══", s.name);
     println!(
-        "Substrate triple   : keyring v4.4.3 + persist v3.6.9 + edge v1.1.3 (Conformance pin)"
+        "  Params: N_source={:.0}  K_repair={:.0}  target_holders H={:.0}  min_viable={:.0}  margin={:.0}%",
+        N_SOURCE, K_REPAIR, TARGET_HOLDERS, MIN_VIABLE_SYMBOLS, EJECT_SAFETY_MARGIN_PCT
     );
+    println!("  (CIRISRegistry#86 §R-policy reference defaults at q≈0.85; tune to your churn)");
+    println!();
+    println!("  Overhead — per-content network storage:");
+    println!(
+        "    whole-copy (v0.6 assumption)   {:.2}×   ({} copies)",
+        whole_copy, whole_copy as u64
+    );
+    println!(
+        "    fountain   (v0.7, H/N)         {:.2}×   ({:.0} symbols × {:.0}% each)",
+        fountain,
+        TARGET_HOLDERS,
+        per_peer_symbol_fraction(N_SOURCE) * 100.0
+    );
+    println!("    → {:.1}× more efficient", efficiency);
+    println!();
+    println!(
+        "  Per-peer load per content   {:.0}% of content_size (one symbol = size/N)",
+        per_peer_symbol_fraction(N_SOURCE) * 100.0
+    );
+    println!(
+        "  Per-locality coverage       H/L = {:.1} holders/locality at L={:.0}  → each locality holds {:.0}% of any content",
+        TARGET_HOLDERS / ILLUSTRATIVE_LOCALITIES,
+        ILLUSTRATIVE_LOCALITIES,
+        (TARGET_HOLDERS / ILLUSTRATIVE_LOCALITIES) * per_peer_symbol_fraction(N_SOURCE) * 100.0
+    );
+    println!();
+    println!(
+        "  Federation distinct-content capacity (total disk {}):",
+        fmt_bytes(total_disk)
+    );
+    println!(
+        "    whole-copy  M·D/{:.1}   {}",
+        whole_copy,
+        fmt_bytes(content_capacity(total_disk, whole_copy))
+    );
+    println!(
+        "    fountain    M·D/{:.1}   {}   ({:.1}× more content, same hardware)",
+        fountain,
+        fmt_bytes(content_capacity(total_disk, fountain)),
+        efficiency
+    );
+    println!();
+    println!("  Degradation tiers (holographic — capacity GROWS under pressure):");
+    println!(
+        "    {:<22} {:>8}  {:>9}  reconstruction",
+        "pressure", "holders", "overhead"
+    );
+    for (label, holders, overhead, recon) in [
+        ("none", 30.0, 1.50, "full (lossless + FEC headroom)"),
+        ("warn (1 GiB free)", 20.0, 1.00, "full (source set)"),
+        ("crit (500 MiB)", 14.0, 0.70, "partial (RaptorQ profile)"),
+        (
+            "stop (200 MiB)",
+            MIN_VIABLE_SYMBOLS,
+            0.25,
+            "EnvelopeOnly threshold",
+        ),
+        ("host-at-risk", 0.0, 0.0, "auditable claim only"),
+    ] {
+        println!(
+            "    {:<22} {:>8.0}  {:>8.2}×  {}",
+            label, holders, overhead, recon
+        );
+    }
+    println!();
+    println!(
+        "  Survival floor — P(reconstruction | {:.0} holders, ≥{:.0} reachable):",
+        TARGET_HOLDERS, N_SOURCE
+    );
+    println!(
+        "    {:<26} {:>14}  {:>10}",
+        "per-peer availability q", "P(reconstruct)", "mean live"
+    );
+    for (q, churn) in [
+        (0.95, "datacenter"),
+        (0.90, "typical wifi"),
+        (0.85, "medium churn (target)"),
+        (0.80, "high churn"),
+        (0.70, "battlefield mesh"),
+    ] {
+        let p = survival_probability(TARGET_HOLDERS, N_SOURCE, q);
+        println!(
+            "    q={:.2} {:<20} {:>13.3}%  {:>10.1}",
+            q,
+            churn,
+            p * 100.0,
+            TARGET_HOLDERS * q
+        );
+    }
+    println!("    design target: 99.95% at q=0.85 (survives ~33% holder loss)");
+    println!();
+    println!(
+        "  Active convergence — should_eject_above_target (eject above H×1.15 = {:.1}):",
+        over_target_threshold()
+    );
+    for (holders, consent, common, note) in [
+        (28.0, ConsentState::Live, true, "at/below target"),
+        (
+            40.0,
+            ConsentState::Live,
+            true,
+            "over-target, common local symbol",
+        ),
+        (
+            40.0,
+            ConsentState::Live,
+            false,
+            "over-target, RARE local (load-bearing)",
+        ),
+        (40.0, ConsentState::Revoked, true, "revoked (§19.3 N5)"),
+        (
+            40.0,
+            ConsentState::Unknown,
+            false,
+            "over-target, unknown consent (fail-secure)",
+        ),
+    ] {
+        let v = should_eject_above_target(holders, consent, common);
+        println!(
+            "    holders={:>4.0}  {:<9?} common={:<5}  → {:<16?} {}",
+            holders, consent, common, v, note
+        );
+    }
+    println!("    §19.3 N5: Revoked ⇒ EjectHardDelete (irreversible; NEVER tier-shed/refetchable)");
+}
+
+fn main() {
+    println!("CIRIS Federation Scaling Model — toy v0.7 (fountain holonomic substrate)");
+    println!(
+        "Empirical baseline : Verify v2.8.0 + Edge v0.10.0 + Persist v3.3.0 (crypto/IO consts)"
+    );
+    println!("Fountain substrate : Edge v4.1.1 + Persist v8.1.0 + Verify v5.8.0 (holonomic / §19)");
     println!("Verify HEAD        : v4.6.0 — Gap C hybrid KEX (X25519+ML-KEM-768) SHIPPED");
     println!("Regional realism   : UN WPP 2024 + GSMA Mobile Economy 2024 + ITU 2024 + IEA 2024");
     println!("Threat-model anchor: CIRISVerify Fed TM v1.1 (2026-05-31 — 3/4 §3.3 gaps closed)");
+    println!(
+        "Network model      : edge docs/NETWORK_CAPACITY_MODEL.md + CEG 1.0-RC11 §19 + #86/#88"
+    );
     println!();
     println!("Discipline:");
-    println!("  • Replication: trust(source) ≥ threshold AND capacity_available");
-    println!("  • Eviction:    popularity(blob) × freshness(blob)");
+    println!("  • Replication: trust(source) ≥ threshold AND capacity — but a holder stores");
+    println!("    a SYMBOL (1/N ≈ 5%), not a whole copy; overhead H/N = 1.5× (was 5×)");
+    println!("  • Convergence: swarm trims to TARGET_HOLDERS via should_eject_above_target");
+    println!("  • Eviction:    popularity × freshness (disk pressure) — revocation HARD-deletes");
+    println!("    and dominates rarity (§19.3 N5); never tier-shed a revoked content");
     println!("  • CEG locality: self/family scope never emits holds_bytes,");
     println!("    structurally undiscoverable, zero inter-host cost");
     println!();
@@ -2658,6 +2970,9 @@ fn main() {
 
     // Sensitivity sweep on the v1 target scenario.
     if let Some(v1) = all_scenarios.iter().find(|s| s.name == "full_internet_v1") {
+        // v0.7 headline — the fountain replication model (1.5× vs 5×).
+        print_fountain_model(v1);
+
         print_cache_sensitivity(v1);
 
         // Environmental footprint comparison at v1 target.
